@@ -1,7 +1,17 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -11,10 +21,16 @@ import (
 )
 
 func loginCmd() *cobra.Command {
+	var web, device bool
+
 	cmd := &cobra.Command{
 		Use:   "login NAME ENDPOINT [TOKEN]",
-		Short: "Configure a server, authenticating via browser if no token is given",
-		Args:  cobra.RangeArgs(2, 3),
+		Short: "Configure a server, authenticating interactively if no token is given",
+		Long: `Saves a server under NAME. With a TOKEN argument it is stored as-is;
+otherwise nimbus authenticates interactively — via the browser when one is
+available (local graphical session), or the device-code flow when not
+(SSH, headless). Force a flow with --web or --device.`,
+		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, endpoint := args[0], args[1]
 
@@ -23,7 +39,7 @@ func loginCmd() *cobra.Command {
 				token = args[2]
 			} else {
 				var err error
-				if token, err = deviceLogin(cmd, endpoint); err != nil {
+				if token, err = interactiveLogin(cmd.Context(), endpoint, web, device); err != nil {
 					return err
 				}
 			}
@@ -44,14 +60,143 @@ func loginCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&web, "web", false, "authenticate in a local browser")
+	cmd.Flags().BoolVar(&device, "device", false, "authenticate with a device code (headless)")
+	cmd.MarkFlagsMutuallyExclusive("web", "device")
 	return cmd
+}
+
+// interactiveLogin picks between the browser (loopback) and device-code
+// flows: an explicit flag wins, otherwise the browser is used whenever this
+// looks like a local graphical session. A browser flow that cannot start
+// falls back to the device flow.
+func interactiveLogin(
+	ctx context.Context,
+	endpoint string,
+	forceWeb, forceDevice bool,
+) (string, error) {
+	useWeb := forceWeb || (!forceDevice && canOpenBrowser())
+
+	if useWeb {
+		token, err := webLogin(ctx, endpoint)
+		if err == nil || forceWeb || !errors.Is(err, errWebUnavailable) {
+			return token, err
+		}
+		fmt.Printf("Browser login unavailable (%v); falling back to a device code.\n\n", err)
+	}
+	return deviceLogin(ctx, endpoint)
+}
+
+// canOpenBrowser reports whether this session can plausibly show a browser.
+func canOpenBrowser() bool {
+	if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_TTY") != "" {
+		return false
+	}
+	switch runtime.GOOS {
+	case "darwin", "windows":
+		return true
+	default:
+		return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+	}
+}
+
+// errWebUnavailable wraps failures that should degrade to the device flow
+// rather than abort the login.
+var errWebUnavailable = errors.New("web login unavailable")
+
+// webLogin runs the loopback flow: a local listener receives the token from
+// the admin app after the user authorizes in their browser.
+func webLogin(ctx context.Context, endpoint string) (string, error) {
+	authCfg, err := api.New(endpoint, "").GetAuthConfig(ctx)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errWebUnavailable, err)
+	}
+	if authCfg.AuthorizeURL == "" {
+		return "", fmt.Errorf("%w: server advertises no browser login", errWebUnavailable)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errWebUnavailable, err)
+	}
+	defer func() { _ = listener.Close() }()
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	stateBytes := make([]byte, 16)
+	if _, err := rand.Read(stateBytes); err != nil {
+		return "", err
+	}
+	state := hex.EncodeToString(stateBytes)
+
+	hostname, _ := os.Hostname()
+	query := url.Values{
+		"port":     {fmt.Sprint(port)},
+		"state":    {state},
+		"label":    {"nimbus CLI"},
+		"hostname": {hostname},
+	}
+	authorizeURL := authCfg.AuthorizeURL + "?" + query.Encode()
+
+	tokens := make(chan string, 1)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/callback" || r.URL.Query().Get("state") != state {
+			http.Error(w, "unexpected callback", http.StatusBadRequest)
+			return
+		}
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			http.Error(w, "missing token", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprint(
+			w,
+			"<html><body><p>✅ nimbus is authorized — you can close this tab.</p></body></html>",
+		)
+		tokens <- token
+	})}
+	go func() { _ = server.Serve(listener) }()
+	defer func() { _ = server.Close() }()
+
+	if err := openBrowser(authorizeURL); err != nil {
+		return "", fmt.Errorf("%w: opening browser: %v", errWebUnavailable, err)
+	}
+	fmt.Printf(
+		"Opened your browser to authorize this device:\n\n    %s\n\nWaiting for authorization (rerun with --device for a headless login)…\n\n",
+		authorizeURL,
+	)
+
+	select {
+	case token := <-tokens:
+		return token, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-time.After(10 * time.Minute):
+		return "", errors.New("browser authorization timed out")
+	}
+}
+
+// openBrowser honors $BROWSER before the platform default opener.
+func openBrowser(target string) error {
+	if browser := os.Getenv("BROWSER"); browser != "" {
+		return exec.Command(browser, target).Start()
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", target).Start()
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", target).Start()
+	default:
+		return exec.Command("xdg-open", target).Start()
+	}
 }
 
 // deviceLogin runs the RFC 8628 device-authorization flow: the user approves
 // the grant in a browser on the admin app while the CLI polls for the token.
-func deviceLogin(cmd *cobra.Command, endpoint string) (string, error) {
+func deviceLogin(ctx context.Context, endpoint string) (string, error) {
 	client := api.New(endpoint, "")
-	grant, err := client.StartDeviceAuth(cmd.Context())
+	grant, err := client.StartDeviceAuth(ctx)
 	if err != nil {
 		return "", fmt.Errorf("starting device authorization: %w", err)
 	}
@@ -63,11 +208,11 @@ func deviceLogin(cmd *cobra.Command, endpoint string) (string, error) {
 	deadline := time.Now().Add(time.Duration(grant.ExpiresIn) * time.Second)
 	for time.Now().Before(deadline) {
 		select {
-		case <-cmd.Context().Done():
-			return "", cmd.Context().Err()
+		case <-ctx.Done():
+			return "", ctx.Err()
 		case <-time.After(interval):
 		}
-		token, err := client.PollDeviceToken(cmd.Context(), grant.DeviceCode)
+		token, err := client.PollDeviceToken(ctx, grant.DeviceCode)
 		if err != nil {
 			return "", err
 		}
@@ -75,5 +220,5 @@ func deviceLogin(cmd *cobra.Command, endpoint string) (string, error) {
 			return token, nil
 		}
 	}
-	return "", fmt.Errorf("device authorization timed out")
+	return "", errors.New("device authorization timed out")
 }

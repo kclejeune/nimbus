@@ -107,13 +107,19 @@ func (c *Config) ResolveCache(ref string) (*CacheRef, error) {
 					serverName = name
 				}
 			} else {
-				return nil, errors.New("no default server configured; use server:cache or run `nimbus login` first")
+				return nil, errors.New(
+					"no default server configured; use server:cache or run `nimbus login` first",
+				)
 			}
 		}
 	}
 	server, ok := c.Servers[serverName]
 	if !ok {
-		return nil, fmt.Errorf("unknown server %q; run `nimbus login %s <endpoint>` first", serverName, serverName)
+		return nil, fmt.Errorf(
+			"unknown server %q; run `nimbus login %s <endpoint>` first",
+			serverName,
+			serverName,
+		)
 	}
 	if cache == "" {
 		return nil, fmt.Errorf("missing cache name in %q", ref)

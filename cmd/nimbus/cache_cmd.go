@@ -38,9 +38,11 @@ func (f *cacheFlags) register(cmd *cobra.Command, includeKeypair bool) {
 	cmd.MarkFlagsMutuallyExclusive("public", "private")
 	cmd.Flags().IntVar(&f.priority, "priority", 0, "substituter priority (lower wins)")
 	cmd.Flags().StringVar(&f.compression, "compression", "", "NAR compression: zstd, gzip, or none")
-	cmd.Flags().IntVar(&f.retentionDays, "retention-days", 0, "expire unused paths after this many days (-1 to disable)")
+	cmd.Flags().
+		IntVar(&f.retentionDays, "retention-days", 0, "expire unused paths after this many days (-1 to disable)")
 	if includeKeypair {
-		cmd.Flags().BoolVar(&f.regenKeypair, "regenerate-keypair", false, "generate a new signing keypair")
+		cmd.Flags().
+			BoolVar(&f.regenKeypair, "regenerate-keypair", false, "generate a new signing keypair")
 	}
 }
 
@@ -117,7 +119,11 @@ func cacheInfoCmd() *cobra.Command {
 			}
 			fmt.Printf("%-13s %s\n", "Cache:", ref.Cache)
 			fmt.Printf("%-13s %s\n", "Visibility:", visibility)
-			fmt.Printf("%-13s %s\n", "Substituter:", strings.TrimRight(info.SubstituterEndpoint, "/"))
+			fmt.Printf(
+				"%-13s %s\n",
+				"Substituter:",
+				strings.TrimRight(info.SubstituterEndpoint, "/"),
+			)
 			fmt.Printf("%-13s %s\n", "Public key:", info.PublicKey)
 			fmt.Printf("%-13s %s\n", "Store dir:", info.StoreDir)
 			fmt.Printf("%-13s %d\n", "Priority:", info.Priority)

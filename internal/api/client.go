@@ -39,7 +39,11 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("%s (HTTP %d)", e.Message, e.Status)
 }
 
-func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+func (c *Client) newRequest(
+	ctx context.Context,
+	method, path string,
+	body io.Reader,
+) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.endpoint+path, body)
 	if err != nil {
 		return nil, err
@@ -112,7 +116,11 @@ func (c *Client) GetCacheInfo(ctx context.Context, cache string) (*CacheInfo, er
 	return info, nil
 }
 
-func (c *Client) GetMissingPaths(ctx context.Context, cache string, hashes []string) ([]string, error) {
+func (c *Client) GetMissingPaths(
+	ctx context.Context,
+	cache string,
+	hashes []string,
+) ([]string, error) {
 	var out struct {
 		MissingPaths []string `json:"missing_paths"`
 	}
@@ -145,7 +153,12 @@ type UploadResult struct {
 // UploadPath uploads a raw NAR with the metadata in the X-Attic-Nar-Info
 // header. size must be the exact NAR size so the server can pick its
 // buffered/streaming strategy.
-func (c *Client) UploadPath(ctx context.Context, info *NarInfo, nar io.Reader, size int64) (*UploadResult, error) {
+func (c *Client) UploadPath(
+	ctx context.Context,
+	info *NarInfo,
+	nar io.Reader,
+	size int64,
+) (*UploadResult, error) {
 	header, err := json.Marshal(info)
 	if err != nil {
 		return nil, err
@@ -174,7 +187,11 @@ type ChunkedUpload struct {
 	ChunkSize int64  `json:"chunk_size"`
 }
 
-func (c *Client) StartChunkedUpload(ctx context.Context, info *NarInfo, narSize int64) (*ChunkedUpload, error) {
+func (c *Client) StartChunkedUpload(
+	ctx context.Context,
+	info *NarInfo,
+	narSize int64,
+) (*ChunkedUpload, error) {
 	out := &ChunkedUpload{}
 	body := map[string]any{"nar_info": info, "nar_size": narSize}
 	if err := c.doJSON(ctx, http.MethodPost, "/_api/v1/upload-path/start", body, out); err != nil {
@@ -184,7 +201,12 @@ func (c *Client) StartChunkedUpload(ctx context.Context, info *NarInfo, narSize 
 }
 
 func (c *Client) UploadChunk(ctx context.Context, token string, part int, data []byte) error {
-	req, err := c.newRequest(ctx, http.MethodPut, "/_api/v1/upload-path/chunk", bytes.NewReader(data))
+	req, err := c.newRequest(
+		ctx,
+		http.MethodPut,
+		"/_api/v1/upload-path/chunk",
+		bytes.NewReader(data),
+	)
 	if err != nil {
 		return err
 	}
@@ -201,7 +223,13 @@ func (c *Client) UploadChunk(ctx context.Context, token string, part int, data [
 func (c *Client) CompleteChunkedUpload(ctx context.Context, token string) (*UploadResult, error) {
 	result := &UploadResult{}
 	body := map[string]any{"upload_token": token}
-	if err := c.doJSON(ctx, http.MethodPost, "/_api/v1/upload-path/complete", body, result); err != nil {
+	if err := c.doJSON(
+		ctx,
+		http.MethodPost,
+		"/_api/v1/upload-path/complete",
+		body,
+		result,
+	); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -209,21 +237,41 @@ func (c *Client) CompleteChunkedUpload(ctx context.Context, token string) (*Uplo
 
 // Cache create/configure bodies are open maps so retention_period can be an
 // explicit JSON null (present = clear, absent = unchanged).
-func (c *Client) CreateCache(ctx context.Context, name string, opts map[string]any) (publicKey string, err error) {
+func (c *Client) CreateCache(
+	ctx context.Context,
+	name string,
+	opts map[string]any,
+) (publicKey string, err error) {
 	var out struct {
 		PublicKey string `json:"public_key"`
 	}
-	if err := c.doJSON(ctx, http.MethodPost, "/_api/v1/cache-config/"+name, opts, &out); err != nil {
+	if err := c.doJSON(
+		ctx,
+		http.MethodPost,
+		"/_api/v1/cache-config/"+name,
+		opts,
+		&out,
+	); err != nil {
 		return "", err
 	}
 	return out.PublicKey, nil
 }
 
-func (c *Client) ConfigureCache(ctx context.Context, name string, opts map[string]any) (publicKey string, err error) {
+func (c *Client) ConfigureCache(
+	ctx context.Context,
+	name string,
+	opts map[string]any,
+) (publicKey string, err error) {
 	var out struct {
 		PublicKey string `json:"public_key"`
 	}
-	if err := c.doJSON(ctx, http.MethodPatch, "/_api/v1/cache-config/"+name, opts, &out); err != nil {
+	if err := c.doJSON(
+		ctx,
+		http.MethodPatch,
+		"/_api/v1/cache-config/"+name,
+		opts,
+		&out,
+	); err != nil {
 		return "", err
 	}
 	return out.PublicKey, nil
@@ -236,6 +284,20 @@ func (c *Client) DestroyCache(ctx context.Context, name string) error {
 func (c *Client) RenameCache(ctx context.Context, name, newName string) error {
 	body := map[string]string{"new_name": newName}
 	return c.doJSON(ctx, http.MethodPost, "/_api/v1/cache-config/"+name+"/rename", body, nil)
+}
+
+// AuthConfig is the public login discovery document.
+type AuthConfig struct {
+	AuthorizeURL          string `json:"authorize_url"`
+	DeviceVerificationURL string `json:"device_verification_url"`
+}
+
+func (c *Client) GetAuthConfig(ctx context.Context) (*AuthConfig, error) {
+	cfg := &AuthConfig{}
+	if err := c.doJSON(ctx, http.MethodGet, "/_api/v1/auth-config", nil, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 // DeviceGrant is the RFC 8628 device-authorization response.

@@ -22,7 +22,7 @@ domain and the Nix binary-cache API on the cache domain, dispatched by host in
 ```bash
 go install github.com/kclejeune/nimbus/cmd/nimbus@latest
 
-nimbus login prod https://cache.example.com            # browser device-auth flow
+nimbus login prod https://cache.example.com            # browser locally, device code over SSH
 nimbus login prod https://cache.example.com <token>    # or paste a token
 nimbus cache create mycache --public --compression zstd
 nimbus use mycache                                     # wire up nix.conf (+ netrc if private)
