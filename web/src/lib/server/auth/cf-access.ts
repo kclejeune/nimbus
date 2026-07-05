@@ -35,8 +35,7 @@ export async function resolveCfAccessUser(
 	if (!teamDomain || !aud) return null;
 
 	const token =
-		event.request.headers.get('Cf-Access-Jwt-Assertion') ??
-		event.cookies.get('CF_Authorization');
+		event.request.headers.get('Cf-Access-Jwt-Assertion') ?? event.cookies.get('CF_Authorization');
 	if (!token) return null;
 
 	let payload: JWTPayload & { email?: string; name?: string };

@@ -45,12 +45,7 @@ export async function mintScopedToken(
 
 /** SQL to record a minted token in `api_token`. Returned as a prepared statement so
  *  callers can run it standalone or inside a batch (e.g. the device-flow approval). */
-export function insertApiToken(
-	db: D1Database,
-	minted: MintedToken,
-	userId: string,
-	name: string
-) {
+export function insertApiToken(db: D1Database, minted: MintedToken, userId: string, name: string) {
 	return db
 		.prepare(
 			`INSERT INTO api_token (id, user_id, name, token_hash, permissions, expires_at, created_at)

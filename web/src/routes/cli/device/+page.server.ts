@@ -48,7 +48,9 @@ export const actions: Actions = {
 		if (!env.JWT_HS256_SECRET_BASE64) return fail(500, { error: 'Token signing not configured.' });
 
 		const form = await request.formData();
-		const userCode = String(form.get('user_code') ?? '').trim().toUpperCase();
+		const userCode = String(form.get('user_code') ?? '')
+			.trim()
+			.toUpperCase();
 		const canPull = form.get('pull') === 'on';
 		const canPush = form.get('push') === 'on';
 		const label = String(form.get('label') ?? 'attic CLI').slice(0, 80);

@@ -24,11 +24,7 @@
 			</p>
 		</div>
 
-		<form
-			method="POST"
-			action="?/authorize"
-			class="space-y-5 rounded-lg border bg-card p-6"
-		>
+		<form method="POST" action="?/authorize" class="space-y-5 rounded-lg border bg-card p-6">
 			<input type="hidden" name="port" value={data.port} />
 			<input type="hidden" name="state" value={data.state} />
 

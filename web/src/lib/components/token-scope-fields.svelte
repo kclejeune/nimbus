@@ -2,10 +2,8 @@
 	import { Label } from '$lib/components/ui/label/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 
-	let {
-		cacheNames,
-		defaultPush = false
-	}: { cacheNames: string[]; defaultPush?: boolean } = $props();
+	let { cacheNames, defaultPush = false }: { cacheNames: string[]; defaultPush?: boolean } =
+		$props();
 </script>
 
 <div class="grid grid-cols-2 gap-4">

@@ -37,7 +37,9 @@
 		padL + (points.length <= 1 ? innerW / 2 : (i / (points.length - 1)) * innerW);
 	const yAt = (v: number) => padT + innerH - (v / max) * innerH;
 
-	const linePath = $derived(points.map((p, i) => `${i ? 'L' : 'M'}${xAt(i)},${yAt(p.value)}`).join(' '));
+	const linePath = $derived(
+		points.map((p, i) => `${i ? 'L' : 'M'}${xAt(i)},${yAt(p.value)}`).join(' ')
+	);
 	const areaPath = $derived(
 		points.length
 			? `${linePath} L${xAt(points.length - 1)},${padT + innerH} L${xAt(0)},${padT + innerH} Z`
@@ -75,7 +77,13 @@
 
 		{#if areaPath}
 			<path d={areaPath} class="fill-primary/12" />
-			<path d={linePath} class="stroke-primary" stroke-width="2" fill="none" stroke-linejoin="round" />
+			<path
+				d={linePath}
+				class="stroke-primary"
+				stroke-width="2"
+				fill="none"
+				stroke-linejoin="round"
+			/>
 		{/if}
 
 		{#each xLabels as l (l.x)}
@@ -94,12 +102,7 @@
 				stroke-width="1"
 			/>
 			<circle cx={xAt(hovered)} cy={yAt(points[hovered].value)} r="4" class="fill-primary" />
-			<circle
-				cx={xAt(hovered)}
-				cy={yAt(points[hovered].value)}
-				r="7"
-				class="fill-primary/20"
-			/>
+			<circle cx={xAt(hovered)} cy={yAt(points[hovered].value)} r="7" class="fill-primary/20" />
 		{/if}
 
 		<!-- hover capture -->
@@ -120,7 +123,7 @@
 		{@const frac = points.length <= 1 ? 0.5 : hovered / (points.length - 1)}
 		<div
 			class="pointer-events-none absolute top-0 -translate-x-1/2 rounded-md border bg-popover px-2.5 py-1.5 text-xs shadow-md"
-			style="left: calc({padL / W * 100}% + {frac} * (100% - {(padL + padR) / W * 100}%))"
+			style="left: calc({(padL / W) * 100}% + {frac} * (100% - {((padL + padR) / W) * 100}%))"
 		>
 			<div class="font-medium">{format(points[hovered].value)}</div>
 			{#if points[hovered].delta}

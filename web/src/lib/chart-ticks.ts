@@ -36,7 +36,8 @@ function addMonths(ms: number, k: number): number {
 function monthTicks(firstMs: number, lastMs: number, maxTicks: number): string[] {
 	const a = new Date(firstMonthOnOrAfter(firstMs));
 	const b = new Date(lastMs);
-	const total = (b.getUTCFullYear() - a.getUTCFullYear()) * 12 + (b.getUTCMonth() - a.getUTCMonth()) + 1;
+	const total =
+		(b.getUTCFullYear() - a.getUTCFullYear()) * 12 + (b.getUTCMonth() - a.getUTCMonth()) + 1;
 	const step = Math.max(1, Math.ceil(total / maxTicks));
 	const out: string[] = [];
 	for (let ms = firstMonthOnOrAfter(firstMs); ms <= lastMs; ms = addMonths(ms, step)) {
