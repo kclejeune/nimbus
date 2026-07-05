@@ -9,7 +9,7 @@ so existing attic clients work today.
 
 ```
 web/   SvelteKit app: the admin UI and the binary-cache API server (one Worker)
-cli/   (planned) dedicated CLI client
+cli/   Go CLI client (cobra + fang): login, use, push, cache admin, watch-store
 ```
 
 The Worker serves two hostnames from one deployment: the admin UI on its app

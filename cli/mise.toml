@@ -1,0 +1,26 @@
+[tools]
+go = "1.26"
+golangci-lint = "2.10"
+
+[env]
+CGO_ENABLED = "0"
+
+[tasks.lint]
+description = "Run linter"
+sources = ["**/*.go", "go.mod", "go.sum"]
+run = ["golangci-lint run --fix"]
+
+[tasks.test]
+description = "Run all tests"
+sources = ["**/*.go", "go.mod", "go.sum"]
+run = ["go test ./..."]
+
+[tasks.build]
+description = "Build the nimbus binary"
+sources = ["**/*.go", "go.mod", "go.sum"]
+outputs = ["build/nimbus"]
+run = ["go build -o build/nimbus ./cmd/nimbus"]
+
+[tasks.check]
+description = "Lint, test, and build"
+depends = ["lint", "test", "build"]
