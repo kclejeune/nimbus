@@ -282,7 +282,12 @@ export async function handleCacheApi(
 	const method = request.method;
 
 	if (segments.length === 0) {
-		return new Response('Attic Worker is running', { status: 200 });
+		// A person in a browser landed on the cache hostname — send them to the
+		// admin UI. Nix and attic clients never send Accept: text/html.
+		if (request.headers.get('Accept')?.includes('text/html')) {
+			return Response.redirect(env.APP_URL ?? 'https://app.cache.kclj.io', 302);
+		}
+		return new Response('nimbus is running', { status: 200 });
 	}
 
 	if (segments[0] === '_api') {
