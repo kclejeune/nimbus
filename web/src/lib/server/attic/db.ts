@@ -155,3 +155,368 @@ export async function isTokenRevoked(db: D1Database, jti: string): Promise<boole
 		.first<{ revoked_at: string | null }>();
 	return row?.revoked_at != null;
 }
+
+// --- Write side (uploads, cache config), mirroring the Rust worker's d1.rs ---
+
+export interface NewNar {
+	state: string;
+	nar_hash: string;
+	nar_size: number;
+	compression: string;
+	num_chunks: number;
+}
+
+export async function createNar(db: D1Database, nar: NewNar): Promise<number> {
+	const result = await db
+		.prepare(
+			'INSERT INTO nar (state, nar_hash, nar_size, compression, num_chunks, ' +
+				'completeness_hint, holders_count, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, ?6)'
+		)
+		.bind(nar.state, nar.nar_hash, nar.nar_size, nar.compression, nar.num_chunks, nowRfc3339())
+		.run();
+	return requireRowId(result, 'nar');
+}
+
+export interface NewChunk {
+	state: string;
+	chunk_hash: string;
+	chunk_size: number;
+	file_hash: string | null;
+	file_size: number | null;
+	compression: string;
+	remote_file: string;
+	remote_file_id: string;
+}
+
+export async function createChunk(db: D1Database, chunk: NewChunk): Promise<number> {
+	const result = await db
+		.prepare(
+			'INSERT INTO chunk (state, chunk_hash, chunk_size, file_hash, file_size, ' +
+				'compression, remote_file, remote_file_id, holders_count, created_at) ' +
+				'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)'
+		)
+		.bind(
+			chunk.state,
+			chunk.chunk_hash,
+			chunk.chunk_size,
+			chunk.file_hash,
+			chunk.file_size,
+			chunk.compression,
+			chunk.remote_file,
+			chunk.remote_file_id,
+			nowRfc3339()
+		)
+		.run();
+	return requireRowId(result, 'chunk');
+}
+
+export async function createChunkRef(
+	db: D1Database,
+	narId: number,
+	seq: number,
+	chunkId: number,
+	chunkHash: string,
+	compression: string
+): Promise<void> {
+	await db
+		.prepare(
+			'INSERT INTO chunkref (nar_id, seq, chunk_id, chunk_hash, compression) ' +
+				'VALUES (?1, ?2, ?3, ?4, ?5)'
+		)
+		.bind(narId, seq, chunkId, chunkHash, compression)
+		.run();
+}
+
+export interface NewObject {
+	cache_id: number;
+	nar_id: number;
+	store_path_hash: string;
+	store_path: string;
+	references: string[];
+	system: string | null;
+	deriver: string | null;
+	sigs: string[];
+	ca: string | null;
+}
+
+export async function createObject(db: D1Database, object: NewObject): Promise<void> {
+	await db
+		.prepare(
+			'INSERT INTO object (cache_id, nar_id, store_path_hash, store_path, ' +
+				'refs, system, deriver, sigs, ca, created_at, created_by) ' +
+				'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL) ' +
+				'ON CONFLICT (cache_id, store_path_hash) DO UPDATE SET nar_id = excluded.nar_id'
+		)
+		.bind(
+			object.cache_id,
+			object.nar_id,
+			object.store_path_hash,
+			object.store_path,
+			JSON.stringify(object.references),
+			object.system,
+			object.deriver,
+			JSON.stringify(object.sigs),
+			object.ca,
+			nowRfc3339()
+		)
+		.run();
+}
+
+export async function updateNarState(db: D1Database, narId: number, state: string): Promise<void> {
+	await db.prepare('UPDATE nar SET state = ?1 WHERE id = ?2').bind(state, narId).run();
+}
+
+/**
+ * Optimistic dedup lock: atomically bump holders_count if it still has the
+ * value we read. Returns the NAR when the CAS wins, null otherwise.
+ */
+export async function tryLockNar(db: D1Database, narHash: string): Promise<NarRow | null> {
+	const nar = await findNarByHash(db, narHash);
+	if (!nar) return null;
+	const current = await db
+		.prepare('SELECT holders_count FROM nar WHERE id = ?1')
+		.bind(nar.id)
+		.first<{ holders_count: number }>();
+	if (!current) return null;
+	const result = await db
+		.prepare(
+			'UPDATE nar SET holders_count = holders_count + 1 WHERE id = ?1 AND holders_count = ?2'
+		)
+		.bind(nar.id, current.holders_count)
+		.run();
+	return (result.meta.changes ?? 0) > 0 ? nar : null;
+}
+
+export async function releaseNarLock(db: D1Database, narId: number): Promise<void> {
+	await db
+		.prepare('UPDATE nar SET holders_count = holders_count - 1 WHERE id = ?1 AND holders_count > 0')
+		.bind(narId)
+		.run();
+}
+
+export interface PendingUploadRow {
+	token: string;
+	cache_id: number;
+	cache_name: string;
+	r2_upload_id: string;
+	r2_key: string;
+	storage_key: string;
+	nar_info: string;
+	expected_nar_size: number;
+	compression: string;
+	parts_uploaded: number;
+	bytes_received: number;
+	uploaded_parts: string;
+}
+
+export async function createPendingUpload(db: D1Database, u: PendingUploadRow): Promise<void> {
+	await db
+		.prepare(
+			'INSERT INTO pending_upload (token, cache_id, cache_name, r2_upload_id, r2_key, ' +
+				'storage_key, nar_info, expected_nar_size, compression, parts_uploaded, ' +
+				"bytes_received, uploaded_parts, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, '[]', ?10)"
+		)
+		.bind(
+			u.token,
+			u.cache_id,
+			u.cache_name,
+			u.r2_upload_id,
+			u.r2_key,
+			u.storage_key,
+			u.nar_info,
+			u.expected_nar_size,
+			u.compression,
+			nowRfc3339()
+		)
+		.run();
+}
+
+export async function getPendingUpload(
+	db: D1Database,
+	token: string
+): Promise<PendingUploadRow | null> {
+	return db.prepare('SELECT * FROM pending_upload WHERE token = ?1').bind(token).first();
+}
+
+export async function updatePendingUpload(
+	db: D1Database,
+	token: string,
+	partsUploaded: number,
+	bytesReceived: number,
+	uploadedParts: string
+): Promise<void> {
+	await db
+		.prepare(
+			'UPDATE pending_upload SET parts_uploaded = ?1, bytes_received = ?2, uploaded_parts = ?3 WHERE token = ?4'
+		)
+		.bind(partsUploaded, bytesReceived, uploadedParts, token)
+		.run();
+}
+
+export async function deletePendingUpload(db: D1Database, token: string): Promise<void> {
+	await db.prepare('DELETE FROM pending_upload WHERE token = ?1').bind(token).run();
+}
+
+export interface CacheUpdate {
+	is_public?: boolean;
+	priority?: number;
+	compression?: string;
+	/** undefined = leave unchanged; null = clear. */
+	retention_period?: number | null;
+	upstream_cache_key_names?: string[];
+	keypair?: string;
+}
+
+export async function updateCache(
+	db: D1Database,
+	name: string,
+	update: CacheUpdate
+): Promise<void> {
+	const sets: string[] = [];
+	const params: unknown[] = [];
+	const push = (column: string, value: unknown) => {
+		sets.push(`${column} = ?${params.length + 1}`);
+		params.push(value);
+	};
+	if (update.is_public !== undefined) push('is_public', update.is_public ? 1 : 0);
+	if (update.priority !== undefined) push('priority', update.priority);
+	if (update.compression !== undefined) push('compression', update.compression);
+	if ('retention_period' in update) push('retention_period', update.retention_period ?? null);
+	if (update.upstream_cache_key_names !== undefined)
+		push('upstream_cache_key_names', JSON.stringify(update.upstream_cache_key_names));
+	if (update.keypair !== undefined) push('keypair', update.keypair);
+	if (sets.length === 0) return;
+
+	params.push(name);
+	await db
+		.prepare(
+			`UPDATE cache SET ${sets.join(', ')} WHERE name = ?${params.length} AND deleted_at IS NULL`
+		)
+		.bind(...params)
+		.run();
+}
+
+export interface NewCache {
+	name: string;
+	keypair: string;
+	is_public: boolean;
+	store_dir: string;
+	priority: number;
+	compression: string;
+	retention_period: number | null;
+}
+
+export async function createCacheRow(db: D1Database, cache: NewCache): Promise<void> {
+	await db
+		.prepare(
+			'INSERT INTO cache (name, keypair, is_public, store_dir, priority, ' +
+				"upstream_cache_key_names, compression, created_at) VALUES (?1, ?2, ?3, ?4, ?5, '[]', ?6, ?7) " +
+				'ON CONFLICT (name) DO NOTHING'
+		)
+		.bind(
+			cache.name,
+			cache.keypair,
+			cache.is_public ? 1 : 0,
+			cache.store_dir,
+			cache.priority,
+			cache.compression,
+			nowRfc3339()
+		)
+		.run();
+	if (cache.retention_period != null) {
+		await db
+			.prepare('UPDATE cache SET retention_period = ?1 WHERE name = ?2')
+			.bind(cache.retention_period, cache.name)
+			.run();
+	}
+}
+
+/** Soft-delete; returns false when no live cache matched. */
+export async function softDeleteCache(db: D1Database, name: string): Promise<boolean> {
+	const result = await db
+		.prepare('UPDATE cache SET deleted_at = ?1 WHERE name = ?2 AND deleted_at IS NULL')
+		.bind(nowRfc3339(), name)
+		.run();
+	return (result.meta.changes ?? 0) > 0;
+}
+
+export type RenameOutcome = 'renamed' | 'not_found' | 'conflict';
+
+export async function renameCacheRow(
+	db: D1Database,
+	oldName: string,
+	newName: string
+): Promise<RenameOutcome> {
+	const taken = await db
+		.prepare('SELECT 1 AS x FROM cache WHERE name = ?1 AND deleted_at IS NULL')
+		.bind(newName)
+		.first();
+	if (taken) return 'conflict';
+	const result = await db
+		.prepare('UPDATE cache SET name = ?1 WHERE name = ?2 AND deleted_at IS NULL')
+		.bind(newName, oldName)
+		.run();
+	return (result.meta.changes ?? 0) > 0 ? 'renamed' : 'not_found';
+}
+
+/** Hard-remove a soft-deleted tombstone so its name can be reused. */
+export async function purgeDeletedCache(db: D1Database, name: string): Promise<void> {
+	for (const sql of [
+		'DELETE FROM object_ref WHERE object_id IN (SELECT o.id FROM object o ' +
+			'JOIN cache c ON c.id = o.cache_id WHERE c.name = ?1 AND c.deleted_at IS NOT NULL)',
+		'DELETE FROM gc_root WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
+		'DELETE FROM object WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
+		'DELETE FROM pending_upload WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
+		'DELETE FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL'
+	]) {
+		await db.prepare(sql).bind(name).run();
+	}
+}
+
+export interface DeviceAuthRow {
+	device_code: string;
+	user_code: string;
+	status: string;
+	token: string | null;
+	expires_at: number;
+}
+
+export async function createDeviceAuth(
+	db: D1Database,
+	deviceCode: string,
+	userCode: string,
+	expiresAt: number
+): Promise<void> {
+	await db
+		.prepare(
+			"INSERT INTO device_auth (device_code, user_code, status, created_at, expires_at) VALUES (?1, ?2, 'pending', ?3, ?4)"
+		)
+		.bind(deviceCode, userCode, Math.floor(Date.now() / 1000), expiresAt)
+		.run();
+}
+
+export async function findDeviceAuth(
+	db: D1Database,
+	deviceCode: string
+): Promise<DeviceAuthRow | null> {
+	return db
+		.prepare(
+			'SELECT device_code, user_code, status, token, expires_at FROM device_auth WHERE device_code = ?1'
+		)
+		.bind(deviceCode)
+		.first();
+}
+
+export async function deleteDeviceAuth(db: D1Database, deviceCode: string): Promise<void> {
+	await db.prepare('DELETE FROM device_auth WHERE device_code = ?1').bind(deviceCode).run();
+}
+
+function nowRfc3339(): string {
+	return new Date().toISOString();
+}
+
+function requireRowId(result: { meta: { last_row_id?: number } }, what: string): number {
+	const id = result.meta.last_row_id;
+	if (id === undefined || id === null) throw new Error(`No row id returned inserting ${what}`);
+	return id;
+}
