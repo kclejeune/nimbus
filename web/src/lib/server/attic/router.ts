@@ -1,8 +1,16 @@
-// Request router for the attic binary-cache API, served from the SvelteKit
-// worker when the request arrives on the cache hostname. Ported routes are
-// handled natively in TypeScript; everything else proxies to the Rust
-// attic-worker over the service binding until its port lands.
+// Request router for the attic binary-cache API, dispatched from
+// worker-entry.ts when a request arrives on the cache hostname. Fully native
+// TypeScript — the legacy Rust worker is no longer involved.
 
+import {
+	CacheConfigError,
+	cacheInfo,
+	configureCache,
+	createCache,
+	destroyCache,
+	renameCache
+} from './cache-config';
+import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import * as db from './db';
 import { maybeSizeTriggeredGc, runGc } from './gc';
 import { filterUpstreamPaths, findExistingPaths, parseUpstreams } from './missing-paths';
@@ -15,6 +23,12 @@ import {
 	type Permission,
 	type VerifiedToken
 } from './token';
+import {
+	handleCompleteChunked,
+	handleStartChunked,
+	handleUploadChunk,
+	handleUploadPath
+} from './upload';
 
 type Env = App.Platform['env'];
 type ExecutionContext = App.Platform['ctx'];
@@ -24,11 +38,6 @@ function errorResponse(status: number, message: string): Response {
 		status,
 		headers: { 'Content-Type': 'application/json' }
 	});
-}
-
-/** Proxy an unported route to the Rust attic-worker service binding. */
-function proxyToWorker(request: Request, env: Env): Promise<Response> {
-	return env.ATTIC_API.fetch(request as never) as unknown as Promise<Response>;
 }
 
 async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedToken | null> {
@@ -267,10 +276,171 @@ async function handleGcTrigger(request: Request, env: Env, url: URL): Promise<Re
 	});
 }
 
+/** Require an authenticated token; returns a Response on failure. */
+async function requireToken(
+	request: Request,
+	env: Env
+): Promise<{ token: VerifiedToken } | { response: Response }> {
+	try {
+		const token = await verifyRequestToken(request, env);
+		if (!token) return { response: errorResponse(401, 'No token provided') };
+		return { token };
+	} catch (e) {
+		return { response: errorResponse(401, `Authentication failed: ${e}`) };
+	}
+}
+
+function statusOf(e: unknown): { status: number; message: string } {
+	if (e instanceof CacheConfigError) return { status: e.status, message: e.message };
+	return { status: 500, message: `${e}` };
+}
+
+/** /_api/v1/cache-config/:cache[/rename] and the upload endpoints. */
+async function handleV1(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	url: URL,
+	segments: string[]
+): Promise<Response> {
+	const method = request.method;
+	const route = segments[2];
+
+	// Unauthenticated discovery endpoints.
+	if (method === 'GET' && route === 'auth-config' && segments.length === 3) {
+		return handleAuthConfig(env);
+	}
+	if (method === 'POST' && route === 'cli' && segments.length === 4) {
+		if (segments[3] === 'device') return handleDeviceStart(env);
+		if (segments[3] === 'token') {
+			const body = await (request.json() as Promise<{ device_code?: string }>).catch(() => null);
+			if (!body?.device_code) return errorResponse(400, 'Missing device_code');
+			return handleDeviceToken(env, body.device_code);
+		}
+	}
+	if (method === 'GET' && route === 'cache-config' && segments.length === 4) {
+		try {
+			return jsonResponse(await cacheInfo(env, segments[3], apiBase(env, url)));
+		} catch (e) {
+			const { status, message } = statusOf(e);
+			return errorResponse(status, message);
+		}
+	}
+
+	if (method === 'POST' && route === 'get-missing-paths' && segments.length === 3) {
+		return handleGetMissingPaths(request, env);
+	}
+	if (method === 'POST' && route === 'gc' && segments.length === 3) {
+		return handleGcTrigger(request, env, url);
+	}
+
+	// Everything below requires a token.
+	const auth = await requireToken(request, env);
+	if ('response' in auth) return auth.response;
+	const token = auth.token;
+	const canPush = (cacheName: string) => permissionForCache(token, cacheName).push;
+
+	if (route === 'upload-path') {
+		let response: Response;
+		if (method === 'PUT' && segments.length === 3) {
+			response = await handleUploadPath(request, env, canPush);
+		} else if (method === 'POST' && segments[3] === 'start' && segments.length === 4) {
+			const body = await (request.json() as Promise<{ nar_info?: never; nar_size?: number }>).catch(
+				() => null
+			);
+			if (!body || !body.nar_info || typeof body.nar_size !== 'number') {
+				return errorResponse(400, 'Invalid request body');
+			}
+			const info = body.nar_info as import('./upload').UploadNarInfo;
+			if (!canPush(info.cache)) return errorResponse(403, 'Permission denied: push');
+			response = await handleStartChunked(env, { nar_info: info, nar_size: body.nar_size });
+		} else if (method === 'PUT' && segments[3] === 'chunk' && segments.length === 4) {
+			response = await handleUploadChunk(request, env, canPush);
+		} else if (method === 'POST' && segments[3] === 'complete' && segments.length === 4) {
+			const body = await (request.json() as Promise<{ upload_token?: string }>).catch(() => null);
+			if (!body?.upload_token) return errorResponse(400, 'Missing upload_token');
+			response = await handleCompleteChunked(env, body.upload_token, canPush);
+		} else {
+			return errorResponse(404, 'Not found');
+		}
+
+		// Uploads grow storage: after one lands, check size budgets out-of-band
+		// (debounced in maybeSizeTriggeredGc) instead of waiting for the cron.
+		if (ctx && response.ok) ctx.waitUntil(maybeSizeTriggeredGc(env));
+		return response;
+	}
+
+	if (route === 'cache-config' && (segments.length === 4 || segments.length === 5)) {
+		const cacheName = segments[3];
+		const permission = permissionForCache(token, cacheName);
+		try {
+			if (method === 'POST' && segments.length === 4) {
+				if (!permission.createCache) return errorResponse(403, 'Permission denied: create cache');
+				const body = await (request.json() as Promise<Record<string, unknown>>).catch(() => ({}));
+				const { public_key } = await createCache(
+					env,
+					cacheName,
+					(body ?? {}) as import('./cache-config').CreateCacheOptions
+				);
+				return jsonResponse({ name: cacheName, created: true, public_key });
+			}
+			if (method === 'PATCH' && segments.length === 4) {
+				if (!permission.configureCache && !permission.createCache) {
+					return errorResponse(403, 'Permission denied: requires configure or create cache');
+				}
+				const body = await (request.json() as Promise<Record<string, unknown>>).catch(() => null);
+				if (!body) return errorResponse(400, 'Invalid JSON');
+				const result = await configureCache(
+					env,
+					cacheName,
+					body as import('./cache-config').ConfigureCacheOptions
+				);
+				return jsonResponse({ name: cacheName, updated: true, ...result });
+			}
+			if (method === 'DELETE' && segments.length === 4) {
+				if (!permission.destroyCache) return errorResponse(403, 'Permission denied: destroy cache');
+				await destroyCache(env, cacheName);
+				return jsonResponse({ name: cacheName, deleted: true });
+			}
+			if (method === 'POST' && segments[4] === 'rename') {
+				const body = await (request.json() as Promise<{ new_name?: string }>).catch(() => null);
+				if (!body?.new_name) return errorResponse(400, 'Missing new_name');
+				// Renaming is a configure on the source and a create on the target.
+				if (!permission.configureCache && !permission.createCache) {
+					return errorResponse(403, 'Permission denied: requires configure or create cache');
+				}
+				if (!permissionForCache(token, body.new_name).createCache) {
+					return errorResponse(403, 'Permission denied for target name');
+				}
+				await renameCache(env, cacheName, body.new_name);
+				return jsonResponse({ name: body.new_name, renamed_from: cacheName, renamed: true });
+			}
+		} catch (e) {
+			const { status, message } = statusOf(e);
+			return errorResponse(status, message);
+		}
+	}
+
+	return errorResponse(404, 'Not found');
+}
+
+/** Public base URL for API/substituter endpoints in cache-info responses.
+ * CACHE_BASE_URL wins over the request origin: local dev rewrites the Host
+ * header to the custom domain, which clients cannot reach. */
+function apiBase(env: Env, url: URL): string {
+	return (env.CACHE_BASE_URL ?? url.origin).replace(/\/+$/, '');
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+	return new Response(JSON.stringify(body), {
+		status,
+		headers: { 'Content-Type': 'application/json' }
+	});
+}
+
 /**
- * Handle a request addressed to the cache API host. Returns a Response for
- * every request — natively for ported routes, via the service-binding proxy
- * for the rest (v1 API, uploads).
+ * Handle a request addressed to the cache API host. Fully native — the
+ * binary-cache protocol, the attic v1 API, and CLI auth all run in-process.
  */
 export async function handleCacheApi(
 	request: Request,
@@ -291,29 +461,24 @@ export async function handleCacheApi(
 	}
 
 	if (segments[0] === '_api') {
-		if (method === 'POST' && segments[1] === 'v1' && segments.length === 3) {
-			if (segments[2] === 'get-missing-paths') return handleGetMissingPaths(request, env);
-			if (segments[2] === 'gc') return handleGcTrigger(request, env, url);
+		if (segments[1] === 'v1' && segments.length >= 3) {
+			return handleV1(request, env, ctx, url, segments);
 		}
-		// The rest of the v1 API (uploads, cache config, CLI auth) is not ported yet.
-		const response = await proxyToWorker(request, env);
-
-		// Uploads grow storage: after one lands, check size budgets out-of-band
-		// (debounced in maybeSizeTriggeredGc) instead of waiting for the cron.
-		const isUpload =
-			segments[1] === 'v1' &&
-			segments[2] === 'upload-path' &&
-			(segments.length === 3 || segments[3] === 'complete');
-		if (ctx && isUpload && response.ok) {
-			ctx.waitUntil(maybeSizeTriggeredGc(env));
-		}
-		return response;
+		return errorResponse(404, 'Not found');
 	}
 
 	if ((method === 'GET' || method === 'HEAD') && segments.length === 2) {
 		const [cacheName, rest] = segments;
 		if (rest === 'nix-cache-info') {
 			return handleNixCacheInfo(request, env, cacheName, method === 'HEAD');
+		}
+		if (rest === 'attic-cache-info') {
+			try {
+				return jsonResponse(await cacheInfo(env, cacheName, apiBase(env, url)));
+			} catch (e) {
+				const { status, message } = statusOf(e);
+				return errorResponse(status, message);
+			}
 		}
 		if (rest.endsWith('.narinfo')) {
 			return handleNarInfo(request, env, ctx, cacheName, rest, method === 'HEAD');
@@ -324,5 +489,5 @@ export async function handleCacheApi(
 		return handleNar(request, env, segments[0], segments[2], method === 'HEAD');
 	}
 
-	return proxyToWorker(request, env);
+	return errorResponse(404, 'Not found');
 }

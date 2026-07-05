@@ -73,8 +73,7 @@
 					class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
 				>
 					<option value="zstd">zstd</option>
-					<option value="br">brotli</option>
-					<option value="xz">xz</option>
+					<option value="gzip">gzip</option>
 					<option value="none">none</option>
 				</select>
 			</div>

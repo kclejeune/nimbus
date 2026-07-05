@@ -1,5 +1,10 @@
 import { error, fail, redirect } from '@sveltejs/kit';
-import { atticFetch, adminAccess } from '$lib/server/attic-api';
+import {
+	CacheConfigError,
+	configureCache,
+	destroyCache,
+	renameCache
+} from '$lib/server/attic/cache-config';
 import { listGcRoots } from '$lib/server/attic/gc';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { PageServerLoad, Actions } from './$types';
@@ -105,25 +110,16 @@ export const actions: Actions = {
 			return fail(400, { error: 'Upstream caches must be http(s) URLs, one per line.' });
 		}
 
-		// Fields the attic API knows about go through it (validation, audit);
-		// the retention/upstream extensions are admin-owned columns.
-		const res = await atticFetch(
-			platform.env,
-			{ userId: locals.user.id, caches: adminAccess() },
-			`/_api/v1/cache-config/${encodeURIComponent(params.name)}`,
-			{
-				method: 'PATCH',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({
-					is_public: isPublic,
-					priority,
-					compression,
-					retention_period: retention
-				})
-			}
-		);
-		if (!res.ok) {
-			return fail(502, { error: `Failed to save: ${await res.text()}` });
+		try {
+			await configureCache(platform.env, params.name, {
+				is_public: isPublic,
+				priority,
+				compression,
+				retention_period: retention
+			});
+		} catch (e) {
+			const status = e instanceof CacheConfigError ? e.status : 502;
+			return fail(status, { error: `Failed to save: ${e instanceof Error ? e.message : e}` });
 		}
 
 		await platform.env.ATTIC_DB.prepare(
@@ -198,24 +194,15 @@ export const actions: Actions = {
 			return fail(400, { renameError: 'That is already the cache name.' });
 		}
 
-		const res = await atticFetch(
-			platform.env,
-			{ userId: locals.user.id, caches: adminAccess() },
-			`/_api/v1/cache-config/${encodeURIComponent(params.name)}/rename`,
-			{
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ new_name: newName })
-			}
-		);
-
-		if (!res.ok) {
-			const detail = await res.text();
-			return fail(res.status === 409 ? 409 : 502, {
+		try {
+			await renameCache(platform.env, params.name, newName);
+		} catch (e) {
+			const status = e instanceof CacheConfigError ? e.status : 502;
+			return fail(status, {
 				renameError:
-					res.status === 409
+					status === 409
 						? `A cache named "${newName}" already exists.`
-						: `Failed to rename: ${detail}`
+						: `Failed to rename: ${e instanceof Error ? e.message : e}`
 			});
 		}
 
@@ -226,15 +213,10 @@ export const actions: Actions = {
 		if (!locals.user) throw error(401, 'Not signed in');
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 
-		const res = await atticFetch(
-			platform.env,
-			{ userId: locals.user.id, caches: adminAccess() },
-			`/_api/v1/cache-config/${encodeURIComponent(params.name)}`,
-			{ method: 'DELETE' }
-		);
-
-		if (!res.ok) {
-			return fail(502, { deleteError: `Failed to delete: ${await res.text()}` });
+		try {
+			await destroyCache(platform.env, params.name);
+		} catch (e) {
+			return fail(502, { deleteError: `Failed to delete: ${e instanceof Error ? e.message : e}` });
 		}
 
 		redirect(303, '/caches');

@@ -1,5 +1,5 @@
 import { fail, redirect, error } from '@sveltejs/kit';
-import { atticFetch, adminAccess } from '$lib/server/attic-api';
+import { CacheConfigError, createCache } from '$lib/server/attic/cache-config';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { Actions } from './$types';
 
@@ -23,29 +23,20 @@ export const actions: Actions = {
 			});
 		}
 
-		const res = await atticFetch(
-			platform.env,
-			{ userId: locals.user.id, caches: adminAccess() },
-			`/_api/v1/cache-config/${encodeURIComponent(name)}`,
-			{
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({
-					is_public: isPublic,
-					priority,
-					compression,
-					retention_period: retention
-				})
-			}
-		);
-
-		if (!res.ok) {
-			const detail = await res.text();
-			return fail(res.status === 409 ? 409 : 502, {
+		try {
+			await createCache(platform.env, name, {
+				is_public: isPublic,
+				priority,
+				compression,
+				retention_period: retention
+			});
+		} catch (e) {
+			const status = e instanceof CacheConfigError ? e.status : 502;
+			return fail(status, {
 				error:
-					res.status === 409
+					status === 409
 						? `A cache named "${name}" already exists.`
-						: `Failed to create cache: ${detail}`,
+						: `Failed to create cache: ${e instanceof Error ? e.message : e}`,
 				values: { name, isPublic, priority, compression, retentionRaw }
 			});
 		}

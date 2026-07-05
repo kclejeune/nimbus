@@ -9,8 +9,9 @@ One Cloudflare Worker serving both halves of nimbus:
   garbage collection. Served on the cache hostname (`cache.kclj.io`), dispatched
   by host in `src/hooks.server.ts` before SvelteKit routing.
 
-Endpoints not yet ported from the legacy Rust worker (uploads, cache-config,
-CLI auth) proxy through the `ATTIC_API` service binding.
+The entire protocol runs natively: narinfo/NAR serving, uploads with
+server-side compression (zstd via WASM, gzip, none — brotli/xz NARs remain
+readable), the chunked >100MB protocol, cache config, and CLI device auth.
 
 ## Structure
 
@@ -31,7 +32,8 @@ worker-entry.ts         deploy entry: SvelteKit worker + scheduled GC handler
 npm install
 npm run check        # svelte-check
 npm run build        # vite build + Cloudflare adapter (writes .svelte-kit/cloudflare)
-npx wrangler dev     # local worker with local D1/R2 (.dev.vars for secrets)
+npx wrangler dev --host localhost:8788   # --host defeats the custom-domain Host rewrite
+                                         # (.dev.vars: secrets + CACHE_BASE_URL=http://localhost:8788)
 ```
 
 The adapter writes its generated worker to the `main` of `wrangler.adapter.jsonc`;

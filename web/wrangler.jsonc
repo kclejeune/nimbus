@@ -52,15 +52,6 @@
     }
   ],
 
-  // Service binding to the attic API worker. Admin data operations that already
-  // have server-side logic (cache config, permissions) are proxied here
-  // server-to-server, so the browser never talks to the API directly.
-  "services": [
-    {
-      "binding": "ATTIC_API",
-      "service": "attic-worker"
-    }
-  ]
 
   // Secrets (set via `wrangler secret put`):
   // - JWT_HS256_SECRET_BASE64: same HMAC secret the attic worker validates with;
