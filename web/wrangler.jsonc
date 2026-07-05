@@ -1,0 +1,78 @@
+{
+  "name": "attic-admin",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Custom entry wrapping the adapter-cloudflare output (_worker.js in
+  // .svelte-kit/cloudflare) to add the scheduled GC handler.
+  "main": "worker-entry.ts",
+  "assets": {
+    "binding": "ASSETS",
+    "directory": ".svelte-kit/cloudflare"
+  },
+  "observability": { "enabled": true },
+
+  // Nightly garbage collection (closure-aware retention, orphan reaping).
+  "triggers": { "crons": ["0 3 * * *"] },
+
+  // Custom domains: Cloudflare provisions the DNS records and edge
+  // certificates automatically on deploy. app.* serves the admin UI;
+  // cache.kclj.io is dispatched to the attic binary-cache API by
+  // hooks.server.ts (host match against CACHE_BASE_URL). Both MUST be
+  // declared here — wrangler removes domains not present in this config.
+  "routes": [
+    { "pattern": "app.cache.kclj.io", "custom_domain": true },
+    { "pattern": "cache.kclj.io", "custom_domain": true }
+  ],
+
+  "vars": {
+    "APP_URL": "https://app.cache.kclj.io",
+    "CACHE_BASE_URL": "https://cache.kclj.io",
+    "CF_ACCESS_TEAM_DOMAIN": "https://kclejeune.cloudflareaccess.com",
+    "CF_ACCESS_AUD": "623b56c404ad5907aad2ee0e6255d7c88f6e9aecf64ee2aca77090153c115217"
+  },
+
+  // NAR/chunk storage, shared with the attic API worker — needed by the
+  // in-process binary-cache read path (served when requests arrive on the
+  // cache hostname).
+  "r2_buckets": [
+    {
+      "binding": "CACHE_BUCKET",
+      "bucket_name": "attic-cache"
+    }
+  ],
+
+  // Shared D1 database with the attic API worker. The admin app owns the
+  // user/api_token/session/audit_log tables; the attic worker owns cache/nar/etc.
+  "d1_databases": [
+    {
+      "binding": "ATTIC_DB",
+      "database_name": "attic",
+      "database_id": "872ceec3-5438-4069-b3fa-69fbb66dd011"
+    }
+  ],
+
+  // Service binding to the attic API worker. Admin data operations that already
+  // have server-side logic (cache config, permissions) are proxied here
+  // server-to-server, so the browser never talks to the API directly.
+  "services": [
+    {
+      "binding": "ATTIC_API",
+      "service": "attic-worker"
+    }
+  ]
+
+  // Secrets (set via `wrangler secret put`):
+  // - JWT_HS256_SECRET_BASE64: same HMAC secret the attic worker validates with;
+  //   used here to mint short-lived attic JWTs for service-binding API calls.
+  // - OIDC_CLIENT_SECRET: confidential-client secret for the OIDC token exchange.
+  // - SESSION_SECRET: HMAC key for signing session cookies.
+  //
+  // Vars (set in [vars] or the dashboard):
+  // - OIDC_ISSUER: OIDC discovery issuer URL (e.g. https://auth.example.com).
+  // - OIDC_CLIENT_ID: OIDC client id.
+  // - OIDC_REDIRECT_URI: this app's callback URL.
+  // - CF_ACCESS_TEAM_DOMAIN: e.g. https://kclejeune.cloudflareaccess.com (enables
+  //   the Cloudflare Access auth path).
+  // - CF_ACCESS_AUD: the Access application AUD tag.
+}

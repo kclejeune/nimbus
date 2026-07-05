@@ -1,0 +1,15 @@
+{
+  // Build-time config consumed ONLY by @sveltejs/adapter-cloudflare (see
+  // vite.config.ts), which writes its generated worker to `main`. The real
+  // deploy config (wrangler.jsonc) points `main` at worker-entry.ts, which
+  // wraps this generated bundle to add the scheduled GC handler — the adapter
+  // must not overwrite that shim.
+  "name": "attic-admin",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": ".svelte-kit/cloudflare/_worker.js",
+  "assets": {
+    "binding": "ASSETS",
+    "directory": ".svelte-kit/cloudflare"
+  }
+}

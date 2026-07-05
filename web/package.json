@@ -1,0 +1,56 @@
+{
+	"name": "nimbus-web",
+	"private": true,
+	"version": "0.0.1",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"lint": "prettier --check .",
+		"format": "prettier --write ."
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^4.20250101.0",
+		"@internationalized/date": "^3.12.2",
+		"@lucide/svelte": "^1.23.0",
+		"@sveltejs/adapter-cloudflare": "^7.2.0",
+		"@sveltejs/kit": "^2.63.0",
+		"@sveltejs/vite-plugin-svelte": "^7.1.2",
+		"@tailwindcss/forms": "^0.5.11",
+		"@tailwindcss/typography": "^0.5.19",
+		"@tailwindcss/vite": "^4.3.0",
+		"bits-ui": "^2.18.1",
+		"drizzle-kit": "^0.31.10",
+		"prettier": "^3.8.3",
+		"prettier-plugin-svelte": "^4.1.0",
+		"prettier-plugin-tailwindcss": "^0.8.0",
+		"svelte": "^5.56.1",
+		"svelte-check": "^4.6.0",
+		"tailwindcss": "^4.3.0",
+		"typescript": "^6.0.3",
+		"vite": "^8.0.16",
+		"wrangler": "^4.0.0"
+	},
+	"allowScripts": {
+		"esbuild@0.28.1": true,
+		"sharp@0.34.5": true,
+		"workerd@1.20260701.1": true,
+		"esbuild@0.18.20": true,
+		"esbuild@0.25.12": true,
+		"fsevents@2.3.3": true
+	},
+	"dependencies": {
+		"better-auth": "^1.6.23",
+		"clsx": "^2.1.1",
+		"drizzle-orm": "^0.45.2",
+		"jose": "^6.2.3",
+		"mode-watcher": "^1.1.0",
+		"svelte-sonner": "^1.1.1",
+		"tailwind-merge": "^3.6.0",
+		"tailwind-variants": "^3.2.2"
+	}
+}
