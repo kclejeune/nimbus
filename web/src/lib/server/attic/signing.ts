@@ -69,3 +69,19 @@ export function computeFingerprint(
 	const fingerprint = `1;${storePath};${convertHashToBase32(narHash)};${narSize};${fullRefs.join(',')}`;
 	return new TextEncoder().encode(fingerprint);
 }
+
+/** Generate a fresh Nix-format Ed25519 keypair: `{name}:{base64(seed||pub)}`. */
+export async function generateKeypair(name: string): Promise<string> {
+	if (!name || name.includes(':')) throw new Error('Invalid key name');
+	const pair = (await crypto.subtle.generateKey('Ed25519', true, [
+		'sign',
+		'verify'
+	])) as CryptoKeyPair;
+	const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey));
+	const seed = pkcs8.slice(-32);
+	const pub = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+	const bytes = new Uint8Array(64);
+	bytes.set(seed);
+	bytes.set(pub, 32);
+	return `${name}:${encodeBase64(bytes)}`;
+}
