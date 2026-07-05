@@ -1,0 +1,42 @@
+version: "2"
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        - (net.Conn).Close
+        - (*os.File).Close
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+  enable:
+    - goimports
+    - golines
+    - gofumpt
+  settings:
+    gofumpt:
+      module-path: github.com/kclejeune/nimbus
+      extra-rules: true
+    golines:
+      max-len: 100
+      tab-len: 4
+      shorten-comments: true
+      reformat-tags: true
+      chain-split-dots: true
+    goimports:
+      local-prefixes:
+        - github.com/kclejeune/nimbus
