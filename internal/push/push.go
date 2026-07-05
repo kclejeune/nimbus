@@ -11,8 +11,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/nix-community/go-nix/pkg/nar"
 
-	"github.com/kclejeune/nimbus/cli/internal/api"
-	"github.com/kclejeune/nimbus/cli/internal/nix"
+	"github.com/kclejeune/nimbus/internal/api"
+	"github.com/kclejeune/nimbus/internal/nix"
 )
 
 // Above this NAR size the chunked protocol is used: the client compresses

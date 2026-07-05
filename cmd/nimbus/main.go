@@ -8,8 +8,8 @@ import (
 	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 
-	"github.com/kclejeune/nimbus/cli/internal/api"
-	"github.com/kclejeune/nimbus/cli/internal/config"
+	"github.com/kclejeune/nimbus/internal/api"
+	"github.com/kclejeune/nimbus/internal/config"
 )
 
 var (

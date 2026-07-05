@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/kclejeune/nimbus/cli/internal/push"
+	"github.com/kclejeune/nimbus/internal/push"
 )
 
 func pushCmd() *cobra.Command {

@@ -1,4 +1,4 @@
-module github.com/kclejeune/nimbus/cli
+module github.com/kclejeune/nimbus
 
 go 1.26.4
 

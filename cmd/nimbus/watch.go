@@ -11,8 +11,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 
-	"github.com/kclejeune/nimbus/cli/internal/nix"
-	"github.com/kclejeune/nimbus/cli/internal/push"
+	"github.com/kclejeune/nimbus/internal/nix"
+	"github.com/kclejeune/nimbus/internal/push"
 )
 
 func watchStoreCmd() *cobra.Command {
