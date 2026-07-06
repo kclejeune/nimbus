@@ -16,7 +16,7 @@
 			>
 				<TerminalSquare class="size-6" />
 			</div>
-			<h1 class="text-xl font-semibold tracking-tight">Authorize the attic CLI</h1>
+			<h1 class="text-xl font-semibold tracking-tight">Authorize the nimbus CLI</h1>
 			<p class="mt-1 text-sm text-muted-foreground">
 				Signed in as {data.user.email ?? data.user.name}. A token for
 				<span class="font-mono">{data.hostname || 'this machine'}</span> will be created and sent to

@@ -7,7 +7,10 @@
 	let { children } = $props();
 </script>
 
-<svelte:head><link rel="icon" href={favicon} /></svelte:head>
+<svelte:head>
+	<title>nimbus</title>
+	<link rel="icon" href={favicon} />
+</svelte:head>
 
 <!-- CSS follows prefers-color-scheme on its own; the .light class lets a persisted
      explicit override beat the media query (see layout.css). -->

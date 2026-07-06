@@ -59,7 +59,7 @@
 
 				<div class="space-y-2">
 					<Label for="label">Token name</Label>
-					<Input id="label" name="label" value="attic CLI" />
+					<Input id="label" name="label" value="nimbus CLI" />
 				</div>
 
 				<TokenScopeFields cacheNames={data.cacheNames} defaultPush={true} />
