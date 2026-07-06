@@ -37,6 +37,7 @@ func main() {
 	root.AddCommand(pushCmd())
 	root.AddCommand(cacheCmd())
 	root.AddCommand(watchStoreCmd())
+	root.AddCommand(watchExecCmd())
 	root.AddCommand(gcCmd())
 
 	if err := fang.Execute(
