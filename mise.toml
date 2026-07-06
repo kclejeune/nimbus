@@ -6,21 +6,50 @@ golangci-lint = "2.10"
 [env]
 CGO_ENABLED = "0"
 
-[tasks.lint]
-description = "Run linter"
+[tasks.lint-web]
+dir = "./web"
+sources = [
+    "**/*.ts",
+    "**/*.html",
+    "**/*.json",
+    "**/*.jsonc",
+    "prettier.config.js"
+]
+run = ["npm run format"]
+
+[tasks.lint-cli]
 sources = ["**/*.go", "go.mod", "go.sum"]
 run = ["golangci-lint run --fix"]
+
+[tasks.lint]
+description = "lint and format"
+depends = ["lint-web", "lint-cli"]
 
 [tasks.test]
 description = "Run all tests"
 sources = ["**/*.go", "go.mod", "go.sum"]
 run = ["go test ./..."]
 
-[tasks.build]
+[tasks.build-web]
+dir = "./web"
+sources = [
+    "**/*.ts",
+    "**/*.html",
+    "**/*.json",
+    "**/*.jsonc",
+    "prettier.config.js"
+]
+run = ["npm run build"]
+
+[tasks.build-cli]
 description = "Build the nimbus binary"
 sources = ["**/*.go", "go.mod", "go.sum"]
 outputs = ["build/nimbus"]
 run = ["go build -o build/nimbus ./cmd/nimbus"]
+
+[tasks.build]
+description = "build the world"
+depends = ["build-web", "build-cli"]
 
 [tasks.check]
 description = "Lint, test, and build"

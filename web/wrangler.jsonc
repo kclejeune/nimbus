@@ -1,7 +1,18 @@
 {
 	"name": "nimbus",
-	"compatibility_date": "2025-09-01",
+	"compatibility_date": "2026-07-06",
 	"compatibility_flags": ["nodejs_compat"],
+
+	// Workers Caching: the gateway (default export) always runs — it does host
+	// dispatch and authorization — while CachedStore serves narinfo/NAR bodies
+	// from the edge cache, skipping D1 and R2 entirely on a hit. NAR bodies are
+	// content-addressed, so cached entries stay valid across deploys
+	// (cross_version_cache).
+	"cache": { "enabled": true, "cross_version_cache": true },
+	"exports": {
+		"default": { "type": "worker", "cache": { "enabled": false } },
+		"CachedStore": { "type": "worker", "cache": { "enabled": true } }
+	},
 
 	// Custom entry wrapping the adapter-cloudflare output (_worker.js in
 	// .svelte-kit/cloudflare) to add the scheduled GC handler.

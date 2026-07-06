@@ -156,8 +156,7 @@ export async function filterUpstreamPaths(
 export async function fetchUpstreamNarInfo(
 	db: D1,
 	upstreams: string[],
-	storePathHash: string,
-	head: boolean
+	storePathHash: string
 ): Promise<Response | null> {
 	for (const rawUpstream of upstreams) {
 		const upstream = rawUpstream.replace(/\/+$/, '');
@@ -166,16 +165,14 @@ export async function fetchUpstreamNarInfo(
 		if (cached.get(storePathHash) === false) continue;
 
 		try {
-			const res = await fetch(`${upstream}/${storePathHash}.narinfo`, {
-				method: head ? 'HEAD' : 'GET'
-			});
+			const res = await fetch(`${upstream}/${storePathHash}.narinfo`);
 			if (res.status === 200) {
 				if (!cached.has(storePathHash)) {
 					await recordVerdicts(db, upstream, [{ hash: storePathHash, present: true }]).catch(
 						() => {}
 					);
 				}
-				return new Response(head ? null : res.body, {
+				return new Response(res.body, {
 					status: 200,
 					headers: { 'Content-Type': 'text/x-nix-narinfo' }
 				});

@@ -21,7 +21,9 @@ export function errorResponse(status: number, message: string, kind?: string): R
 		}),
 		{
 			status,
-			headers: { 'Content-Type': 'application/json' }
+			// Workers Caching heuristically caches bare 404s for 3 minutes, which
+			// would make freshly pushed paths invisible right after a miss.
+			headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
 		}
 	);
 }

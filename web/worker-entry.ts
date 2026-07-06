@@ -11,11 +11,26 @@
 //   through hooks.server.ts. The adapter emits to .svelte-kit/cloudflare via
 //   wrangler.adapter.jsonc, so this file is never overwritten by builds.
 
+import { WorkerEntrypoint } from 'cloudflare:workers';
 import sveltekit from './.svelte-kit/cloudflare/_worker.js';
 import { runGc } from './src/lib/server/attic/gc';
 import { handleCacheApi } from './src/lib/server/attic/router';
+import { serveStore } from './src/lib/server/attic/store';
 
 type Env = App.Platform['env'];
+
+/**
+ * Read path of the binary-cache API behind Workers Caching (see the `cache`
+ * and `exports` blocks in wrangler.jsonc): narinfo and NAR bodies with public
+ * Cache-Control, cached at the edge so hits skip D1 and R2 entirely. Only
+ * reachable through ctx.exports from the gateway below, which authorizes
+ * every request first — never routed directly from the internet.
+ */
+export class CachedStore extends WorkerEntrypoint {
+	async fetch(request: Request) {
+		return serveStore(request, this.env as Env, this.ctx as App.Platform['ctx']);
+	}
+}
 
 /** Whether the request is addressed to the binary-cache hostname. */
 function isCacheHost(request: Request, cacheBaseUrl?: string): boolean {

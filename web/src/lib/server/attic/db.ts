@@ -145,22 +145,25 @@ export async function touchObject(
 }
 
 /**
- * Bump last_accessed_at for every object in a cache backed by this NAR. NAR
- * URLs carry the nar hash rather than a store path hash, so a download can
- * only be attributed at NAR granularity (like the reference server's
- * touch-on-download semantics).
+ * Bump last_accessed_at for every object in a cache backed by the NAR with
+ * this hash (bare or sha256:-prefixed). NAR URLs carry the nar hash rather
+ * than a store path hash, so a download can only be attributed at NAR
+ * granularity (like the reference server's touch-on-download semantics).
+ * Keyed by hash rather than id so the gateway can touch without resolving the
+ * NAR row it no longer needs for serving.
  */
-export async function touchObjectsForNar(
+export async function touchObjectsForNarHash(
 	db: D1Database,
 	cacheName: string,
-	narId: number
+	narHashRaw: string
 ): Promise<void> {
 	await db
 		.prepare(
-			'UPDATE object SET last_accessed_at = ?1 WHERE nar_id = ?2 ' +
-				'AND cache_id = (SELECT id FROM cache WHERE name = ?3)'
+			'UPDATE object SET last_accessed_at = ?1 ' +
+				'WHERE cache_id = (SELECT id FROM cache WHERE name = ?2) ' +
+				"AND nar_id IN (SELECT id FROM nar WHERE nar_hash IN (?3, ?4) AND state = 'V')"
 		)
-		.bind(new Date().toISOString(), narId, cacheName)
+		.bind(new Date().toISOString(), cacheName, `sha256:${narHashRaw}`, narHashRaw)
 		.run();
 }
 

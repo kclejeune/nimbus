@@ -14,14 +14,8 @@ import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-au
 import * as db from './db';
 import { maybeSizeTriggeredGc, runGc } from './gc';
 import { errorResponse, jsonResponse, withVisibility } from './http';
-import {
-	fetchUpstreamNarInfo,
-	filterUpstreamPaths,
-	findExistingPaths,
-	findUpstreamNar,
-	parseUpstreams
-} from './missing-paths';
-import { buildNarInfo } from './narinfo';
+import { filterUpstreamPaths, findExistingPaths, parseUpstreams } from './missing-paths';
+import { serveStore } from './store';
 import {
 	NO_PERMISSION,
 	parseAuthToken,
@@ -38,7 +32,11 @@ import {
 } from './upload';
 
 type Env = App.Platform['env'];
-type ExecutionContext = App.Platform['ctx'];
+// ctx.exports carries the loopback binding for the CachedStore entrypoint;
+// @cloudflare/workers-types does not model it yet.
+type ExecutionContext = App.Platform['ctx'] & {
+	exports?: { CachedStore?: { fetch(request: Request): Promise<Response> } };
+};
 
 async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedToken | null> {
 	const bearer = parseAuthToken(request.headers.get('Authorization'));
@@ -131,84 +129,46 @@ async function handleNixCacheInfo(
 	);
 }
 
+/**
+ * Forward an authorized read to the CachedStore entrypoint (worker-entry.ts),
+ * whose responses Workers Caching stores and serves at the edge. The
+ * Authorization header is stripped so it never reaches the cache layer, where
+ * it would trigger the automatic authenticated-request bypass — authorization
+ * already happened here in the gateway, which runs on every request.
+ */
+let warnedStoreUnavailable = false;
+
+function forwardToStore(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined
+): Promise<Response> {
+	const forwarded = new Request(request);
+	forwarded.headers.delete('Authorization');
+	const store = ctx?.exports?.CachedStore;
+	if (!store) {
+		if (!warnedStoreUnavailable) {
+			warnedStoreUnavailable = true;
+			console.warn('ctx.exports.CachedStore unavailable; serving read path uncached');
+		}
+		return serveStore(forwarded, env, ctx);
+	}
+	return store.fetch(forwarded);
+}
+
 async function handleNarInfo(
 	request: Request,
 	env: Env,
 	ctx: ExecutionContext | undefined,
 	cacheName: string,
-	filename: string,
-	head: boolean
+	filename: string
 ): Promise<Response> {
 	const storePathHash = filename.slice(0, -'.narinfo'.length);
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
 	const auth = await authorizeCacheRead(request, env, cacheName);
 	if ('response' in auth) return auth.response;
-	const cache = auth.cache;
-	const isPublic = cache.is_public === 1;
-
-	const found = await db.findObject(env.ATTIC_DB, cacheName, storePathHash);
-	if (!found) {
-		// Paths available upstream are filtered out of pushes, so a complete
-		// closure needs the upstream's narinfo served through this cache.
-		const upstream = await fetchUpstreamNarInfo(
-			env.ATTIC_DB,
-			parseUpstreams(cache.upstream_caches),
-			storePathHash,
-			head
-		);
-		if (upstream) return withVisibility(upstream, isPublic);
-		return errorResponse(404, 'Not found', 'NoSuchObject');
-	}
-
-	if (head) {
-		return withVisibility(
-			new Response(null, {
-				status: 200,
-				headers: { 'Content-Type': 'text/x-nix-narinfo' }
-			}),
-			isPublic
-		);
-	}
-
-	const chunks = await db.findChunksForNar(env.ATTIC_DB, found.nar.id);
-	const narinfo = await buildNarInfo(found.object, found.nar, chunks, cache.keypair);
-
-	return withVisibility(
-		new Response(narinfo, {
-			status: 200,
-			headers: { 'Content-Type': 'text/x-nix-narinfo' }
-		}),
-		isPublic
-	);
-}
-
-function chunkKey(chunk: db.ChunkRow): string | null {
-	try {
-		return JSON.parse(chunk.remote_file).key ?? null;
-	} catch {
-		return null;
-	}
-}
-
-/** Parse a single-range `Range: bytes=...` header against a known size. */
-function parseRange(
-	header: string,
-	size: number
-): { offset: number; length: number } | 'unsatisfiable' {
-	const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
-	if (!m || (m[1] === '' && m[2] === '')) return 'unsatisfiable';
-	if (m[1] === '') {
-		// suffix range: last N bytes
-		const suffix = Math.min(Number(m[2]), size);
-		if (suffix === 0) return 'unsatisfiable';
-		return { offset: size - suffix, length: suffix };
-	}
-	const start = Number(m[1]);
-	if (start >= size) return 'unsatisfiable';
-	const end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
-	if (end < start) return 'unsatisfiable';
-	return { offset: start, length: end - start + 1 };
+	return forwardToStore(request, env, ctx);
 }
 
 async function handleNar(
@@ -224,110 +184,16 @@ async function handleNar(
 
 	const auth = await authorizeCacheRead(request, env, cacheName);
 	if ('response' in auth) return auth.response;
-	const isPublic = auth.cache.is_public === 1;
-
-	const nar =
-		(await db.findNarByHash(env.ATTIC_DB, `sha256:${narHashRaw}`)) ??
-		(await db.findNarByHash(env.ATTIC_DB, narHashRaw));
-	if (!nar) {
-		// NAR URLs from passthrough narinfo (see handleNarInfo) resolve here:
-		// redirect to the upstream copy rather than storing it.
-		const upstreamUrl = await findUpstreamNar(
-			parseUpstreams(auth.cache.upstream_caches),
-			`nar/${filename}`
-		);
-		if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
-		return errorResponse(404, 'Not found', 'NoSuchObject');
-	}
-
-	const chunks = await db.findChunksForNar(env.ATTIC_DB, nar.id);
-	if (chunks.length === 0) return errorResponse(500, 'NAR has no chunks');
-	if (chunks.length < nar.num_chunks) {
-		return errorResponse(503, 'Some chunks of this NAR are missing', 'IncompleteNar');
-	}
-
-	const keys: string[] = [];
-	for (const chunk of chunks) {
-		const key = chunkKey(chunk);
-		if (!key) return errorResponse(500, 'No key in remote file');
-		keys.push(key);
-	}
 
 	// Retention is download-driven (like the reference server): touch every
-	// object in this cache backed by the NAR, off the critical path.
+	// object in this cache backed by the NAR, off the critical path. This must
+	// happen in the gateway — downloads served from the edge cache never reach
+	// the CachedStore entrypoint.
 	if (!head) {
-		const touch = db.touchObjectsForNar(env.ATTIC_DB, cacheName, nar.id).catch(() => {});
+		const touch = db.touchObjectsForNarHash(env.ATTIC_DB, cacheName, narHashRaw).catch(() => {});
 		ctx?.waitUntil(touch);
 	}
-
-	const totalSize = chunks.every((c) => c.file_size != null)
-		? chunks.reduce((sum, c) => sum + (c.file_size ?? 0), 0)
-		: null;
-
-	const baseHeaders = new Headers({
-		'Content-Type': 'application/x-nix-nar',
-		'Accept-Ranges': chunks.length === 1 ? 'bytes' : 'none'
-	});
-
-	if (head) {
-		if (totalSize != null) baseHeaders.set('Content-Length', String(totalSize));
-		return withVisibility(new Response(null, { status: 200, headers: baseHeaders }), isPublic);
-	}
-
-	if (chunks.length === 1) {
-		const key = keys[0];
-		const rangeHeader = request.headers.get('Range');
-		const size = chunks[0].file_size ?? (await env.CACHE_BUCKET.head(key))?.size;
-
-		if (rangeHeader && size != null) {
-			const range = parseRange(rangeHeader, size);
-			if (range === 'unsatisfiable') {
-				baseHeaders.set('Content-Range', `bytes */${size}`);
-				return withVisibility(new Response(null, { status: 416, headers: baseHeaders }), isPublic);
-			}
-			const object = await env.CACHE_BUCKET.get(key, { range });
-			if (!object) return errorResponse(404, `File not found in storage: ${key}`);
-			baseHeaders.set('Content-Length', String(range.length));
-			baseHeaders.set(
-				'Content-Range',
-				`bytes ${range.offset}-${range.offset + range.length - 1}/${size}`
-			);
-			return withVisibility(
-				new Response(object.body as unknown as BodyInit, { status: 206, headers: baseHeaders }),
-				isPublic
-			);
-		}
-
-		const object = await env.CACHE_BUCKET.get(key);
-		if (!object) return errorResponse(404, `File not found in storage: ${key}`);
-		baseHeaders.set('Content-Length', String(object.size));
-		return withVisibility(
-			new Response(object.body as unknown as BodyInit, { status: 200, headers: baseHeaders }),
-			isPublic
-		);
-	}
-
-	// Multi-chunk: stream the stored files back to back (zstd and gzip both
-	// concatenate cleanly), prefetching the next object while the current one
-	// is piped, like the reference server's chunk prefetcher.
-	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
-	const pump = async () => {
-		let next = env.CACHE_BUCKET.get(keys[0]);
-		for (let i = 0; i < keys.length; i++) {
-			const object = await next;
-			if (i + 1 < keys.length) next = env.CACHE_BUCKET.get(keys[i + 1]);
-			if (!object) throw new Error(`File not found in storage: ${keys[i]}`);
-			await (object.body as unknown as ReadableStream<Uint8Array>).pipeTo(writable, {
-				preventClose: true
-			});
-		}
-		await writable.close();
-	};
-	const pumping = pump().catch((e) => writable.abort(e).catch(() => {}));
-	ctx?.waitUntil(pumping);
-
-	if (totalSize != null) baseHeaders.set('Content-Length', String(totalSize));
-	return withVisibility(new Response(readable, { status: 200, headers: baseHeaders }), isPublic);
+	return forwardToStore(request, env, ctx);
 }
 
 /**
@@ -658,7 +524,7 @@ export async function handleCacheApi(
 			return handleCacheInfo(request, env, cacheName, apiBase(env, url));
 		}
 		if (rest.endsWith('.narinfo')) {
-			return handleNarInfo(request, env, ctx, cacheName, rest, method === 'HEAD');
+			return handleNarInfo(request, env, ctx, cacheName, rest);
 		}
 	}
 
