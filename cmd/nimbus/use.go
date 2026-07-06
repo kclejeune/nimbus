@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -121,13 +122,7 @@ func editNixConf(path string, edits []confEdit) error {
 				break
 			}
 			values := strings.Fields(rest)
-			merged := false
-			for _, v := range values {
-				if v == edit.value {
-					merged = true
-					break
-				}
-			}
+			merged := slices.Contains(values, edit.value)
 			if !merged {
 				values = append(values, edit.value)
 			}
@@ -146,7 +141,7 @@ func editNixConf(path string, edits []confEdit) error {
 func upsertNetrc(path, host, token string) error {
 	var kept []string
 	if data, err := os.ReadFile(path); err == nil {
-		for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		for line := range strings.SplitSeq(strings.TrimRight(string(data), "\n"), "\n") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 && fields[0] == "machine" && fields[1] == host {
 				continue

@@ -53,10 +53,7 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 		return nil
 	}
 
-	jobs := p.Jobs
-	if jobs < 1 {
-		jobs = 1
-	}
+	jobs := max(p.Jobs, 1)
 	queue := make(chan nix.PathInfo)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -66,9 +63,7 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 	defer cancel()
 
 	for range jobs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for info := range queue {
 				if err := p.uploadOne(ctx, info); err != nil {
 					mu.Lock()
@@ -80,7 +75,7 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 feed:
