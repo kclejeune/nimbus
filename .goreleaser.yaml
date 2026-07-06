@@ -22,7 +22,7 @@ builds:
       - linux
       # - windows
       - darwin
-    main: ./cmd/slinky
+    main: ./cmd/nimbus
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
