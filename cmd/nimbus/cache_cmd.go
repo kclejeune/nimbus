@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/kclejeune/nimbus/internal/nix"
 )
 
 func cacheCmd() *cobra.Command {
@@ -19,17 +21,21 @@ func cacheCmd() *cobra.Command {
 	cmd.AddCommand(cacheConfigureCmd())
 	cmd.AddCommand(cacheDestroyCmd())
 	cmd.AddCommand(cacheRenameCmd())
+	cmd.AddCommand(cachePinCmd())
+	cmd.AddCommand(cacheUnpinCmd())
 	return cmd
 }
 
 // cacheFlags collects the settings shared by create and configure.
 type cacheFlags struct {
-	public        bool
-	private       bool
-	priority      int
-	compression   string
-	retentionDays int
-	regenKeypair  bool
+	public            bool
+	private           bool
+	priority          int
+	compression       string
+	retentionDays     int
+	retentionMaxBytes int64
+	upstreamKeyNames  []string
+	regenKeypair      bool
 }
 
 func (f *cacheFlags) register(cmd *cobra.Command, includeKeypair bool) {
@@ -40,6 +46,10 @@ func (f *cacheFlags) register(cmd *cobra.Command, includeKeypair bool) {
 	cmd.Flags().StringVar(&f.compression, "compression", "", "NAR compression: zstd, gzip, or none")
 	cmd.Flags().
 		IntVar(&f.retentionDays, "retention-days", 0, "expire unused paths after this many days (-1 to disable)")
+	cmd.Flags().
+		Int64Var(&f.retentionMaxBytes, "retention-max-bytes", 0, "cap the cache's compressed storage in bytes (-1 to disable)")
+	cmd.Flags().
+		StringSliceVar(&f.upstreamKeyNames, "upstream-cache-key-name", nil, "signing key names of upstream caches (repeatable; clients skip re-uploading paths signed by them)")
 	if includeKeypair {
 		cmd.Flags().
 			BoolVar(&f.regenKeypair, "regenerate-keypair", false, "generate a new signing keypair")
@@ -67,6 +77,16 @@ func (f *cacheFlags) options(cmd *cobra.Command) map[string]any {
 			// Explicit null clears retention.
 			opts["retention_period"] = nil
 		}
+	}
+	if cmd.Flags().Changed("retention-max-bytes") {
+		if f.retentionMaxBytes >= 0 {
+			opts["retention_max_bytes"] = f.retentionMaxBytes
+		} else {
+			opts["retention_max_bytes"] = nil
+		}
+	}
+	if cmd.Flags().Changed("upstream-cache-key-name") {
+		opts["upstream_cache_key_names"] = f.upstreamKeyNames
 	}
 	if f.regenKeypair {
 		opts["keypair"] = map[string]string{"type": "generate"}
@@ -191,6 +211,67 @@ func cacheDestroyCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
 	return cmd
+}
+
+// pathHashArg accepts a full /nix/store path or a bare 32-character hash.
+func pathHashArg(arg string) (string, error) {
+	hash := arg
+	if strings.HasPrefix(arg, "/") {
+		hash = nix.HashPart(arg)
+	}
+	if len(hash) != 32 {
+		return "", fmt.Errorf("expected a store path or 32-character path hash, got %q", arg)
+	}
+	return hash, nil
+}
+
+func cachePinCmd() *cobra.Command {
+	var note string
+	cmd := &cobra.Command{
+		Use:   "pin [SERVER:]CACHE STORE_PATH_OR_HASH",
+		Short: "Pin a path's closure against garbage collection",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref, client, err := resolveCache(args[0])
+			if err != nil {
+				return err
+			}
+			hash, err := pathHashArg(args[1])
+			if err != nil {
+				return err
+			}
+			if err := client.PinPath(cmd.Context(), ref.Cache, hash, note); err != nil {
+				return err
+			}
+			fmt.Printf("📌 Pinned %s in %q\n", hash, ref.Cache)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&note, "note", "", "annotate why the path is pinned")
+	return cmd
+}
+
+func cacheUnpinCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unpin [SERVER:]CACHE STORE_PATH_OR_HASH",
+		Short: "Remove a garbage-collection pin",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref, client, err := resolveCache(args[0])
+			if err != nil {
+				return err
+			}
+			hash, err := pathHashArg(args[1])
+			if err != nil {
+				return err
+			}
+			if err := client.UnpinPath(cmd.Context(), ref.Cache, hash); err != nil {
+				return err
+			}
+			fmt.Printf("✅ Unpinned %s in %q\n", hash, ref.Cache)
+			return nil
+		},
+	}
 }
 
 func cacheRenameCmd() *cobra.Command {

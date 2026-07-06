@@ -95,34 +95,47 @@ type CacheRef struct {
 	Cache      string
 }
 
+// ResolveServer returns the named server, falling back to the default (or
+// the only configured server) when name is empty.
+func (c *Config) ResolveServer(name string) (string, Server, error) {
+	if name == "" {
+		name = c.DefaultServer
+		if name == "" {
+			if len(c.Servers) == 1 {
+				for only := range c.Servers {
+					name = only
+				}
+			} else {
+				return "", Server{}, errors.New(
+					"no default server configured; name one explicitly or run `nimbus login` first",
+				)
+			}
+		}
+	}
+	server, ok := c.Servers[name]
+	if !ok {
+		return "", Server{}, fmt.Errorf(
+			"unknown server %q; run `nimbus login %s <endpoint>` first",
+			name,
+			name,
+		)
+	}
+	return name, server, nil
+}
+
 // ResolveCache parses a cache reference against the configured servers.
 func (c *Config) ResolveCache(ref string) (*CacheRef, error) {
 	serverName, cache, explicit := strings.Cut(ref, ":")
 	if !explicit {
 		cache = ref
-		serverName = c.DefaultServer
-		if serverName == "" {
-			if len(c.Servers) == 1 {
-				for name := range c.Servers {
-					serverName = name
-				}
-			} else {
-				return nil, errors.New(
-					"no default server configured; use server:cache or run `nimbus login` first",
-				)
-			}
-		}
+		serverName = ""
 	}
-	server, ok := c.Servers[serverName]
-	if !ok {
-		return nil, fmt.Errorf(
-			"unknown server %q; run `nimbus login %s <endpoint>` first",
-			serverName,
-			serverName,
-		)
+	resolvedName, server, err := c.ResolveServer(serverName)
+	if err != nil {
+		return nil, err
 	}
 	if cache == "" {
 		return nil, fmt.Errorf("missing cache name in %q", ref)
 	}
-	return &CacheRef{ServerName: serverName, Server: server, Cache: cache}, nil
+	return &CacheRef{ServerName: resolvedName, Server: server, Cache: cache}, nil
 }

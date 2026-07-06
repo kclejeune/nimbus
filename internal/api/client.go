@@ -286,6 +286,34 @@ func (c *Client) RenameCache(ctx context.Context, name, newName string) error {
 	return c.doJSON(ctx, http.MethodPost, "/_api/v1/cache-config/"+name+"/rename", body, nil)
 }
 
+// PinPath marks a store path's closure as a GC root.
+func (c *Client) PinPath(ctx context.Context, cache, storePathHash, note string) error {
+	body := map[string]any{"store_path_hash": storePathHash}
+	if note != "" {
+		body["note"] = note
+	}
+	return c.doJSON(ctx, http.MethodPost, "/_api/v1/gc-root/"+cache, body, nil)
+}
+
+// UnpinPath removes a GC root.
+func (c *Client) UnpinPath(ctx context.Context, cache, storePathHash string) error {
+	return c.doJSON(ctx, http.MethodDelete, "/_api/v1/gc-root/"+cache+"/"+storePathHash, nil, nil)
+}
+
+// RunGc triggers a server-side garbage collection pass and returns the
+// server's stats object verbatim.
+func (c *Client) RunGc(ctx context.Context, dryRun bool) (map[string]any, error) {
+	path := "/_api/v1/gc"
+	if dryRun {
+		path += "?dry_run=1"
+	}
+	stats := map[string]any{}
+	if err := c.doJSON(ctx, http.MethodPost, path, nil, &stats); err != nil {
+		return nil, err
+	}
+	return stats, nil
+}
+
 // AuthConfig is the public login discovery document.
 type AuthConfig struct {
 	AuthorizeURL          string `json:"authorize_url"`
