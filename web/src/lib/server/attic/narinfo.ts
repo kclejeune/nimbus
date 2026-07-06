@@ -37,7 +37,7 @@ const HEX64 = /^[0-9a-fA-F]{64}$/;
 export async function buildNarInfo(
 	object: ObjectRow,
 	nar: NarRow,
-	firstChunk: ChunkRow | undefined,
+	chunks: ChunkRow[],
 	keypair: string | null
 ): Promise<string> {
 	const lines: string[] = [];
@@ -48,11 +48,18 @@ export async function buildNarInfo(
 	lines.push(`URL: nar/${hashForUrl}.nar${compressionExtension(nar.compression)}`);
 	lines.push(`Compression: ${nar.compression}`);
 
+	// FileHash only describes a single stored file; a multi-chunk NAR is served
+	// as a concatenation, so only the total FileSize is meaningful there.
+	const firstChunk = chunks.length === 1 ? chunks[0] : undefined;
 	if (firstChunk?.file_hash && HEX64.test(firstChunk.file_hash)) {
 		lines.push(`FileHash: ${convertHashToBase32(`sha256:${firstChunk.file_hash}`)}`);
 	}
-	if (firstChunk?.file_size != null) {
-		lines.push(`FileSize: ${firstChunk.file_size}`);
+	const fileSize =
+		chunks.length > 0 && chunks.every((c) => c.file_size != null)
+			? chunks.reduce((sum, c) => sum + (c.file_size ?? 0), 0)
+			: firstChunk?.file_size;
+	if (fileSize != null) {
+		lines.push(`FileSize: ${fileSize}`);
 	}
 
 	if (HEX64.test(hashForUrl)) {

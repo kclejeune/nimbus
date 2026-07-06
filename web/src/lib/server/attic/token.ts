@@ -51,36 +51,72 @@ function flag(v: unknown): boolean {
 	return v === 1 || v === true || v === '1';
 }
 
+export interface VerifyKeys {
+	hs256SecretBase64?: string;
+	/** Base64 of an SPKI public key, either PEM ("BEGIN PUBLIC KEY") or raw DER. */
+	rs256PubkeyBase64?: string;
+}
+
+async function importRs256Key(pubkeyBase64: string): Promise<CryptoKey> {
+	let der = Uint8Array.from(atob(pubkeyBase64), (c) => c.charCodeAt(0));
+	const text = new TextDecoder().decode(der);
+	if (text.includes('-----BEGIN')) {
+		const inner = text.replace(/-----[A-Z ]+-----/g, '').replace(/\s+/g, '');
+		der = Uint8Array.from(atob(inner), (c) => c.charCodeAt(0));
+	}
+	return crypto.subtle.importKey(
+		'spki',
+		der as BufferSource,
+		{ name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+		false,
+		['verify']
+	);
+}
+
 /**
- * Verify an attic HS256 JWT and extract its cache permissions.
+ * Verify an attic JWT (HS256 or RS256) and extract its cache permissions.
  * Throws on any validation failure (signature, exp/nbf, bound issuer/audience).
  */
 export async function verifyAtticToken(
 	token: string,
-	secretBase64: string,
+	keys: VerifyKeys,
 	bounds: { issuer?: string; audiences?: string[] } = {}
 ): Promise<VerifiedToken> {
 	const parts = token.split('.');
 	if (parts.length !== 3) throw new Error('Malformed JWT');
 	const [headerB64, payloadB64, sigB64] = parts;
+	const signedData = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+	const signature = base64urlDecode(sigB64);
 
 	const header = JSON.parse(new TextDecoder().decode(base64urlDecode(headerB64)));
-	if (header.alg !== 'HS256') throw new Error(`Unsupported JWT algorithm: ${header.alg}`);
 
-	const secret = Uint8Array.from(atob(secretBase64), (c) => c.charCodeAt(0));
-	const key = await crypto.subtle.importKey(
-		'raw',
-		secret as BufferSource,
-		{ name: 'HMAC', hash: 'SHA-256' },
-		false,
-		['verify']
-	);
-	const valid = await crypto.subtle.verify(
-		'HMAC',
-		key,
-		base64urlDecode(sigB64) as BufferSource,
-		new TextEncoder().encode(`${headerB64}.${payloadB64}`) as BufferSource
-	);
+	let valid: boolean;
+	if (header.alg === 'HS256' && keys.hs256SecretBase64) {
+		const secret = Uint8Array.from(atob(keys.hs256SecretBase64), (c) => c.charCodeAt(0));
+		const key = await crypto.subtle.importKey(
+			'raw',
+			secret as BufferSource,
+			{ name: 'HMAC', hash: 'SHA-256' },
+			false,
+			['verify']
+		);
+		valid = await crypto.subtle.verify(
+			'HMAC',
+			key,
+			signature as BufferSource,
+			signedData as BufferSource
+		);
+	} else if (header.alg === 'RS256' && keys.rs256PubkeyBase64) {
+		const key = await importRs256Key(keys.rs256PubkeyBase64);
+		valid = await crypto.subtle.verify(
+			'RSASSA-PKCS1-v1_5',
+			key,
+			signature as BufferSource,
+			signedData as BufferSource
+		);
+	} else {
+		throw new Error(`Unsupported JWT algorithm: ${header.alg}`);
+	}
 	if (!valid) throw new Error('Invalid JWT signature');
 
 	const claims: RawClaims = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64)));
@@ -143,9 +179,27 @@ export function permissionForCache(token: VerifiedToken | null, cacheName: strin
 	return { ...NO_PERMISSION };
 }
 
-/** Extract the bearer token from an Authorization header, if present. */
-export function parseBearerToken(header: string | null): string | null {
+/**
+ * Extract the JWT from an Authorization header. Accepts `Bearer <jwt>` and,
+ * like the reference server, `Basic <base64(user:jwt)>` with the username
+ * ignored — Nix sends netrc credentials for private caches as Basic auth.
+ */
+export function parseAuthToken(header: string | null): string | null {
 	if (!header) return null;
-	const m = /^Bearer\s+(.+)$/i.exec(header.trim());
-	return m ? m[1] : null;
+	const bearer = /^Bearer\s+(.+)$/i.exec(header.trim());
+	if (bearer) return bearer[1];
+	const basic = /^Basic\s+(.+)$/i.exec(header.trim());
+	if (basic) {
+		let decoded: string;
+		try {
+			decoded = atob(basic[1]);
+		} catch {
+			return null;
+		}
+		const colon = decoded.indexOf(':');
+		if (colon === -1) return null;
+		const password = decoded.slice(colon + 1);
+		return password || null;
+	}
+	return null;
 }

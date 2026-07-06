@@ -13,11 +13,12 @@ import {
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import * as db from './db';
 import { maybeSizeTriggeredGc, runGc } from './gc';
+import { errorResponse, jsonResponse, withVisibility } from './http';
 import { filterUpstreamPaths, findExistingPaths, parseUpstreams } from './missing-paths';
 import { buildNarInfo } from './narinfo';
 import {
 	NO_PERMISSION,
-	parseBearerToken,
+	parseAuthToken,
 	permissionForCache,
 	verifyAtticToken,
 	type Permission,
@@ -33,22 +34,24 @@ import {
 type Env = App.Platform['env'];
 type ExecutionContext = App.Platform['ctx'];
 
-function errorResponse(status: number, message: string): Response {
-	return new Response(JSON.stringify({ error: message }), {
-		status,
-		headers: { 'Content-Type': 'application/json' }
-	});
-}
-
 async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedToken | null> {
-	const bearer = parseBearerToken(request.headers.get('Authorization'));
+	const bearer = parseAuthToken(request.headers.get('Authorization'));
 	if (!bearer) return null;
-	if (!env.JWT_HS256_SECRET_BASE64) throw new Error('JWT secret not configured');
+	if (!env.JWT_HS256_SECRET_BASE64 && !env.JWT_RS256_PUBKEY_BASE64) {
+		throw new Error('JWT secret not configured');
+	}
 
-	const token = await verifyAtticToken(bearer, env.JWT_HS256_SECRET_BASE64, {
-		issuer: env.JWT_BOUND_ISSUER || undefined,
-		audiences: env.JWT_BOUND_AUDIENCES?.split(',').filter(Boolean)
-	});
+	const token = await verifyAtticToken(
+		bearer,
+		{
+			hs256SecretBase64: env.JWT_HS256_SECRET_BASE64,
+			rs256PubkeyBase64: env.JWT_RS256_PUBKEY_BASE64
+		},
+		{
+			issuer: env.JWT_BOUND_ISSUER || undefined,
+			audiences: env.JWT_BOUND_AUDIENCES?.split(',').filter(Boolean)
+		}
+	);
 
 	// Admin-issued tokens carry a jti and can be revoked. A failed revocation
 	// lookup is logged and ignored, matching the Rust worker (fail-open on the
@@ -67,28 +70,39 @@ async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedT
 }
 
 /**
- * Pull authorization, mirroring the Rust worker: anonymous requests start with
- * no permissions, public caches implicitly grant pull, and invalid tokens are
- * ignored (not fatal) on public caches.
+ * Resolve a cache and authorize read access. Mirrors the reference server:
+ * public caches grant anonymous pull (invalid tokens are ignored, not fatal),
+ * and without any explicit grant for the name, both "no such cache" and
+ * "permission denied" are masked as 401 to prevent cache enumeration.
  */
-async function authorizePull(
+async function authorizeCacheRead(
 	request: Request,
 	env: Env,
-	cacheName: string,
-	isPublic: boolean
-): Promise<Response | null> {
+	cacheName: string
+): Promise<{ cache: db.CacheRow } | { response: Response }> {
 	let permission: Permission;
+	let authError: unknown = null;
 	try {
 		const token = await verifyRequestToken(request, env);
 		permission = permissionForCache(token, cacheName);
 	} catch (e) {
-		if (!isPublic) return errorResponse(401, `Authentication failed: ${e}`);
+		authError = e;
 		permission = { ...NO_PERMISSION };
 	}
+	const hasDiscovery = Object.values(permission).some(Boolean);
 
-	if (isPublic) permission.pull = true;
-	if (!permission.pull) return errorResponse(403, 'Permission denied: pull');
-	return null;
+	const cache = await db.findCache(env.ATTIC_DB, cacheName);
+	if (!cache) {
+		if (hasDiscovery) {
+			return { response: errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache') };
+		}
+		return { response: errorResponse(401, 'Unauthorized') };
+	}
+	if (cache.is_public === 1) return { cache };
+	if (authError) return { response: errorResponse(401, `Authentication failed: ${authError}`) };
+	if (permission.pull) return { cache };
+	if (hasDiscovery) return { response: errorResponse(403, 'Permission denied: pull') };
+	return { response: errorResponse(401, 'Unauthorized') };
 }
 
 async function handleNixCacheInfo(
@@ -97,19 +111,17 @@ async function handleNixCacheInfo(
 	cacheName: string,
 	head: boolean
 ): Promise<Response> {
-	const cache = await db.findCache(env.ATTIC_DB, cacheName);
-	if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`);
+	const auth = await authorizeCacheRead(request, env, cacheName);
+	if ('response' in auth) return auth.response;
+	const cache = auth.cache;
 
-	const denied = await authorizePull(request, env, cacheName, cache.is_public === 1);
-	if (denied) return denied;
-
-	if (head) return new Response(null, { status: 200 });
-	return new Response(
-		`StoreDir: ${cache.store_dir}\nWantMassQuery: 1\nPriority: ${cache.priority}\n`,
-		{
+	if (head) return withVisibility(new Response(null, { status: 200 }), cache.is_public === 1);
+	return withVisibility(
+		new Response(`StoreDir: ${cache.store_dir}\nWantMassQuery: 1\nPriority: ${cache.priority}\n`, {
 			status: 200,
-			headers: { 'Content-Type': 'text/plain' }
-		}
+			headers: { 'Content-Type': 'text/x-nix-cache-info' }
+		}),
+		cache.is_public === 1
 	);
 }
 
@@ -124,38 +136,68 @@ async function handleNarInfo(
 	const storePathHash = filename.slice(0, -'.narinfo'.length);
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
-	const cache = await db.findCache(env.ATTIC_DB, cacheName);
-	if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`);
-
-	const denied = await authorizePull(request, env, cacheName, cache.is_public === 1);
-	if (denied) return denied;
+	const auth = await authorizeCacheRead(request, env, cacheName);
+	if ('response' in auth) return auth.response;
+	const cache = auth.cache;
+	const isPublic = cache.is_public === 1;
 
 	const found = await db.findObject(env.ATTIC_DB, cacheName, storePathHash);
-	if (!found) return errorResponse(404, 'Not found');
+	if (!found) return errorResponse(404, 'Not found', 'NoSuchObject');
 
 	if (head) {
-		return new Response(null, {
-			status: 200,
-			headers: { 'Content-Type': 'text/x-nix-narinfo' }
-		});
+		return withVisibility(
+			new Response(null, {
+				status: 200,
+				headers: { 'Content-Type': 'text/x-nix-narinfo' }
+			}),
+			isPublic
+		);
 	}
 
-	// LRU bookkeeping, off the response's critical path.
-	const touch = db.touchObject(env.ATTIC_DB, cacheName, storePathHash).catch(() => {});
-	ctx?.waitUntil(touch);
-
 	const chunks = await db.findChunksForNar(env.ATTIC_DB, found.nar.id);
-	const narinfo = await buildNarInfo(found.object, found.nar, chunks[0], cache.keypair);
+	const narinfo = await buildNarInfo(found.object, found.nar, chunks, cache.keypair);
 
-	return new Response(narinfo, {
-		status: 200,
-		headers: { 'Content-Type': 'text/x-nix-narinfo' }
-	});
+	return withVisibility(
+		new Response(narinfo, {
+			status: 200,
+			headers: { 'Content-Type': 'text/x-nix-narinfo' }
+		}),
+		isPublic
+	);
+}
+
+function chunkKey(chunk: db.ChunkRow): string | null {
+	try {
+		return JSON.parse(chunk.remote_file).key ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/** Parse a single-range `Range: bytes=...` header against a known size. */
+function parseRange(
+	header: string,
+	size: number
+): { offset: number; length: number } | 'unsatisfiable' {
+	const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+	if (!m || (m[1] === '' && m[2] === '')) return 'unsatisfiable';
+	if (m[1] === '') {
+		// suffix range: last N bytes
+		const suffix = Math.min(Number(m[2]), size);
+		if (suffix === 0) return 'unsatisfiable';
+		return { offset: size - suffix, length: suffix };
+	}
+	const start = Number(m[1]);
+	if (start >= size) return 'unsatisfiable';
+	const end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
+	if (end < start) return 'unsatisfiable';
+	return { offset: start, length: end - start + 1 };
 }
 
 async function handleNar(
 	request: Request,
 	env: Env,
+	ctx: ExecutionContext | undefined,
 	cacheName: string,
 	filename: string,
 	head: boolean
@@ -163,46 +205,103 @@ async function handleNar(
 	const narHashRaw = filename.split('.')[0];
 	if (!narHashRaw) return errorResponse(400, 'Invalid NAR path');
 
-	const cache = await db.findCache(env.ATTIC_DB, cacheName);
-	if (!cache) return errorResponse(404, 'Not found');
-
-	const denied = await authorizePull(request, env, cacheName, cache.is_public === 1);
-	if (denied) return denied;
+	const auth = await authorizeCacheRead(request, env, cacheName);
+	if ('response' in auth) return auth.response;
+	const isPublic = auth.cache.is_public === 1;
 
 	const nar =
 		(await db.findNarByHash(env.ATTIC_DB, `sha256:${narHashRaw}`)) ??
 		(await db.findNarByHash(env.ATTIC_DB, narHashRaw));
-	if (!nar) return errorResponse(404, 'Not found');
+	if (!nar) return errorResponse(404, 'Not found', 'NoSuchObject');
 
 	const chunks = await db.findChunksForNar(env.ATTIC_DB, nar.id);
 	if (chunks.length === 0) return errorResponse(500, 'NAR has no chunks');
-	if (chunks.length > 1) return errorResponse(501, 'Multi-chunk NARs not yet supported');
-
-	const chunk = chunks[0];
-	let key: string | undefined;
-	try {
-		key = JSON.parse(chunk.remote_file).key;
-	} catch {
-		// fall through to the error below
+	if (chunks.length < nar.num_chunks) {
+		return errorResponse(503, 'Some chunks of this NAR are missing', 'IncompleteNar');
 	}
-	if (!key) return errorResponse(500, 'No key in remote file');
+
+	const keys: string[] = [];
+	for (const chunk of chunks) {
+		const key = chunkKey(chunk);
+		if (!key) return errorResponse(500, 'No key in remote file');
+		keys.push(key);
+	}
+
+	// Retention is download-driven (like the reference server): touch every
+	// object in this cache backed by the NAR, off the critical path.
+	if (!head) {
+		const touch = db.touchObjectsForNar(env.ATTIC_DB, cacheName, nar.id).catch(() => {});
+		ctx?.waitUntil(touch);
+	}
+
+	const totalSize = chunks.every((c) => c.file_size != null)
+		? chunks.reduce((sum, c) => sum + (c.file_size ?? 0), 0)
+		: null;
+
+	const baseHeaders = new Headers({
+		'Content-Type': 'application/x-nix-nar',
+		'Accept-Ranges': chunks.length === 1 ? 'bytes' : 'none'
+	});
 
 	if (head) {
-		const headers = new Headers({ 'Content-Type': 'application/x-nix-nar' });
-		if (chunk.file_size != null) headers.set('Content-Length', String(chunk.file_size));
-		return new Response(null, { status: 200, headers });
+		if (totalSize != null) baseHeaders.set('Content-Length', String(totalSize));
+		return withVisibility(new Response(null, { status: 200, headers: baseHeaders }), isPublic);
 	}
 
-	const object = await env.CACHE_BUCKET.get(key);
-	if (!object) return errorResponse(404, `File not found in storage: ${key}`);
+	if (chunks.length === 1) {
+		const key = keys[0];
+		const rangeHeader = request.headers.get('Range');
+		const size = chunks[0].file_size ?? (await env.CACHE_BUCKET.head(key))?.size;
 
-	return new Response(object.body as unknown as BodyInit, {
-		status: 200,
-		headers: {
-			'Content-Type': 'application/x-nix-nar',
-			'Content-Length': String(object.size)
+		if (rangeHeader && size != null) {
+			const range = parseRange(rangeHeader, size);
+			if (range === 'unsatisfiable') {
+				baseHeaders.set('Content-Range', `bytes */${size}`);
+				return withVisibility(new Response(null, { status: 416, headers: baseHeaders }), isPublic);
+			}
+			const object = await env.CACHE_BUCKET.get(key, { range });
+			if (!object) return errorResponse(404, `File not found in storage: ${key}`);
+			baseHeaders.set('Content-Length', String(range.length));
+			baseHeaders.set(
+				'Content-Range',
+				`bytes ${range.offset}-${range.offset + range.length - 1}/${size}`
+			);
+			return withVisibility(
+				new Response(object.body as unknown as BodyInit, { status: 206, headers: baseHeaders }),
+				isPublic
+			);
 		}
-	});
+
+		const object = await env.CACHE_BUCKET.get(key);
+		if (!object) return errorResponse(404, `File not found in storage: ${key}`);
+		baseHeaders.set('Content-Length', String(object.size));
+		return withVisibility(
+			new Response(object.body as unknown as BodyInit, { status: 200, headers: baseHeaders }),
+			isPublic
+		);
+	}
+
+	// Multi-chunk: stream the stored files back to back (zstd and gzip both
+	// concatenate cleanly), prefetching the next object while the current one
+	// is piped, like the reference server's chunk prefetcher.
+	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+	const pump = async () => {
+		let next = env.CACHE_BUCKET.get(keys[0]);
+		for (let i = 0; i < keys.length; i++) {
+			const object = await next;
+			if (i + 1 < keys.length) next = env.CACHE_BUCKET.get(keys[i + 1]);
+			if (!object) throw new Error(`File not found in storage: ${keys[i]}`);
+			await (object.body as unknown as ReadableStream<Uint8Array>).pipeTo(writable, {
+				preventClose: true
+			});
+		}
+		await writable.close();
+	};
+	const pumping = pump().catch((e) => writable.abort(e).catch(() => {}));
+	ctx?.waitUntil(pumping);
+
+	if (totalSize != null) baseHeaders.set('Content-Length', String(totalSize));
+	return withVisibility(new Response(readable, { status: 200, headers: baseHeaders }), isPublic);
 }
 
 /**
@@ -233,7 +332,7 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	}
 
 	const cache = await db.findCache(env.ATTIC_DB, body.cache);
-	if (!cache) return errorResponse(404, `Cache not found: ${body.cache}`);
+	if (!cache) return errorResponse(404, `Cache not found: ${body.cache}`, 'NoSuchCache');
 
 	const hashes = body.store_path_hashes.filter((h) => typeof h === 'string' && h.length === 32);
 	const existing = await findExistingPaths(env.ATTIC_DB, body.cache, hashes);
@@ -276,6 +375,30 @@ async function handleGcTrigger(request: Request, env: Env, url: URL): Promise<Re
 	});
 }
 
+/**
+ * GET /{cache}/attic-cache-info and GET /_api/v1/cache-config/{cache}. Like
+ * the reference server this requires pull (anonymous on public caches) — the
+ * discovery document exposes the public key and settings.
+ */
+async function handleCacheInfo(
+	request: Request,
+	env: Env,
+	cacheName: string,
+	baseUrl: string
+): Promise<Response> {
+	const auth = await authorizeCacheRead(request, env, cacheName);
+	if ('response' in auth) return auth.response;
+	try {
+		return withVisibility(
+			jsonResponse(await cacheInfo(env, cacheName, baseUrl)),
+			auth.cache.is_public === 1
+		);
+	} catch (e) {
+		const { status, message, kind } = statusOf(e);
+		return errorResponse(status, message, kind);
+	}
+}
+
 /** Require an authenticated token; returns a Response on failure. */
 async function requireToken(
 	request: Request,
@@ -290,8 +413,14 @@ async function requireToken(
 	}
 }
 
-function statusOf(e: unknown): { status: number; message: string } {
-	if (e instanceof CacheConfigError) return { status: e.status, message: e.message };
+function statusOf(e: unknown): { status: number; message: string; kind?: string } {
+	if (e instanceof CacheConfigError) {
+		return {
+			status: e.status,
+			message: e.message,
+			kind: e.status === 404 ? 'NoSuchCache' : undefined
+		};
+	}
 	return { status: 500, message: `${e}` };
 }
 
@@ -319,12 +448,7 @@ async function handleV1(
 		}
 	}
 	if (method === 'GET' && route === 'cache-config' && segments.length === 4) {
-		try {
-			return jsonResponse(await cacheInfo(env, segments[3], apiBase(env, url)));
-		} catch (e) {
-			const { status, message } = statusOf(e);
-			return errorResponse(status, message);
-		}
+		return handleCacheInfo(request, env, segments[3], apiBase(env, url));
 	}
 
 	if (method === 'POST' && route === 'get-missing-paths' && segments.length === 3) {
@@ -359,7 +483,7 @@ async function handleV1(
 		} else if (method === 'POST' && segments[3] === 'complete' && segments.length === 4) {
 			const body = await (request.json() as Promise<{ upload_token?: string }>).catch(() => null);
 			if (!body?.upload_token) return errorResponse(400, 'Missing upload_token');
-			response = await handleCompleteChunked(env, body.upload_token, canPush);
+			response = await handleCompleteChunked(env, ctx, body.upload_token, canPush);
 		} else {
 			return errorResponse(404, 'Not found');
 		}
@@ -368,6 +492,36 @@ async function handleV1(
 		// (debounced in maybeSizeTriggeredGc) instead of waiting for the cron.
 		if (ctx && response.ok) ctx.waitUntil(maybeSizeTriggeredGc(env));
 		return response;
+	}
+
+	// nimbus extension: GC roots (pin/unpin) over the API. Pinning is a
+	// retention decision, so it takes the same permissions as retention config.
+	if (route === 'gc-root' && (segments.length === 4 || segments.length === 5)) {
+		const cacheName = segments[3];
+		const permission = permissionForCache(token, cacheName);
+		if (!permission.configureCacheRetention && !permission.configureCache) {
+			return errorResponse(403, 'Permission denied: configure cache retention');
+		}
+		const cache = await db.findCache(env.ATTIC_DB, cacheName);
+		if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
+
+		if (method === 'POST' && segments.length === 4) {
+			const body = await (
+				request.json() as Promise<{ store_path_hash?: string; note?: string }>
+			).catch(() => null);
+			const hash = body?.store_path_hash ?? '';
+			if (!/^[0-9a-z]{32}$/.test(hash)) return errorResponse(400, 'Invalid store path hash');
+			await db.addGcRoot(env.ATTIC_DB, cache.id, hash, body?.note ?? null);
+			return jsonResponse({ pinned: hash });
+		}
+		if (method === 'DELETE' && segments.length === 5) {
+			const hash = segments[4];
+			if (!/^[0-9a-z]{32}$/.test(hash)) return errorResponse(400, 'Invalid store path hash');
+			const removed = await db.removeGcRoot(env.ATTIC_DB, cache.id, hash);
+			if (!removed) return errorResponse(404, 'Path is not pinned');
+			return jsonResponse({ unpinned: hash });
+		}
+		return errorResponse(404, 'Not found');
 	}
 
 	if (route === 'cache-config' && (segments.length === 4 || segments.length === 5)) {
@@ -390,6 +544,15 @@ async function handleV1(
 				}
 				const body = await (request.json() as Promise<Record<string, unknown>>).catch(() => null);
 				if (!body) return errorResponse(400, 'Invalid JSON');
+				// The reference gates retention behind its own permission bit (cq);
+				// configure (cr) is accepted too so existing tokens keep working.
+				if (
+					('retention_period' in body || 'retention_max_bytes' in body) &&
+					!permission.configureCacheRetention &&
+					!permission.configureCache
+				) {
+					return errorResponse(403, 'Permission denied: configure cache retention');
+				}
 				const result = await configureCache(
 					env,
 					cacheName,
@@ -416,8 +579,8 @@ async function handleV1(
 				return jsonResponse({ name: body.new_name, renamed_from: cacheName, renamed: true });
 			}
 		} catch (e) {
-			const { status, message } = statusOf(e);
-			return errorResponse(status, message);
+			const { status, message, kind } = statusOf(e);
+			return errorResponse(status, message, kind);
 		}
 	}
 
@@ -429,13 +592,6 @@ async function handleV1(
  * header to the custom domain, which clients cannot reach. */
 function apiBase(env: Env, url: URL): string {
 	return (env.CACHE_BASE_URL ?? url.origin).replace(/\/+$/, '');
-}
-
-function jsonResponse(body: unknown, status = 200): Response {
-	return new Response(JSON.stringify(body), {
-		status,
-		headers: { 'Content-Type': 'application/json' }
-	});
 }
 
 /**
@@ -473,12 +629,7 @@ export async function handleCacheApi(
 			return handleNixCacheInfo(request, env, cacheName, method === 'HEAD');
 		}
 		if (rest === 'attic-cache-info') {
-			try {
-				return jsonResponse(await cacheInfo(env, cacheName, apiBase(env, url)));
-			} catch (e) {
-				const { status, message } = statusOf(e);
-				return errorResponse(status, message);
-			}
+			return handleCacheInfo(request, env, cacheName, apiBase(env, url));
 		}
 		if (rest.endsWith('.narinfo')) {
 			return handleNarInfo(request, env, ctx, cacheName, rest, method === 'HEAD');
@@ -486,7 +637,7 @@ export async function handleCacheApi(
 	}
 
 	if ((method === 'GET' || method === 'HEAD') && segments.length === 3 && segments[1] === 'nar') {
-		return handleNar(request, env, segments[0], segments[2], method === 'HEAD');
+		return handleNar(request, env, ctx, segments[0], segments[2], method === 'HEAD');
 	}
 
 	return errorResponse(404, 'Not found');

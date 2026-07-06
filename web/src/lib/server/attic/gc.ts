@@ -698,8 +698,11 @@ async function reapOrphans(env: Env, stats: GcStats): Promise<void> {
 		orphans = (
 			await db
 				.prepare(
+					// The grace period protects chunks of in-flight CDC uploads, whose
+					// chunkref rows only land once the whole NAR is finalized.
 					'SELECT id, remote_file FROM chunk ' +
-						'WHERE NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id)'
+						'WHERE NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id) ' +
+						"AND datetime(created_at) < datetime('now', '-1 hours')"
 				)
 				.all<{ id: number; remote_file: string }>()
 		).results;

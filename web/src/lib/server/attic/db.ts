@@ -145,6 +145,54 @@ export async function touchObject(
 }
 
 /**
+ * Bump last_accessed_at for every object in a cache backed by this NAR. NAR
+ * URLs carry the nar hash rather than a store path hash, so a download can
+ * only be attributed at NAR granularity (like the reference server's
+ * touch-on-download semantics).
+ */
+export async function touchObjectsForNar(
+	db: D1Database,
+	cacheName: string,
+	narId: number
+): Promise<void> {
+	await db
+		.prepare(
+			'UPDATE object SET last_accessed_at = ?1 WHERE nar_id = ?2 ' +
+				'AND cache_id = (SELECT id FROM cache WHERE name = ?3)'
+		)
+		.bind(new Date().toISOString(), narId, cacheName)
+		.run();
+}
+
+/** Pin a store path's closure against garbage collection. */
+export async function addGcRoot(
+	db: D1Database,
+	cacheId: number,
+	storePathHash: string,
+	note: string | null
+): Promise<void> {
+	await db
+		.prepare(
+			'INSERT OR IGNORE INTO gc_root (cache_id, store_path_hash, note, created_at) VALUES (?1, ?2, ?3, ?4)'
+		)
+		.bind(cacheId, storePathHash, note, new Date().toISOString())
+		.run();
+}
+
+/** Remove a GC pin; returns false when nothing was pinned. */
+export async function removeGcRoot(
+	db: D1Database,
+	cacheId: number,
+	storePathHash: string
+): Promise<boolean> {
+	const result = await db
+		.prepare('DELETE FROM gc_root WHERE cache_id = ?1 AND store_path_hash = ?2')
+		.bind(cacheId, storePathHash)
+		.run();
+	return (result.meta.changes ?? 0) > 0;
+}
+
+/**
  * Whether an admin-issued token (by jti) has been revoked. Missing rows are
  * not revoked (e.g. bootstrap tokens the admin app never tracked).
  */
@@ -266,6 +314,15 @@ export async function updateNarState(db: D1Database, narId: number, state: strin
 	await db.prepare('UPDATE nar SET state = ?1 WHERE id = ?2').bind(state, narId).run();
 }
 
+/** Backfill the compressed-file hash of a chunk (chunked-protocol uploads). */
+export async function updateChunkFileHash(
+	db: D1Database,
+	chunkId: number,
+	fileHash: string
+): Promise<void> {
+	await db.prepare('UPDATE chunk SET file_hash = ?1 WHERE id = ?2').bind(fileHash, chunkId).run();
+}
+
 /**
  * Optimistic dedup lock: atomically bump holders_count if it still has the
  * value we read. Returns the NAR when the CAS wins, null otherwise.
@@ -291,6 +348,46 @@ export async function releaseNarLock(db: D1Database, narId: number): Promise<voi
 	await db
 		.prepare('UPDATE nar SET holders_count = holders_count - 1 WHERE id = ?1 AND holders_count > 0')
 		.bind(narId)
+		.run();
+}
+
+/**
+ * Chunk-level dedup lock, the chunk analog of tryLockNar. Matches on hash AND
+ * compression (a chunk stored with a different codec is a different file).
+ */
+export async function tryLockChunk(
+	db: D1Database,
+	chunkHash: string,
+	compression: string
+): Promise<ChunkRow | null> {
+	const chunk = await db
+		.prepare(
+			'SELECT id, state, chunk_hash, chunk_size, file_hash, file_size, compression, remote_file ' +
+				"FROM chunk WHERE chunk_hash = ?1 AND compression = ?2 AND state = 'V'"
+		)
+		.bind(chunkHash, compression)
+		.first<ChunkRow>();
+	if (!chunk) return null;
+	const current = await db
+		.prepare('SELECT holders_count FROM chunk WHERE id = ?1')
+		.bind(chunk.id)
+		.first<{ holders_count: number }>();
+	if (!current) return null;
+	const result = await db
+		.prepare(
+			'UPDATE chunk SET holders_count = holders_count + 1 WHERE id = ?1 AND holders_count = ?2'
+		)
+		.bind(chunk.id, current.holders_count)
+		.run();
+	return (result.meta.changes ?? 0) > 0 ? chunk : null;
+}
+
+export async function releaseChunkLock(db: D1Database, chunkId: number): Promise<void> {
+	await db
+		.prepare(
+			'UPDATE chunk SET holders_count = holders_count - 1 WHERE id = ?1 AND holders_count > 0'
+		)
+		.bind(chunkId)
 		.run();
 }
 
@@ -359,10 +456,13 @@ export async function deletePendingUpload(db: D1Database, token: string): Promis
 
 export interface CacheUpdate {
 	is_public?: boolean;
+	store_dir?: string;
 	priority?: number;
 	compression?: string;
 	/** undefined = leave unchanged; null = clear. */
 	retention_period?: number | null;
+	/** undefined = leave unchanged; null = clear. */
+	retention_max_bytes?: number | null;
 	upstream_cache_key_names?: string[];
 	keypair?: string;
 }
@@ -379,9 +479,12 @@ export async function updateCache(
 		params.push(value);
 	};
 	if (update.is_public !== undefined) push('is_public', update.is_public ? 1 : 0);
+	if (update.store_dir !== undefined) push('store_dir', update.store_dir);
 	if (update.priority !== undefined) push('priority', update.priority);
 	if (update.compression !== undefined) push('compression', update.compression);
 	if ('retention_period' in update) push('retention_period', update.retention_period ?? null);
+	if ('retention_max_bytes' in update)
+		push('retention_max_bytes', update.retention_max_bytes ?? null);
 	if (update.upstream_cache_key_names !== undefined)
 		push('upstream_cache_key_names', JSON.stringify(update.upstream_cache_key_names));
 	if (update.keypair !== undefined) push('keypair', update.keypair);

@@ -61,10 +61,13 @@ export async function createCache(
 
 export interface ConfigureCacheOptions {
 	is_public?: boolean;
+	store_dir?: string;
 	priority?: number;
 	compression?: string;
-	/** undefined = unchanged; null = clear. */
+	/** undefined = unchanged; null = clear. Days. */
 	retention_period?: number | null;
+	/** undefined = unchanged; null = clear. Compressed bytes. */
+	retention_max_bytes?: number | null;
 	upstream_cache_key_names?: string[];
 	keypair?: { type: 'generate' } | { type: 'set'; keypair: string };
 }
@@ -101,9 +104,13 @@ export async function configureCache(
 
 	await db.updateCache(env.ATTIC_DB, name, {
 		is_public: options.is_public,
+		store_dir: options.store_dir,
 		priority: options.priority,
 		compression,
 		...('retention_period' in options ? { retention_period: options.retention_period } : {}),
+		...('retention_max_bytes' in options
+			? { retention_max_bytes: options.retention_max_bytes }
+			: {}),
 		upstream_cache_key_names: options.upstream_cache_key_names,
 		keypair
 	});
@@ -145,6 +152,14 @@ export async function cacheInfo(env: Env, name: string, baseUrl: string): Promis
 		publicKey = cache.keypair;
 	}
 
+	let upstreamKeyNames: string[] = [];
+	try {
+		const parsed = JSON.parse(cache.upstream_cache_key_names);
+		if (Array.isArray(parsed)) upstreamKeyNames = parsed;
+	} catch {
+		// tolerate malformed rows; the field is only a hint
+	}
+
 	return {
 		substituter_endpoint: `${baseUrl}/${name}/`,
 		api_endpoint: `${baseUrl}/`,
@@ -153,6 +168,9 @@ export async function cacheInfo(env: Env, name: string, baseUrl: string): Promis
 		store_dir: cache.store_dir,
 		priority: cache.priority,
 		compression: cache.compression,
+		upstream_cache_key_names: upstreamKeyNames,
+		retention_period: cache.retention_period,
+		retention_max_bytes: cache.retention_max_bytes,
 		worker_capabilities: {
 			preamble_nar_info: true,
 			server_signing: true,

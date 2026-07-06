@@ -23,6 +23,8 @@ declare global {
 				APP_URL?: string;
 				CACHE_BASE_URL?: string;
 				JWT_HS256_SECRET_BASE64?: string;
+				/** Base64 SPKI public key (PEM or DER) for verifying RS256 tokens. */
+				JWT_RS256_PUBKEY_BASE64?: string;
 				JWT_BOUND_ISSUER?: string;
 				JWT_BOUND_AUDIENCES?: string;
 				SESSION_SECRET?: string;
