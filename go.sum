@@ -49,8 +49,6 @@ github.com/muesli/mango-pflag v0.1.0 h1:UADqbYgpUyRoBja3g6LUL+3LErjpsOwaC9ywvBWe
 github.com/muesli/mango-pflag v0.1.0/go.mod h1:YEQomTxaCUp8PrbhFh10UfbhbQrM/xJ4i2PB8VTLLW0=
 github.com/muesli/roff v0.1.0 h1:YD0lalCotmYuF5HhZliKWlIx7IEhiXeSfq7hNjFqGF8=
 github.com/muesli/roff v0.1.0/go.mod h1:pjAHQM9hdUUwm/krAfrLGgJkXJ+YuhtsfZ42kieB2Ig=
-github.com/nix-community/go-nix v0.0.0-20250101154619-4bdde671e0a1 h1:kpt9ZfKcm+EDG4s40hMwE//d5SBgDjUOrITReV2u4aA=
-github.com/nix-community/go-nix v0.0.0-20250101154619-4bdde671e0a1/go.mod h1:qgCw4bBKZX8qMgGeEZzGFVT3notl42dBjNqO2jut0M0=
 github.com/pelletier/go-toml/v2 v2.4.3 h1:GTRvJQutkOSftxIFD5xw9aepkYNuPWmVJpffdDPYVpY=
 github.com/pelletier/go-toml/v2 v2.4.3/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

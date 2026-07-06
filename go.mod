@@ -6,7 +6,6 @@ require (
 	github.com/charmbracelet/fang v1.0.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/klauspost/compress v1.19.0
-	github.com/nix-community/go-nix v0.0.0-20250101154619-4bdde671e0a1
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/spf13/cobra v1.10.2
 )

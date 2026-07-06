@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"path"
 	"strings"
@@ -123,6 +124,24 @@ func queryPathInfo(ctx context.Context, paths []string, recursive bool) ([]PathI
 		infos = append(infos, info)
 	}
 	return infos, nil
+}
+
+// DumpPath streams the NAR serialization of a store path to w via
+// `nix-store --dump`. Deferring to Nix guarantees the bytes match the narHash
+// that `nix path-info` reported; go-nix's writer miscounts entries whose names
+// start with ".." (e.g. Mercurial's bin/..hg-wrapped-wrapped).
+func DumpPath(ctx context.Context, w io.Writer, storePath string) error {
+	cmd := exec.CommandContext(ctx, "nix-store", "--dump", storePath)
+	cmd.Stdout = w
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("nix-store --dump %s: %s", storePath, msg)
+		}
+		return fmt.Errorf("nix-store --dump %s: %w", storePath, err)
+	}
+	return nil
 }
 
 // normalizeNarHash converts SRI ("sha256-<base64>"), base32

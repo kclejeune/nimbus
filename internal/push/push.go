@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/nix-community/go-nix/pkg/nar"
 
 	"github.com/kclejeune/nimbus/internal/api"
 	"github.com/kclejeune/nimbus/internal/nix"
@@ -146,7 +145,7 @@ func (p *Pusher) narInfo(info nix.PathInfo) *api.NarInfo {
 func (p *Pusher) uploadSimple(ctx context.Context, info nix.PathInfo) (*api.UploadResult, error) {
 	pr, pw := io.Pipe()
 	go func() {
-		pw.CloseWithError(nar.DumpPath(pw, info.Path))
+		pw.CloseWithError(nix.DumpPath(ctx, pw, info.Path))
 	}()
 	result, err := p.Client.UploadPath(ctx, p.narInfo(info), pr, info.NarSize)
 	pr.CloseWithError(err)
@@ -172,7 +171,7 @@ func (p *Pusher) uploadChunked(ctx context.Context, info nix.PathInfo) (*api.Upl
 			pw.CloseWithError(err)
 			return
 		}
-		if err := nar.DumpPath(zw, info.Path); err != nil {
+		if err := nix.DumpPath(ctx, zw, info.Path); err != nil {
 			pw.CloseWithError(err)
 			return
 		}
