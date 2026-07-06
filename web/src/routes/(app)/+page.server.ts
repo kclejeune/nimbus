@@ -8,7 +8,23 @@ export const load: PageServerLoad = async ({ platform }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
-	const [caches, objects, nars, storage, pending, orphanNars, orphanChunks, globalLimit] =
+	// Daily ingest series for the chart: last 90 days, zero-filled below.
+	const DAY_MS = 86400_000;
+	const ingestSince = new Date(Date.now() - 90 * DAY_MS).toISOString().slice(0, 10);
+	const ingestStmt = db
+		.prepare(
+			`SELECT date(o.created_at) AS bucket, COUNT(*) AS paths,
+			        COALESCE(SUM(ch.file_size), 0) AS bytes
+			 FROM object o
+			 JOIN nar n ON n.id = o.nar_id
+			 JOIN chunkref cr ON cr.nar_id = n.id
+			 JOIN chunk ch ON ch.id = cr.chunk_id
+			 WHERE o.created_at >= ?1
+			 GROUP BY bucket ORDER BY bucket`
+		)
+		.bind(ingestSince);
+
+	const [caches, objects, nars, storage, pending, orphanNars, orphanChunks, globalLimit, ingest] =
 		await Promise.all([
 			db.prepare('SELECT COUNT(*) AS n FROM cache WHERE deleted_at IS NULL').first<Count>(),
 			db
@@ -33,8 +49,18 @@ export const load: PageServerLoad = async ({ platform }) => {
 				.first<Count>(),
 			db
 				.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
-				.first<{ value: string }>()
+				.first<{ value: string }>(),
+			ingestStmt.all<{ bucket: string; paths: number; bytes: number }>()
 		]);
+
+	// Zero-fill so the chart doesn't interpolate across idle days.
+	const byDay = new Map(ingest.results.map((r) => [r.bucket, r]));
+	const buckets: { date: string; paths: number; bytes: number }[] = [];
+	for (let ms = new Date(ingestSince).getTime(); ms <= Date.now(); ms += DAY_MS) {
+		const day = new Date(ms).toISOString().slice(0, 10);
+		const row = byDay.get(day);
+		buckets.push({ date: day, paths: row?.paths ?? 0, bytes: row?.bytes ?? 0 });
+	}
 
 	return {
 		stats: {
@@ -46,7 +72,8 @@ export const load: PageServerLoad = async ({ platform }) => {
 			orphanNars: orphanNars?.n ?? 0,
 			orphanChunks: orphanChunks?.n ?? 0
 		},
-		globalMaxBytes: globalLimit ? Number(globalLimit.value) : null
+		globalMaxBytes: globalLimit ? Number(globalLimit.value) : null,
+		buckets
 	};
 };
 
