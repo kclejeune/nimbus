@@ -14,7 +14,13 @@ import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-au
 import * as db from './db';
 import { maybeSizeTriggeredGc, runGc } from './gc';
 import { errorResponse, jsonResponse, withVisibility } from './http';
-import { filterUpstreamPaths, findExistingPaths, parseUpstreams } from './missing-paths';
+import {
+	fetchUpstreamNarInfo,
+	filterUpstreamPaths,
+	findExistingPaths,
+	findUpstreamNar,
+	parseUpstreams
+} from './missing-paths';
 import { buildNarInfo } from './narinfo';
 import {
 	NO_PERMISSION,
@@ -142,7 +148,18 @@ async function handleNarInfo(
 	const isPublic = cache.is_public === 1;
 
 	const found = await db.findObject(env.ATTIC_DB, cacheName, storePathHash);
-	if (!found) return errorResponse(404, 'Not found', 'NoSuchObject');
+	if (!found) {
+		// Paths available upstream are filtered out of pushes, so a complete
+		// closure needs the upstream's narinfo served through this cache.
+		const upstream = await fetchUpstreamNarInfo(
+			env.ATTIC_DB,
+			parseUpstreams(cache.upstream_caches),
+			storePathHash,
+			head
+		);
+		if (upstream) return withVisibility(upstream, isPublic);
+		return errorResponse(404, 'Not found', 'NoSuchObject');
+	}
 
 	if (head) {
 		return withVisibility(
@@ -212,7 +229,16 @@ async function handleNar(
 	const nar =
 		(await db.findNarByHash(env.ATTIC_DB, `sha256:${narHashRaw}`)) ??
 		(await db.findNarByHash(env.ATTIC_DB, narHashRaw));
-	if (!nar) return errorResponse(404, 'Not found', 'NoSuchObject');
+	if (!nar) {
+		// NAR URLs from passthrough narinfo (see handleNarInfo) resolve here:
+		// redirect to the upstream copy rather than storing it.
+		const upstreamUrl = await findUpstreamNar(
+			parseUpstreams(auth.cache.upstream_caches),
+			`nar/${filename}`
+		);
+		if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
+		return errorResponse(404, 'Not found', 'NoSuchObject');
+	}
 
 	const chunks = await db.findChunksForNar(env.ATTIC_DB, nar.id);
 	if (chunks.length === 0) return errorResponse(500, 'NAR has no chunks');

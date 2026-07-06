@@ -146,6 +146,70 @@ export async function filterUpstreamPaths(
 	return remaining;
 }
 
+/**
+ * Upstream passthrough for the read path: serve the upstream's narinfo
+ * verbatim (it carries the upstream's signature, which clients already
+ * trust). Together with the NAR redirect below, this makes a cache a complete
+ * substituter for closures whose upstream-available paths were never pushed
+ * (get-missing-paths filters them out), so `nix copy --from` works.
+ */
+export async function fetchUpstreamNarInfo(
+	db: D1,
+	upstreams: string[],
+	storePathHash: string,
+	head: boolean
+): Promise<Response | null> {
+	for (const rawUpstream of upstreams) {
+		const upstream = rawUpstream.replace(/\/+$/, '');
+
+		const cached = await cachedVerdicts(db, upstream, [storePathHash]);
+		if (cached.get(storePathHash) === false) continue;
+
+		try {
+			const res = await fetch(`${upstream}/${storePathHash}.narinfo`, {
+				method: head ? 'HEAD' : 'GET'
+			});
+			if (res.status === 200) {
+				if (!cached.has(storePathHash)) {
+					await recordVerdicts(db, upstream, [{ hash: storePathHash, present: true }]).catch(
+						() => {}
+					);
+				}
+				return new Response(head ? null : res.body, {
+					status: 200,
+					headers: { 'Content-Type': 'text/x-nix-narinfo' }
+				});
+			}
+			if (res.status === 404) {
+				await recordVerdicts(db, upstream, [{ hash: storePathHash, present: false }]).catch(
+					() => {}
+				);
+			}
+		} catch {
+			// transient upstream trouble: fall through to the next upstream
+		}
+	}
+	return null;
+}
+
+/** URL of an upstream copy of a NAR file (e.g. "nar/<filehash>.nar.xz"). */
+export async function findUpstreamNar(
+	upstreams: string[],
+	narPath: string
+): Promise<string | null> {
+	for (const rawUpstream of upstreams) {
+		const upstream = rawUpstream.replace(/\/+$/, '');
+		const url = `${upstream}/${narPath}`;
+		try {
+			const res = await fetch(url, { method: 'HEAD' });
+			if (res.status === 200) return url;
+		} catch {
+			// try the next upstream
+		}
+	}
+	return null;
+}
+
 export function parseUpstreams(raw: string | null | undefined): string[] {
 	if (!raw) return [];
 	try {
