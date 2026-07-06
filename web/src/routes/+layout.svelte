@@ -9,8 +9,9 @@
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>
 
-<!-- Respects prefers-color-scheme by default; persists an explicit override. -->
-<ModeWatcher />
+<!-- CSS follows prefers-color-scheme on its own; the .light class lets a persisted
+     explicit override beat the media query (see layout.css). -->
+<ModeWatcher lightClassNames={['light']} />
 <Toaster theme={mode.current} position="bottom-right" richColors />
 
 {@render children()}
