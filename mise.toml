@@ -1,4 +1,5 @@
 [tools]
+nodejs = "24"
 go = "1.26"
 golangci-lint = "2.10"
 

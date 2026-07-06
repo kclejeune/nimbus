@@ -3,3 +3,6 @@ node_modules
 build/
 dist/
 .playwright-mcp/
+
+# nix build output
+result
