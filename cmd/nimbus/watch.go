@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -322,8 +323,13 @@ func flushPending(
 	return err
 }
 
+// storeNameRE is nix's base32 hash prefix; anything else in the store
+// directory (tmp-* build dirs, .links, lock files) is not a store path and
+// would make `nix-store --check-validity` fail the whole flush batch.
+var storeNameRE = regexp.MustCompile(`^[0-9a-df-np-sv-z]{32}-`)
+
 func ignoredStoreName(name string) bool {
-	return strings.HasPrefix(name, ".") ||
+	return !storeNameRE.MatchString(name) ||
 		strings.HasSuffix(name, ".drv") ||
 		strings.HasSuffix(name, ".lock") ||
 		strings.Contains(name, ".tmp")
