@@ -1,6 +1,6 @@
 // narinfo rendering, mirroring the Rust worker's build_narinfo byte-for-byte
-// (field order, base32 conversion, server-side signing when the object carries
-// no client signatures).
+// (field order, base32 conversion). The cache's own key always signs the
+// narinfo; client-supplied sigs are served only when the cache has no keypair.
 
 import type { ChunkRow, NarRow, ObjectRow } from './db';
 import { convertHashToBase32 } from './nix-base32';
@@ -81,11 +81,11 @@ export async function buildNarInfo(
 		lines.push(`Deriver: ${object.deriver}`);
 	}
 
-	const sigs = parseJsonArray(object.sigs);
-	for (const sig of sigs) {
-		lines.push(`Sig: ${sig}`);
-	}
-	if (sigs.length === 0 && keypair) {
+	// Always sign with the cache's own key, dropping any client-supplied sigs:
+	// pushed paths often carry signatures from foreign keys (e.g. an upstream
+	// cache), but clients only trust this cache's public key.
+	let signed = false;
+	if (keypair) {
 		try {
 			const fingerprint = computeFingerprint(
 				object.store_path,
@@ -94,9 +94,15 @@ export async function buildNarInfo(
 				references
 			);
 			lines.push(`Sig: ${await signMessage(keypair, fingerprint)}`);
+			signed = true;
 		} catch (e) {
 			// Unsigned narinfo is still valid; don't fail the response.
 			console.warn(`Failed to sign narinfo: ${e}`);
+		}
+	}
+	if (!signed) {
+		for (const sig of parseJsonArray(object.sigs)) {
+			lines.push(`Sig: ${sig}`);
 		}
 	}
 
