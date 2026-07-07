@@ -6,6 +6,7 @@
 
 import { initZstd, zstdCompress } from './zstd';
 
+export { initZstd, zstdDecompress } from './zstd';
 export {
 	extensionFor,
 	uploadCompressionFor,
