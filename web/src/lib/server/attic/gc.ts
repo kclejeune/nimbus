@@ -21,6 +21,7 @@ const UPSTREAM_PRESENT_TTL_SECS = 90 * 24 * 60 * 60;
 const REF_SYNC_BATCH = 500;
 const DELETE_BATCH = 99;
 const PURGE_TAG_BATCH = 100;
+const R2_DELETE_BATCH = 1000;
 
 export interface GcStats {
 	abandoned_uploads_reaped: number;
@@ -780,18 +781,32 @@ async function reapOrphans(env: Env, stats: GcStats): Promise<void> {
 		return;
 	}
 
-	for (const chunk of orphans) {
+	// Bulk-delete: R2 accepts up to 1000 keys per call and D1 an IN-list, so
+	// the subrequest count stays flat. The per-chunk loop this replaces spent
+	// two subrequests per chunk and exhausted the invocation's ~1000-call
+	// budget after ~500 orphans, silently stalling on large backlogs.
+	for (let i = 0; i < orphans.length; i += R2_DELETE_BATCH) {
+		const batch = orphans.slice(i, i + R2_DELETE_BATCH);
+		const keys = batch.map(chunkKey).filter((k): k is string => k !== null);
 		try {
-			const key = chunkKey(chunk);
-			if (key) await env.CACHE_BUCKET.delete(key);
+			if (keys.length > 0) await env.CACHE_BUCKET.delete(keys);
 		} catch (e) {
-			console.warn(`gc: failed to delete R2 object for chunk ${chunk.id}: ${e}`);
+			// Keep the D1 rows so the next run retries the R2 delete.
+			console.warn(`gc: failed to delete ${keys.length} R2 chunk objects: ${e}`);
+			continue;
 		}
-		try {
-			await db.prepare('DELETE FROM chunk WHERE id = ?1').bind(chunk.id).run();
-			stats.orphan_chunks_reaped++;
-		} catch (e) {
-			console.warn(`gc: failed to delete chunk ${chunk.id}: ${e}`);
+		for (let j = 0; j < batch.length; j += DELETE_BATCH) {
+			const ids = batch.slice(j, j + DELETE_BATCH).map((c) => c.id);
+			const placeholders = ids.map((_, k) => `?${k + 1}`).join(', ');
+			try {
+				await db
+					.prepare(`DELETE FROM chunk WHERE id IN (${placeholders})`)
+					.bind(...ids)
+					.run();
+				stats.orphan_chunks_reaped += ids.length;
+			} catch (e) {
+				console.warn(`gc: failed to delete ${ids.length} chunk rows: ${e}`);
+			}
 		}
 	}
 }

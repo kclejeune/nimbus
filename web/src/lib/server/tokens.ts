@@ -6,6 +6,8 @@ export interface TokenScope {
 	cacheScope: string;
 	canPull: boolean;
 	canPush: boolean;
+	/** Grants delete (d) — also gates the manual GC trigger. */
+	canDelete?: boolean;
 	/** Lifetime in days. */
 	days: number;
 }
@@ -33,6 +35,7 @@ export async function mintScopedToken(
 	const perm: CachePermission = {};
 	if (scope.canPull) perm.r = 1;
 	if (scope.canPush) perm.w = 1;
+	if (scope.canDelete) perm.d = 1;
 	const caches: CacheAccess = { [scope.cacheScope]: perm };
 
 	const jti = crypto.randomUUID();

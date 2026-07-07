@@ -59,9 +59,15 @@ export const actions: Actions = {
 		const name = String(form.get('name') ?? '').trim();
 		const canPull = form.get('pull') === 'on';
 		const canPush = form.get('push') === 'on';
+		const canDelete = form.get('delete') === 'on';
 
 		if (!name) return fail(400, { error: 'Give the token a name.' });
-		if (!canPull && !canPush) return fail(400, { error: 'Grant at least one permission.' });
+		if (!canPull && !canPush && !canDelete) {
+			return fail(400, { error: 'Grant at least one permission.' });
+		}
+		if (canDelete && locals.user.role !== 'admin') {
+			return fail(403, { error: 'Only admins can grant delete.' });
+		}
 
 		// The plaintext token is returned exactly once; only its hash is stored.
 		const minted = await mintAndStore(
@@ -73,6 +79,7 @@ export const actions: Actions = {
 				cacheScope: String(form.get('cache') ?? '*'),
 				canPull,
 				canPush,
+				canDelete,
 				days: Math.max(1, Math.min(3650, Number(form.get('expiry_days') ?? 90)))
 			}
 		);

@@ -12,10 +12,10 @@
 
 	function scopeLabel(scopeJson: string): string {
 		try {
-			const s = JSON.parse(scopeJson) as Record<string, { r?: number; w?: number }>;
+			const s = JSON.parse(scopeJson) as Record<string, { r?: number; w?: number; d?: number }>;
 			return Object.entries(s)
 				.map(([cache, p]) => {
-					const perms = [p.r && 'pull', p.w && 'push'].filter(Boolean).join('+');
+					const perms = [p.r && 'pull', p.w && 'push', p.d && 'delete'].filter(Boolean).join('+');
 					return `${cache === '*' ? 'all caches' : cache} · ${perms}`;
 				})
 				.join(', ');
@@ -67,7 +67,7 @@
 				<Input id="name" name="name" placeholder="ci-deploy" />
 			</div>
 
-			<TokenScopeFields cacheNames={data.cacheNames} />
+			<TokenScopeFields cacheNames={data.cacheNames} allowDelete={data.user.role === 'admin'} />
 
 			{#if form?.error}
 				<p class="text-sm text-destructive">{form.error}</p>

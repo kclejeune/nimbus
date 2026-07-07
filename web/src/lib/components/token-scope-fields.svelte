@@ -2,8 +2,11 @@
 	import { Label } from '$lib/components/ui/label/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 
-	let { cacheNames, defaultPush = false }: { cacheNames: string[]; defaultPush?: boolean } =
-		$props();
+	let {
+		cacheNames,
+		defaultPush = false,
+		allowDelete = false
+	}: { cacheNames: string[]; defaultPush?: boolean; allowDelete?: boolean } = $props();
 </script>
 
 <div class="grid grid-cols-2 gap-4">
@@ -40,4 +43,10 @@
 		/>
 		Push
 	</label>
+	{#if allowDelete}
+		<label class="flex items-center gap-2 text-sm">
+			<input name="delete" type="checkbox" class="size-4 rounded border-input text-primary" />
+			Delete
+		</label>
+	{/if}
 </div>

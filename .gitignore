@@ -3,6 +3,7 @@ node_modules
 build/
 dist/
 .playwright-mcp/
+.wrangler/cache
 docs/plans/
 # nix build output
 result
