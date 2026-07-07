@@ -7,6 +7,8 @@
 // Every sweep is idempotent; passes are ordered so each exposes work for the
 // next (retention deletes objects -> orphans NARs -> orphans chunks -> R2).
 
+import { narinfoTag, type ExecutionContext } from './store';
+
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];
 
@@ -17,6 +19,7 @@ const UPSTREAM_ABSENT_TTL_SECS = 24 * 60 * 60;
 const UPSTREAM_PRESENT_TTL_SECS = 90 * 24 * 60 * 60;
 const REF_SYNC_BATCH = 500;
 const DELETE_BATCH = 99;
+const PURGE_TAG_BATCH = 100;
 
 export interface GcStats {
 	abandoned_uploads_reaped: number;
@@ -28,6 +31,7 @@ export interface GcStats {
 	orphan_nars_reaped: number;
 	orphan_chunks_reaped: number;
 	refs_synced: number;
+	narinfo_tags_purged: number;
 	[key: string]: number;
 }
 
@@ -41,13 +45,20 @@ function emptyStats(): GcStats {
 		global_evicted_objects: 0,
 		orphan_nars_reaped: 0,
 		orphan_chunks_reaped: 0,
-		refs_synced: 0
+		refs_synced: 0,
+		narinfo_tags_purged: 0
 	};
 }
 
-export async function runGc(env: Env, opts: { dryRun?: boolean } = {}): Promise<GcStats> {
+export async function runGc(
+	env: Env,
+	opts: { dryRun?: boolean; ctx?: ExecutionContext } = {}
+): Promise<GcStats> {
 	const stats = emptyStats();
 	const dryRun = opts.dryRun ?? false;
+	// Cache-Tags of deleted objects, purged from the edge cache at the end so
+	// long-TTL narinfo entries stop being served once their storage is gone.
+	const purgeTags: string[] = [];
 
 	await syncObjectRefs(env.ATTIC_DB, stats);
 
@@ -55,8 +66,8 @@ export async function runGc(env: Env, opts: { dryRun?: boolean } = {}): Promise<
 		await reapAbandonedUploads(env, stats);
 		await reapAbandonedCaches(env.ATTIC_DB, stats);
 	}
-	await retentionPass(env.ATTIC_DB, stats, dryRun);
-	await globalSizePass(env.ATTIC_DB, stats, dryRun);
+	await retentionPass(env.ATTIC_DB, stats, dryRun, purgeTags);
+	await globalSizePass(env.ATTIC_DB, stats, dryRun, purgeTags);
 	if (!dryRun) {
 		await reapOrphans(env, stats);
 		await env.ATTIC_DB.prepare('DELETE FROM device_auth WHERE expires_at < ?1')
@@ -64,9 +75,38 @@ export async function runGc(env: Env, opts: { dryRun?: boolean } = {}): Promise<
 			.run()
 			.catch((e) => console.warn(`gc: device_auth cleanup failed: ${e}`));
 		await pruneUpstreamChecks(env.ATTIC_DB);
+		await purgeNarinfoTags(opts.ctx, purgeTags, stats);
 	}
 
 	return stats;
+}
+
+/**
+ * Evict the narinfo of reaped objects from the edge cache. Purges are scoped
+ * to the entrypoint that issues them, so this goes through the CachedStore
+ * loopback — a purge from the gateway would target its own (empty) cache.
+ * Best-effort: on failure the entries linger until their max-age expires.
+ */
+async function purgeNarinfoTags(
+	ctx: ExecutionContext | undefined,
+	tags: string[],
+	stats: GcStats
+): Promise<void> {
+	if (tags.length === 0) return;
+	const store = ctx?.exports?.CachedStore;
+	if (!store) {
+		console.warn(`gc: CachedStore unavailable; skipping purge of ${tags.length} narinfo tags`);
+		return;
+	}
+	for (let i = 0; i < tags.length; i += PURGE_TAG_BATCH) {
+		const batch = tags.slice(i, i + PURGE_TAG_BATCH);
+		try {
+			await store.purgeTags(batch);
+			stats.narinfo_tags_purged += batch.length;
+		} catch (e) {
+			console.warn(`gc: narinfo tag purge failed (${batch.length} tags): ${e}`);
+		}
+	}
 }
 
 /**
@@ -112,7 +152,12 @@ interface ObjectRow {
  * its size budget, the keep set is rebuilt greedily: root closures first, then
  * top-level closures by last-access recency until the budget is exhausted.
  */
-async function retentionPass(db: D1, stats: GcStats, dryRun: boolean): Promise<void> {
+async function retentionPass(
+	db: D1,
+	stats: GcStats,
+	dryRun: boolean,
+	purgeTags: string[]
+): Promise<void> {
 	const caches = (
 		await db
 			.prepare(
@@ -170,8 +215,14 @@ async function retentionPass(db: D1, stats: GcStats, dryRun: boolean): Promise<v
 				keep = kept;
 			}
 
-			const doomed = objects.filter((o) => !keep.has(o.id)).map((o) => o.id);
-			if (!dryRun) await deleteObjects(db, doomed);
+			const doomed = objects.filter((o) => !keep.has(o.id));
+			if (!dryRun) {
+				await deleteObjects(
+					db,
+					doomed.map((o) => o.id)
+				);
+				purgeTags.push(...doomed.map((o) => narinfoTag(cache.name, o.store_path_hash)));
+			}
 			stats.size_evicted_objects += sizeEvicted;
 			stats.expired_objects_reaped += doomed.length - sizeEvicted;
 		} catch (e) {
@@ -351,7 +402,12 @@ async function deleteObjects(db: D1, ids: number[]): Promise<void> {
  * so paths shared with another cache never free storage — and are deprioritized
  * implicitly because evicting them gains nothing. gc_root closures are exempt.
  */
-async function globalSizePass(db: D1, stats: GcStats, dryRun: boolean): Promise<void> {
+async function globalSizePass(
+	db: D1,
+	stats: GcStats,
+	dryRun: boolean,
+	purgeTags: string[]
+): Promise<void> {
 	const limitRow = await db
 		.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
 		.first<{ value: string }>();
@@ -365,7 +421,9 @@ async function globalSizePass(db: D1, stats: GcStats, dryRun: boolean): Promise<
 	if (total <= limit) return;
 
 	const caches = (
-		await db.prepare('SELECT id FROM cache WHERE deleted_at IS NULL').all<{ id: number }>()
+		await db
+			.prepare('SELECT id, name FROM cache WHERE deleted_at IS NULL')
+			.all<{ id: number; name: string }>()
 	).results;
 	const narSizes = await loadAllNarSizes(db);
 	const rootRows = (
@@ -378,6 +436,7 @@ async function globalSizePass(db: D1, stats: GcStats, dryRun: boolean): Promise<
 	// Objects still referencing each NAR, across all caches.
 	const narRefs = new Map<number, number>();
 	interface CacheGraph {
+		cacheName: string;
 		surviving: Set<number>;
 		byId: Map<number, ObjectRow>;
 		children: Map<number, number[]>;
@@ -394,6 +453,7 @@ async function globalSizePass(db: D1, stats: GcStats, dryRun: boolean): Promise<
 			.map((r) => byHash.get(r.store_path_hash)?.id)
 			.filter((id): id is number => id !== undefined);
 		graphs.set(cache.id, {
+			cacheName: cache.name,
 			surviving: new Set(objects.map((o) => o.id)),
 			byId: new Map(objects.map((o) => [o.id, o])),
 			children,
@@ -434,6 +494,9 @@ async function globalSizePass(db: D1, stats: GcStats, dryRun: boolean): Promise<
 			if (kept.has(id)) continue;
 			graph.surviving.delete(id);
 			doomed.push(id);
+			if (!dryRun) {
+				purgeTags.push(narinfoTag(graph.cacheName, graph.byId.get(id)!.store_path_hash));
+			}
 			const narId = graph.byId.get(id)!.nar_id;
 			const remaining = (narRefs.get(narId) ?? 1) - 1;
 			narRefs.set(narId, remaining);
@@ -469,14 +532,14 @@ const SIZE_CHECK_DEBOUNCE_MS = 60_000;
  * Hooked into upload traffic via ctx.waitUntil, debounced per isolate so a
  * large push doesn't re-check on every request.
  */
-export async function maybeSizeTriggeredGc(env: Env): Promise<void> {
+export async function maybeSizeTriggeredGc(env: Env, ctx?: ExecutionContext): Promise<void> {
 	const now = Date.now();
 	if (now - lastSizeCheck < SIZE_CHECK_DEBOUNCE_MS) return;
 	lastSizeCheck = now;
 	try {
 		if (await anyBudgetExceeded(env.ATTIC_DB)) {
 			console.log('gc: size budget exceeded, running out-of-band');
-			const stats = await runGc(env);
+			const stats = await runGc(env, { ctx });
 			console.log(`gc (size-triggered): ${JSON.stringify(stats)}`);
 		}
 	} catch (e) {

@@ -30,6 +30,18 @@ export class CachedStore extends WorkerEntrypoint {
 	async fetch(request: Request) {
 		return serveStore(request, this.env as Env, this.ctx as App.Platform['ctx']);
 	}
+
+	/**
+	 * Purge cached responses by Cache-Tag. Purges only affect the cache of the
+	 * entrypoint that issues them, so GC must call in here over the loopback —
+	 * a purge from the gateway would target the gateway's (disabled) cache.
+	 */
+	async purgeTags(tags: string[]) {
+		const cache = (this.ctx as { cache?: { purge(opts: { tags: string[] }): Promise<unknown> } })
+			.cache;
+		if (!cache) throw new Error('ctx.cache unavailable');
+		await cache.purge({ tags });
+	}
 }
 
 /** Whether the request is addressed to the binary-cache hostname. */
@@ -49,8 +61,8 @@ export default {
 		return sveltekit.fetch(request, env, ctx);
 	},
 
-	async scheduled(_controller: unknown, env: Env, _ctx: unknown) {
-		const stats = await runGc(env);
+	async scheduled(_controller: unknown, env: Env, ctx: unknown) {
+		const stats = await runGc(env, { ctx: ctx as App.Platform['ctx'] });
 		console.log(`gc: ${JSON.stringify(stats)}`);
 	}
 };

@@ -14,14 +14,34 @@ import { fetchUpstreamNarInfo, findUpstreamNar, parseUpstreams } from './missing
 import { buildNarInfo } from './narinfo';
 
 type Env = App.Platform['env'];
-type ExecutionContext = App.Platform['ctx'];
+
+/**
+ * Execution context extended with the loopback bindings for the entrypoints
+ * exported from worker-entry.ts; @cloudflare/workers-types does not model
+ * ctx.exports yet.
+ */
+export type ExecutionContext = App.Platform['ctx'] & {
+	exports?: {
+		CachedStore?: {
+			fetch(request: Request): Promise<Response>;
+			purgeTags(tags: string[]): Promise<void>;
+		};
+	};
+};
 
 // NAR URLs are content-addressed by nar hash, so a cached body can never go
 // stale — cache for a year. A GC'd NAR served from cache is still valid data.
 const NAR_CACHE_CONTROL = 'public, max-age=31536000, immutable';
-// narinfo bodies reference chunk keys that GC may reap, so bound the window in
-// which a cached narinfo can point at storage that no longer exists.
-const NARINFO_CACHE_CONTROL = 'public, max-age=86400';
+// narinfo bodies reference chunk keys that GC may reap, but GC purges the
+// narinfo tag of every object it deletes, so max-age only bounds staleness
+// when a purge is missed (e.g. rate-limited). stale-while-revalidate refreshes
+// expiring entries in the background instead of on the critical path.
+const NARINFO_CACHE_CONTROL = 'public, max-age=2592000, stale-while-revalidate=86400';
+
+/** Cache-Tag attached to narinfo responses; GC purges it on object deletion. */
+export function narinfoTag(cacheName: string, storePathHash: string): string {
+	return `narinfo:${cacheName}:${storePathHash}`;
+}
 
 export async function serveStore(
 	request: Request,
@@ -58,6 +78,7 @@ async function serveNarInfo(env: Env, cacheName: string, storePathHash: string):
 		);
 		if (upstream) {
 			upstream.headers.set('Cache-Control', NARINFO_CACHE_CONTROL);
+			upstream.headers.set('Cache-Tag', narinfoTag(cacheName, storePathHash));
 			return withVisibility(upstream, isPublic);
 		}
 		return errorResponse(404, 'Not found', 'NoSuchObject');
@@ -71,7 +92,8 @@ async function serveNarInfo(env: Env, cacheName: string, storePathHash: string):
 			status: 200,
 			headers: {
 				'Content-Type': 'text/x-nix-narinfo',
-				'Cache-Control': NARINFO_CACHE_CONTROL
+				'Cache-Control': NARINFO_CACHE_CONTROL,
+				'Cache-Tag': narinfoTag(cacheName, storePathHash)
 			}
 		}),
 		isPublic

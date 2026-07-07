@@ -15,7 +15,7 @@ import * as db from './db';
 import { maybeSizeTriggeredGc, runGc } from './gc';
 import { errorResponse, jsonResponse, withVisibility } from './http';
 import { filterUpstreamPaths, findExistingPaths, parseUpstreams } from './missing-paths';
-import { serveStore } from './store';
+import { serveStore, type ExecutionContext } from './store';
 import {
 	NO_PERMISSION,
 	parseAuthToken,
@@ -32,11 +32,6 @@ import {
 } from './upload';
 
 type Env = App.Platform['env'];
-// ctx.exports carries the loopback binding for the CachedStore entrypoint;
-// @cloudflare/workers-types does not model it yet.
-type ExecutionContext = App.Platform['ctx'] & {
-	exports?: { CachedStore?: { fetch(request: Request): Promise<Response> } };
-};
 
 async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedToken | null> {
 	const bearer = parseAuthToken(request.headers.get('Authorization'));
@@ -247,7 +242,12 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
  * permission on a probe cache named "gc" (in practice a wildcard-scoped
  * token). `?dry_run=1` reports what retention would delete without deleting.
  */
-async function handleGcTrigger(request: Request, env: Env, url: URL): Promise<Response> {
+async function handleGcTrigger(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	url: URL
+): Promise<Response> {
 	let token: VerifiedToken | null;
 	try {
 		token = await verifyRequestToken(request, env);
@@ -260,7 +260,7 @@ async function handleGcTrigger(request: Request, env: Env, url: URL): Promise<Re
 	}
 
 	const dryRun = url.searchParams.get('dry_run') === '1';
-	const stats = await runGc(env, { dryRun });
+	const stats = await runGc(env, { dryRun, ctx });
 	return new Response(JSON.stringify(dryRun ? { ...stats, dry_run: 1 } : stats), {
 		status: 200,
 		headers: { 'Content-Type': 'application/json' }
@@ -347,7 +347,7 @@ async function handleV1(
 		return handleGetMissingPaths(request, env);
 	}
 	if (method === 'POST' && route === 'gc' && segments.length === 3) {
-		return handleGcTrigger(request, env, url);
+		return handleGcTrigger(request, env, ctx, url);
 	}
 
 	// Everything below requires a token.
@@ -382,7 +382,7 @@ async function handleV1(
 
 		// Uploads grow storage: after one lands, check size budgets out-of-band
 		// (debounced in maybeSizeTriggeredGc) instead of waiting for the cron.
-		if (ctx && response.ok) ctx.waitUntil(maybeSizeTriggeredGc(env));
+		if (ctx && response.ok) ctx.waitUntil(maybeSizeTriggeredGc(env, ctx));
 		return response;
 	}
 
