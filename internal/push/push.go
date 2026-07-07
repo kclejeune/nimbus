@@ -23,22 +23,38 @@ type Pusher struct {
 	Cache  string
 	Jobs   int
 	Out    io.Writer
+	// SkipInvalid tolerates paths missing from the local store: they are
+	// always skipped (never fail the batch), but without SkipInvalid their
+	// presence makes Push return an error after the valid paths upload.
+	SkipInvalid bool
 }
 
 // Push uploads the closures of the given paths, skipping whatever the server
 // reports as already present (locally or in its upstream caches).
 func (p *Pusher) Push(ctx context.Context, paths []string) error {
-	// Skip paths missing from the local store instead of failing the batch:
-	// CI pushes evaluated outPaths, and checks that `nix flake check` skipped
-	// as foreign-platform were never built locally.
+	// Paths missing from the local store never fail the batch — CI pushes
+	// evaluated outPaths, and checks that `nix flake check` skipped as
+	// foreign-platform were never built locally — but they do fail the exit
+	// code unless SkipInvalid says they are expected.
 	paths, invalid, err := nix.SplitValid(ctx, paths)
 	if err != nil {
 		return err
 	}
-	for _, m := range invalid {
-		fmt.Fprintf(p.Out, "skipping %s: not valid in the local store\n", m)
+	var invalidErr error
+	if len(invalid) > 0 {
+		level := "warning"
+		if !p.SkipInvalid {
+			level = "error"
+			invalidErr = fmt.Errorf("skipped %d paths not valid in the local store", len(invalid))
+		}
+		for _, m := range invalid {
+			fmt.Fprintf(p.Out, "%s: skipping %s: not valid in the local store\n", level, m)
+		}
 	}
 	if len(paths) == 0 {
+		if invalidErr != nil {
+			return invalidErr
+		}
 		fmt.Fprintln(p.Out, "nothing to push")
 		return nil
 	}
@@ -64,7 +80,7 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 	_, _ = fmt.Fprintf(p.Out, "⚙️  Pushing %d paths to %q (%d already present or upstream)\n",
 		len(missing), p.Cache, len(infos)-len(missing))
 	if len(missing) == 0 {
-		return nil
+		return invalidErr
 	}
 
 	jobs := max(p.Jobs, 1)
@@ -106,7 +122,10 @@ feed:
 	}
 	close(queue)
 	wg.Wait()
-	return firstErr
+	if firstErr != nil {
+		return firstErr
+	}
+	return invalidErr
 }
 
 func (p *Pusher) uploadOne(ctx context.Context, info nix.PathInfo) error {

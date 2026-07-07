@@ -84,7 +84,7 @@ export async function buildNarInfo(
 	// Always sign with the cache's own key, dropping any client-supplied sigs:
 	// pushed paths often carry signatures from foreign keys (e.g. an upstream
 	// cache), but clients only trust this cache's public key.
-	let signed = false;
+	const storedSigs = () => parseJsonArray(object.sigs).map((sig) => `Sig: ${sig}`);
 	if (keypair) {
 		try {
 			const fingerprint = computeFingerprint(
@@ -94,16 +94,13 @@ export async function buildNarInfo(
 				references
 			);
 			lines.push(`Sig: ${await signMessage(keypair, fingerprint)}`);
-			signed = true;
 		} catch (e) {
-			// Unsigned narinfo is still valid; don't fail the response.
+			// Unsigned narinfo is still valid; fall back to any stored sigs.
 			console.warn(`Failed to sign narinfo: ${e}`);
+			lines.push(...storedSigs());
 		}
-	}
-	if (!signed) {
-		for (const sig of parseJsonArray(object.sigs)) {
-			lines.push(`Sig: ${sig}`);
-		}
+	} else {
+		lines.push(...storedSigs());
 	}
 
 	if (object.ca) {

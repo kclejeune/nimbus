@@ -13,6 +13,7 @@ import (
 func pushCmd() *cobra.Command {
 	var jobs int
 	var stdin bool
+	var skipInvalid bool
 
 	cmd := &cobra.Command{
 		Use:   "push [SERVER:]CACHE [PATHS...]",
@@ -41,10 +42,11 @@ func pushCmd() *cobra.Command {
 			}
 
 			pusher := &push.Pusher{
-				Client: client,
-				Cache:  ref.Cache,
-				Jobs:   jobs,
-				Out:    os.Stdout,
+				Client:      client,
+				Cache:       ref.Cache,
+				Jobs:        jobs,
+				Out:         os.Stdout,
+				SkipInvalid: skipInvalid,
 			}
 			return pusher.Push(cmd.Context(), paths)
 		},
@@ -52,5 +54,7 @@ func pushCmd() *cobra.Command {
 
 	cmd.Flags().IntVarP(&jobs, "jobs", "j", 5, "parallel upload jobs")
 	cmd.Flags().BoolVar(&stdin, "stdin", false, "read paths from stdin, one per line")
+	cmd.Flags().BoolVar(&skipInvalid, "skip-invalid", false,
+		"exit 0 even when paths not valid in the local store were skipped")
 	return cmd
 }
