@@ -15,7 +15,7 @@ import * as db from './db';
 import { maybeSizeTriggeredGc, runGc } from './gc';
 import { errorResponse, jsonResponse, withVisibility } from './http';
 import { filterUpstreamPaths, findExistingPaths, parseUpstreams } from './missing-paths';
-import { serveStore, type ExecutionContext } from './store';
+import { cacheTag, serveStore, type ExecutionContext } from './store';
 import {
 	NO_PERMISSION,
 	parseAuthToken,
@@ -450,6 +450,14 @@ async function handleV1(
 					cacheName,
 					body as import('./cache-config').ConfigureCacheOptions
 				);
+				// A rotated keypair re-signs every narinfo; evict the cache's cached
+				// copies so clients don't fail signature verification until they
+				// expire. Best-effort, like the GC purge.
+				if (result.public_key && ctx?.exports?.CachedStore) {
+					await ctx.exports.CachedStore.purgeTags([cacheTag(cacheName)]).catch((e) =>
+						console.warn(`cache-config: narinfo purge after keypair change failed: ${e}`)
+					);
+				}
 				return jsonResponse({ name: cacheName, updated: true, ...result });
 			}
 			if (method === 'DELETE' && segments.length === 4) {

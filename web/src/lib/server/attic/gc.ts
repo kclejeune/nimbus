@@ -7,6 +7,7 @@
 // Every sweep is idempotent; passes are ordered so each exposes work for the
 // next (retention deletes objects -> orphans NARs -> orphans chunks -> R2).
 
+import { chunkKey } from './db';
 import { narinfoTag, type ExecutionContext } from './store';
 
 type Env = App.Platform['env'];
@@ -98,6 +99,8 @@ async function purgeNarinfoTags(
 		console.warn(`gc: CachedStore unavailable; skipping purge of ${tags.length} narinfo tags`);
 		return;
 	}
+	// Batches run sequentially on purpose: purge shares the zone purge API's
+	// rate limits, and GC latency is off any request path.
 	for (let i = 0; i < tags.length; i += PURGE_TAG_BATCH) {
 		const batch = tags.slice(i, i + PURGE_TAG_BATCH);
 		try {
@@ -462,7 +465,7 @@ async function globalSizePass(
 		for (const o of objects) narRefs.set(o.nar_id, (narRefs.get(o.nar_id) ?? 0) + 1);
 	}
 
-	const doomed: number[] = [];
+	const doomed: { id: number; tag: string }[] = [];
 	const MAX_EVICTIONS = 500;
 
 	for (let round = 0; total > limit && round < MAX_EVICTIONS; round++) {
@@ -493,18 +496,21 @@ async function globalSizePass(
 		for (const id of targetClosure) {
 			if (kept.has(id)) continue;
 			graph.surviving.delete(id);
-			doomed.push(id);
-			if (!dryRun) {
-				purgeTags.push(narinfoTag(graph.cacheName, graph.byId.get(id)!.store_path_hash));
-			}
-			const narId = graph.byId.get(id)!.nar_id;
-			const remaining = (narRefs.get(narId) ?? 1) - 1;
-			narRefs.set(narId, remaining);
-			if (remaining === 0) total -= narSizes.get(narId) ?? 0;
+			const obj = graph.byId.get(id)!;
+			doomed.push({ id, tag: narinfoTag(graph.cacheName, obj.store_path_hash) });
+			const remaining = (narRefs.get(obj.nar_id) ?? 1) - 1;
+			narRefs.set(obj.nar_id, remaining);
+			if (remaining === 0) total -= narSizes.get(obj.nar_id) ?? 0;
 		}
 	}
 
-	if (!dryRun) await deleteObjects(db, doomed);
+	if (!dryRun) {
+		await deleteObjects(
+			db,
+			doomed.map((d) => d.id)
+		);
+		purgeTags.push(...doomed.map((d) => d.tag));
+	}
 	stats.global_evicted_objects += doomed.length;
 	if (total > limit) {
 		console.warn(`gc: still over global limit after eviction pass (${total} > ${limit})`);
@@ -776,7 +782,7 @@ async function reapOrphans(env: Env, stats: GcStats): Promise<void> {
 
 	for (const chunk of orphans) {
 		try {
-			const key: string | undefined = JSON.parse(chunk.remote_file).key;
+			const key = chunkKey(chunk);
 			if (key) await env.CACHE_BUCKET.delete(key);
 		} catch (e) {
 			console.warn(`gc: failed to delete R2 object for chunk ${chunk.id}: ${e}`);

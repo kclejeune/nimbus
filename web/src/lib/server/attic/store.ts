@@ -43,6 +43,17 @@ export function narinfoTag(cacheName: string, storePathHash: string): string {
 	return `narinfo:${cacheName}:${storePathHash}`;
 }
 
+/** Cache-wide tag on narinfo responses, for one-call purges when a config
+ * change invalidates all of them at once (keypair rotation re-signs every
+ * narinfo). */
+export function cacheTag(cacheName: string): string {
+	return `cache:${cacheName}`;
+}
+
+function narinfoTags(cacheName: string, storePathHash: string): string {
+	return `${narinfoTag(cacheName, storePathHash)},${cacheTag(cacheName)}`;
+}
+
 export async function serveStore(
 	request: Request,
 	env: Env,
@@ -78,7 +89,7 @@ async function serveNarInfo(env: Env, cacheName: string, storePathHash: string):
 		);
 		if (upstream) {
 			upstream.headers.set('Cache-Control', NARINFO_CACHE_CONTROL);
-			upstream.headers.set('Cache-Tag', narinfoTag(cacheName, storePathHash));
+			upstream.headers.set('Cache-Tag', narinfoTags(cacheName, storePathHash));
 			return withVisibility(upstream, isPublic);
 		}
 		return errorResponse(404, 'Not found', 'NoSuchObject');
@@ -93,19 +104,11 @@ async function serveNarInfo(env: Env, cacheName: string, storePathHash: string):
 			headers: {
 				'Content-Type': 'text/x-nix-narinfo',
 				'Cache-Control': NARINFO_CACHE_CONTROL,
-				'Cache-Tag': narinfoTag(cacheName, storePathHash)
+				'Cache-Tag': narinfoTags(cacheName, storePathHash)
 			}
 		}),
 		isPublic
 	);
-}
-
-function chunkKey(chunk: db.ChunkRow): string | null {
-	try {
-		return JSON.parse(chunk.remote_file).key ?? null;
-	} catch {
-		return null;
-	}
 }
 
 async function serveNar(
@@ -144,7 +147,7 @@ async function serveNar(
 
 	const keys: string[] = [];
 	for (const chunk of chunks) {
-		const key = chunkKey(chunk);
+		const key = db.chunkKey(chunk);
 		if (!key) return errorResponse(500, 'No key in remote file');
 		keys.push(key);
 	}

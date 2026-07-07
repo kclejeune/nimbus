@@ -49,6 +49,15 @@ export interface ChunkRow {
 	remote_file: string;
 }
 
+/** Storage key from a chunk's remote_file JSON envelope, null if malformed. */
+export function chunkKey(chunk: { remote_file: string }): string | null {
+	try {
+		return JSON.parse(chunk.remote_file).key ?? null;
+	} catch {
+		return null;
+	}
+}
+
 export async function findCache(db: D1Database, name: string): Promise<CacheRow | null> {
 	return db
 		.prepare(
