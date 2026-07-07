@@ -28,6 +28,21 @@ type Pusher struct {
 // Push uploads the closures of the given paths, skipping whatever the server
 // reports as already present (locally or in its upstream caches).
 func (p *Pusher) Push(ctx context.Context, paths []string) error {
+	// Skip paths missing from the local store instead of failing the batch:
+	// CI pushes evaluated outPaths, and checks that `nix flake check` skipped
+	// as foreign-platform were never built locally.
+	paths, invalid, err := nix.SplitValid(ctx, paths)
+	if err != nil {
+		return err
+	}
+	for _, m := range invalid {
+		fmt.Fprintf(p.Out, "skipping %s: not valid in the local store\n", m)
+	}
+	if len(paths) == 0 {
+		fmt.Fprintln(p.Out, "nothing to push")
+		return nil
+	}
+
 	infos, err := nix.ClosurePathInfo(ctx, paths)
 	if err != nil {
 		return err

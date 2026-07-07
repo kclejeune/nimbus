@@ -43,6 +43,39 @@ func HashPart(storePath string) string {
 	return base[:32]
 }
 
+// SplitValid partitions paths into those valid in the local store and those
+// not. Unlike `nix path-info`, `nix-store --check-validity --print-invalid`
+// reports invalid paths on stdout without failing the whole query.
+func SplitValid(ctx context.Context, paths []string) (valid, invalid []string, err error) {
+	args := append([]string{"--check-validity", "--print-invalid"}, paths...)
+	cmd := exec.CommandContext(ctx, "nix-store", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, nil, fmt.Errorf(
+				"nix-store --check-validity: %s",
+				strings.TrimSpace(string(ee.Stderr)),
+			)
+		}
+		return nil, nil, fmt.Errorf("nix-store --check-validity: %w", err)
+	}
+
+	invalidSet := make(map[string]bool)
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			invalidSet[line] = true
+		}
+	}
+	for _, p := range paths {
+		if invalidSet[p] {
+			invalid = append(invalid, p)
+		} else {
+			valid = append(valid, p)
+		}
+	}
+	return valid, invalid, nil
+}
+
 // rawPathInfo tolerates both `nix path-info --json` output shapes: an array
 // of objects with a "path" field (older) or an object keyed by path (newer).
 type rawPathInfo struct {
