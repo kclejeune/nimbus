@@ -326,13 +326,30 @@ export async function updateNarState(db: D1Database, narId: number, state: strin
 	await db.prepare('UPDATE nar SET state = ?1 WHERE id = ?2').bind(state, narId).run();
 }
 
-/** Backfill the compressed-file hash of a chunk (chunked-protocol uploads). */
-export async function updateChunkFileHash(
+/**
+ * Which of the given `sha256:`-prefixed chunk hashes exist as valid chunks
+ * under the given compression. Batched IN queries; input order not preserved.
+ */
+export async function findExistingChunkHashes(
 	db: D1Database,
-	chunkId: number,
-	fileHash: string
-): Promise<void> {
-	await db.prepare('UPDATE chunk SET file_hash = ?1 WHERE id = ?2').bind(fileHash, chunkId).run();
+	chunkHashes: string[],
+	compression: string
+): Promise<Set<string>> {
+	const existing = new Set<string>();
+	const BATCH = 99;
+	for (let i = 0; i < chunkHashes.length; i += BATCH) {
+		const batch = chunkHashes.slice(i, i + BATCH);
+		const placeholders = batch.map((_, j) => `?${j + 2}`).join(', ');
+		const { results } = await db
+			.prepare(
+				`SELECT chunk_hash FROM chunk WHERE compression = ?1 AND state = 'V' ` +
+					`AND chunk_hash IN (${placeholders})`
+			)
+			.bind(compression, ...batch)
+			.all<{ chunk_hash: string }>();
+		for (const row of results) existing.add(row.chunk_hash);
+	}
+	return existing;
 }
 
 /**

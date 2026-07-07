@@ -3,6 +3,9 @@ package push
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -11,11 +14,12 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/kclejeune/nimbus/internal/api"
+	"github.com/kclejeune/nimbus/internal/chunker"
 	"github.com/kclejeune/nimbus/internal/nix"
 )
 
-// Above this NAR size the chunked protocol is used: the client compresses
-// with zstd and uploads fixed-size parts, matching the attic client.
+// Above this NAR size (the Workers request-body limit) the client cuts the
+// NAR with FastCDC itself and uploads only the chunks the server is missing.
 const chunkedThreshold = 100 * 1024 * 1024
 
 type Pusher struct {
@@ -186,50 +190,129 @@ func (p *Pusher) uploadSimple(ctx context.Context, info nix.PathInfo) (*api.Uplo
 	return result, err
 }
 
-// uploadChunked compresses client-side with zstd and uploads sequential
-// fixed-size parts under an opaque server-issued token.
+// uploadChunked cuts the NAR with the server-compatible FastCDC, uploads only
+// the chunks the server lacks (compressed client-side), then assembles the
+// NAR from chunk references with a stateless complete call.
 func (p *Pusher) uploadChunked(ctx context.Context, info nix.PathInfo) (*api.UploadResult, error) {
-	upload, err := p.Client.StartChunkedUpload(ctx, p.narInfo(info), info.NarSize)
+	// Pass 1: boundaries and hashes only. Store paths are immutable, so the
+	// second dump below yields identical bytes; the hash check in pass 2
+	// guards the assumption.
+	var descs []api.ChunkDesc
+	if err := p.eachChunk(ctx, info.Path, func(chunk []byte) error {
+		sum := sha256.Sum256(chunk)
+		descs = append(
+			descs,
+			api.ChunkDesc{Hash: hex.EncodeToString(sum[:]), Size: int64(len(chunk))},
+		)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	query, err := p.Client.QueryChunks(ctx, p.narInfo(info), info.NarSize, descs)
 	if err != nil {
 		return nil, err
 	}
-	if upload.Token == "" {
-		// Deduplicated at start: the server answered with an upload result.
+	if query.Kind == "deduplicated" {
 		return &api.UploadResult{Kind: "deduplicated"}, nil
 	}
 
-	pr, pw := io.Pipe()
-	go func() {
-		zw, err := zstd.NewWriter(pw)
-		if err != nil {
-			pw.CloseWithError(err)
-			return
-		}
-		if err := nix.DumpPath(ctx, zw, info.Path); err != nil {
-			pw.CloseWithError(err)
-			return
-		}
-		pw.CloseWithError(zw.Close())
-	}()
+	missing := make(map[string]bool, len(query.MissingChunkHashes))
+	for _, h := range query.MissingChunkHashes {
+		missing[h] = true
+	}
 
-	buf := make([]byte, upload.ChunkSize)
-	for part := 1; ; part++ {
-		n, err := io.ReadFull(pr, buf)
-		if n > 0 {
-			if err := p.Client.UploadChunk(ctx, upload.Token, part, buf[:n]); err != nil {
-				pr.CloseWithError(err)
-				return nil, err
-			}
+	for attempt := 0; ; attempt++ {
+		if err := p.uploadMissingChunks(ctx, info, descs, missing); err != nil {
+			return nil, err
 		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
-		}
+		result, stillMissing, err := p.Client.CompleteChunks(
+			ctx,
+			p.narInfo(info),
+			info.NarSize,
+			descs,
+		)
 		if err != nil {
 			return nil, err
 		}
+		if result != nil {
+			return result, nil
+		}
+		if attempt >= 1 {
+			return nil, fmt.Errorf("server still missing %d chunks after retry", len(stillMissing))
+		}
+		// GC raced the upload; re-send the listed chunks and retry once.
+		missing = make(map[string]bool, len(stillMissing))
+		for _, h := range stillMissing {
+			missing[h] = true
+		}
 	}
+}
 
-	return p.Client.CompleteChunkedUpload(ctx, upload.Token)
+// uploadMissingChunks re-dumps the NAR and uploads each chunk in the missing
+// set, zstd-compressed as a single frame.
+func (p *Pusher) uploadMissingChunks(
+	ctx context.Context,
+	info nix.PathInfo,
+	descs []api.ChunkDesc,
+	missing map[string]bool,
+) error {
+	if len(missing) == 0 {
+		return nil
+	}
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = enc.Close() }()
+
+	idx := 0
+	sent := make(map[string]bool, len(missing))
+	err = p.eachChunk(ctx, info.Path, func(chunk []byte) error {
+		if idx >= len(descs) {
+			return errors.New("store path changed between passes")
+		}
+		desc := descs[idx]
+		idx++
+		sum := sha256.Sum256(chunk)
+		if hex.EncodeToString(sum[:]) != desc.Hash {
+			return errors.New("store path changed between passes")
+		}
+		if !missing[desc.Hash] || sent[desc.Hash] {
+			return nil
+		}
+		sent[desc.Hash] = true
+		return p.Client.UploadChunk(ctx, p.Cache, desc.Hash, enc.EncodeAll(chunk, nil))
+	})
+	if err != nil {
+		return err
+	}
+	if idx != len(descs) {
+		return errors.New("store path changed between passes")
+	}
+	return nil
+}
+
+// eachChunk streams the NAR dump through the FastCDC cutter.
+func (p *Pusher) eachChunk(ctx context.Context, path string, emit func([]byte) error) error {
+	cutter := chunker.New()
+	w := &chunkWriter{cutter: cutter, emit: emit}
+	if err := nix.DumpPath(ctx, w, path); err != nil {
+		return err
+	}
+	return cutter.Finish(emit)
+}
+
+type chunkWriter struct {
+	cutter *chunker.Chunker
+	emit   func([]byte) error
+}
+
+func (w *chunkWriter) Write(p []byte) (int, error) {
+	if err := w.cutter.Push(p, w.emit); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func formatBytes(n int64) string {

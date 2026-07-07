@@ -1,35 +1,38 @@
 // Upload endpoints:
 //
-//   PUT  /_api/v1/upload-path            raw NAR body (or preamble variant);
-//                                        server compresses per cache config
-//   POST /_api/v1/upload-path/start      chunked transport for >100MB NARs
-//   PUT  /_api/v1/upload-path/chunk      (Workers request-body limit); client
-//   POST /_api/v1/upload-path/complete   pre-compresses, stored verbatim
+//   PUT  /_api/v1/upload-path                  raw NAR body (or preamble
+//                                              variant); server compresses
+//   POST /_api/v1/upload-path/chunks           client-side CDC for >100MB
+//   PUT  /_api/v1/upload-path/chunks/{hash}    NARs (Workers request-body
+//   POST /_api/v1/upload-path/chunks/complete  limit); client cuts + zstds
 //
 // NARs below NAR_CHUNK_THRESHOLD are stored whole (one chunk, compressed in
 // one shot). Larger simple uploads are FastCDC-chunked: each content-defined
 // chunk dedups against the store or is compressed and stored under its own
-// content-addressed key, and downloads stream the chunks back to back. The
-// >100MB chunked transport still stores whole NARs — its parts arrive
-// pre-compressed, so the server cannot cut content-defined boundaries.
+// content-addressed key, and downloads stream the chunks back to back. NARs
+// above the Workers request-body limit use the same chunk space: the client
+// cuts with a boundary-identical FastCDC, uploads only the chunks the server
+// lacks (pre-compressed, stored verbatim), and a stateless complete call
+// assembles the NAR from chunk references.
 
 import { FastCdcChunker, NAR_CHUNK_THRESHOLD, chunkBuffer } from './chunking';
 import {
 	compressBuffer,
 	extensionFor,
+	initZstd,
 	uploadCompressionFor,
+	zstdDecompress,
 	type CompressionKind
 } from './compression';
 import * as db from './db';
 import { errorResponse, jsonResponse as json } from './http';
 
 type Env = App.Platform['env'];
-type ExecutionContext = App.Platform['ctx'];
 
 const MAX_BUFFERED_SIZE = 15 * 1024 * 1024;
 const MAX_PREAMBLE_SIZE = 1024 * 1024;
-/** Chunk size handed to clients for the chunked protocol. */
-const MAX_CHUNK_SIZE = 50 * 1024 * 1024;
+/** Upper bound on a single CDC chunk — matches the chunker's MAX_CHUNK. */
+const CDC_MAX_CHUNK = 16 * 1024 * 1024;
 
 const NAR_INFO_HEADER = 'X-Attic-Nar-Info';
 const NAR_INFO_PREAMBLE_HEADER = 'X-Attic-Nar-Info-Preamble-Size';
@@ -189,14 +192,14 @@ async function processNarChunk(
 }
 
 /** nar + chunk + chunkref + object rows for a CDC-chunked NAR. */
-async function finalizeChunkedNar(
+async function linkChunkedNar(
 	env: Env,
 	info: UploadNarInfo,
 	cacheId: number,
 	kind: CompressionKind,
 	records: NarChunkRecord[],
 	narSize: number
-): Promise<Response> {
+): Promise<void> {
 	const d1 = env.ATTIC_DB;
 	const narId = await db.createNar(d1, {
 		state: 'P',
@@ -252,7 +255,17 @@ async function finalizeChunkedNar(
 	} finally {
 		await releaseChunkLocks(env, records);
 	}
+}
 
+async function finalizeChunkedNar(
+	env: Env,
+	info: UploadNarInfo,
+	cacheId: number,
+	kind: CompressionKind,
+	records: NarChunkRecord[],
+	narSize: number
+): Promise<Response> {
+	await linkChunkedNar(env, info, cacheId, kind, records, narSize);
 	const dedupedBytes = records.reduce((sum, r) => sum + (r.key ? 0 : r.size), 0);
 	const fileSize = records.every((r) => r.fileSize != null)
 		? records.reduce((sum, r) => sum + (r.fileSize ?? 0), 0)
@@ -495,174 +508,191 @@ async function handleStreamingUpload(
 	return finalizeChunkedNar(env, info, cacheId, kind, records, narSize);
 }
 
-// --- Chunked protocol (client-side zstd, >100MB NARs) ---
+// --- Client-side CDC protocol (>100MB NARs) ---
 
-interface StartChunkedRequest {
+export interface CdcManifest {
 	nar_info: UploadNarInfo;
 	nar_size: number;
+	/** Raw sha256 hex + uncompressed size per chunk, in NAR order. */
+	chunks: { hash: string; size: number }[];
 }
 
-/** POST /_api/v1/upload-path/start */
-export async function handleStartChunked(env: Env, body: StartChunkedRequest): Promise<Response> {
+const HEX64 = /^[0-9a-f]{64}$/;
+
+/** Shared manifest validation; returns an error Response or null. */
+function validateManifest(body: CdcManifest): Response | null {
+	if (!Array.isArray(body.chunks) || body.chunks.length === 0) {
+		return errorResponse(400, 'Manifest has no chunks');
+	}
+	let total = 0;
+	for (const chunk of body.chunks) {
+		if (!HEX64.test(chunk.hash ?? '')) return errorResponse(400, `Invalid chunk hash`);
+		if (!Number.isInteger(chunk.size) || chunk.size <= 0 || chunk.size > CDC_MAX_CHUNK) {
+			return errorResponse(400, `Invalid chunk size: ${chunk.size}`);
+		}
+		total += chunk.size;
+	}
+	if (total !== body.nar_size) {
+		return errorResponse(400, `Chunk sizes sum to ${total}, expected nar_size ${body.nar_size}`);
+	}
+	return null;
+}
+
+/**
+ * POST /_api/v1/upload-path/chunks — which chunks of this NAR the server
+ * lacks. Whole-NAR dedup first (no proof of possession possible — no bytes
+ * yet); otherwise existence is checked against (chunk_hash, zstd).
+ */
+export async function handleCdcQuery(env: Env, body: CdcManifest): Promise<Response> {
+	const denied = validateManifest(body);
+	if (denied) return denied;
 	const info = body.nar_info;
 	const cache = await db.findCache(env.ATTIC_DB, info.cache);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
 
-	// No proof of possession here: at /start no bytes have been sent yet, and
-	// requiring a full upload on dedup would defeat the protocol's purpose.
 	const existing = await db.tryLockNar(env.ATTIC_DB, info.nar_hash);
 	if (existing) return finishDeduplicated(env, info, cache.id, existing.id);
 
-	// The chunked protocol transports client-side zstd bytes; they are stored
-	// verbatim, so the recorded compression must be zstd regardless of config.
-	const storageKey = storageKeyFor(info.nar_hash, 'zstd');
-	const multipart = await env.CACHE_BUCKET.createMultipartUpload(storageKey);
-
-	const tokenBytes = new Uint8Array(32);
-	crypto.getRandomValues(tokenBytes);
-	const token = [...tokenBytes].map((b) => b.toString(16).padStart(2, '0')).join('');
-
-	try {
-		await db.createPendingUpload(env.ATTIC_DB, {
-			token,
-			cache_id: cache.id,
-			cache_name: info.cache,
-			r2_upload_id: multipart.uploadId,
-			r2_key: multipart.key,
-			storage_key: storageKey,
-			nar_info: JSON.stringify(info),
-			expected_nar_size: body.nar_size,
-			compression: 'zstd',
-			parts_uploaded: 0,
-			bytes_received: 0,
-			uploaded_parts: '[]'
-		});
-	} catch (e) {
-		await multipart.abort().catch(() => {});
-		throw e;
-	}
-
-	return json({ upload_token: token, chunk_size: MAX_CHUNK_SIZE });
+	const unique = [...new Set(body.chunks.map((c) => `sha256:${c.hash}`))];
+	const present = await db.findExistingChunkHashes(env.ATTIC_DB, unique, 'zstd');
+	const missing = unique.filter((h) => !present.has(h)).map((h) => h.slice('sha256:'.length));
+	return json({ kind: 'pending', missing_chunk_hashes: missing });
 }
 
-/** PUT /_api/v1/upload-path/chunk — requires push on the upload's cache. */
-export async function handleUploadChunk(
+/**
+ * PUT /_api/v1/upload-path/chunks/{hash} — one zstd-compressed chunk, stored
+ * verbatim under its content address. Stateless: the chunk row lands
+ * immediately (state V); an abandoned push leaves unreferenced rows that the
+ * orphan pass reaps after its grace period.
+ */
+export async function handleCdcChunkPut(
 	request: Request,
 	env: Env,
-	canPush: (cacheName: string) => boolean
+	hash: string
 ): Promise<Response> {
-	const token = request.headers.get('X-Upload-Token');
-	if (!token) return errorResponse(400, 'Missing X-Upload-Token header');
-	const partNumber = Number(request.headers.get('X-Part-Number'));
-	if (!Number.isInteger(partNumber) || partNumber < 1) {
-		return errorResponse(400, 'Missing or invalid X-Part-Number header');
-	}
+	if (!HEX64.test(hash)) return errorResponse(400, 'Invalid chunk hash');
 
-	const upload = await db.getPendingUpload(env.ATTIC_DB, token);
-	if (!upload) return errorResponse(404, 'Unknown upload token');
-	if (!canPush(upload.cache_name)) return errorResponse(403, 'Permission denied: push');
+	const compressed = new Uint8Array(await request.arrayBuffer());
+	if (compressed.length === 0) return errorResponse(400, 'Empty chunk body');
 
-	if (partNumber !== upload.parts_uploaded + 1) {
-		return errorResponse(400, `Expected part ${upload.parts_uploaded + 1}, got ${partNumber}`);
-	}
-
-	const data = new Uint8Array(await request.arrayBuffer());
-	if (data.length === 0) return errorResponse(400, 'Empty chunk data');
-
-	const multipart = env.CACHE_BUCKET.resumeMultipartUpload(upload.r2_key, upload.r2_upload_id);
-	const part = await multipart.uploadPart(partNumber, data as unknown as ArrayBuffer);
-
-	const parts: { partNumber: number; etag: string }[] = JSON.parse(upload.uploaded_parts);
-	parts.push(part);
-	const bytesReceived = upload.bytes_received + data.length;
-	await db.updatePendingUpload(
-		env.ATTIC_DB,
-		token,
-		partNumber,
-		bytesReceived,
-		JSON.stringify(parts)
-	);
-
-	return json({ upload_token: token, parts_uploaded: partNumber, bytes_received: bytesReceived });
-}
-
-/** POST /_api/v1/upload-path/complete — requires push on the upload's cache. */
-export async function handleCompleteChunked(
-	env: Env,
-	ctx: ExecutionContext | undefined,
-	token: string,
-	canPush: (cacheName: string) => boolean
-): Promise<Response> {
-	const upload = await db.getPendingUpload(env.ATTIC_DB, token);
-	if (!upload) return errorResponse(404, 'Unknown upload token');
-	if (!canPush(upload.cache_name)) return errorResponse(403, 'Permission denied: push');
-
-	const info: UploadNarInfo = JSON.parse(upload.nar_info);
-	const parts: { partNumber: number; etag: string }[] = JSON.parse(upload.uploaded_parts);
-	if (upload.parts_uploaded === 0 || parts.length === 0) {
-		return errorResponse(400, 'No parts uploaded');
-	}
-
-	const multipart = env.CACHE_BUCKET.resumeMultipartUpload(upload.r2_key, upload.r2_upload_id);
-	await multipart.complete(parts);
-
-	const head = await env.CACHE_BUCKET.head(upload.storage_key);
-	if (!head) return errorResponse(500, 'File not found after upload');
-
-	const d1 = env.ATTIC_DB;
-	const narId = await db.createNar(d1, {
-		state: 'P',
-		nar_hash: info.nar_hash,
-		nar_size: upload.expected_nar_size,
-		compression: upload.compression,
-		num_chunks: 1
-	});
+	// Verify by decompressing: raw sha256 must equal the claimed hash, and the
+	// bomb guard caps the decompressed size at the chunker's MAX_CHUNK.
+	await initZstd();
+	let raw: Uint8Array;
 	try {
-		// file_hash starts null and is backfilled below by re-reading the object
-		// off the response's critical path (hashing inline would mean holding the
-		// whole multi-hundred-MB body in the request).
-		const chunkId = await db.createChunk(d1, {
+		raw = zstdDecompress(compressed, CDC_MAX_CHUNK);
+	} catch (e) {
+		return errorResponse(400, `Invalid zstd chunk: ${e}`);
+	}
+	const actual = toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource));
+	if (actual !== hash) {
+		return errorResponse(400, `Chunk hash mismatch: expected ${hash}, got ${actual}`);
+	}
+
+	if (await db.tryLockChunk(env.ATTIC_DB, `sha256:${hash}`, 'zstd').then(releaseIfLocked(env))) {
+		// Already stored (raced or the client re-sent); nothing to do.
+		return json({ ok: true, deduplicated: true });
+	}
+
+	const key = chunkStorageKey(hash, 'zstd');
+	await env.CACHE_BUCKET.put(key, compressed as unknown as ArrayBuffer);
+	try {
+		await db.createChunk(env.ATTIC_DB, {
 			state: 'V',
-			chunk_hash: info.nar_hash,
-			chunk_size: upload.expected_nar_size,
-			file_hash: null,
-			file_size: head.size,
-			compression: upload.compression,
-			remote_file: remoteFileJson(upload.storage_key),
-			remote_file_id: upload.storage_key
-		});
-		ctx?.waitUntil(backfillFileHash(env, chunkId, upload.storage_key).catch(() => {}));
-		await db.createChunkRef(d1, narId, 0, chunkId, info.nar_hash, upload.compression);
-		await db.updateNarState(d1, narId, 'V');
-		await db.createObject(d1, {
-			cache_id: upload.cache_id,
-			nar_id: narId,
-			store_path_hash: info.store_path_hash,
-			store_path: info.store_path,
-			references: info.references,
-			system: info.system,
-			deriver: info.deriver,
-			sigs: info.sigs,
-			ca: info.ca
+			chunk_hash: `sha256:${hash}`,
+			chunk_size: raw.length,
+			file_hash: toHex(await crypto.subtle.digest('SHA-256', compressed as BufferSource)),
+			file_size: compressed.length,
+			compression: 'zstd',
+			remote_file: remoteFileJson(key),
+			remote_file_id: key
 		});
 	} catch (e) {
-		await env.CACHE_BUCKET.delete(upload.storage_key).catch(() => {});
-		await db.updateNarState(d1, narId, 'D').catch(() => {});
-		throw e;
+		// Unique-constraint race: a concurrent upload of the same chunk won the
+		// row; theirs describes the bytes its own PUT stored. Adopt it.
+		const raced = await db.tryLockChunk(env.ATTIC_DB, `sha256:${hash}`, 'zstd');
+		if (!raced) throw e;
+		await db.releaseChunkLock(env.ATTIC_DB, raced.id).catch(() => {});
 	}
-
-	await db.deletePendingUpload(d1, token).catch(() => {});
-	return uploadedResult(head.size, 0);
+	return json({ ok: true, deduplicated: false });
 }
 
-/** Hash a stored object and record it as the chunk's compressed-file hash. */
-async function backfillFileHash(env: Env, chunkId: number, storageKey: string): Promise<void> {
-	const object = await env.CACHE_BUCKET.get(storageKey);
-	if (!object) return;
-	const hasher = newDigestStream();
-	await (object.body as unknown as ReadableStream<Uint8Array>).pipeTo(
-		hasher as unknown as WritableStream<Uint8Array>
-	);
-	const fileHash = toHex(await hasher.digest);
-	await db.updateChunkFileHash(env.ATTIC_DB, chunkId, fileHash);
+/** Curried helper: release a freshly acquired chunk lock, return whether it existed. */
+function releaseIfLocked(env: Env): (chunk: { id: number } | null) => Promise<boolean> {
+	return async (chunk) => {
+		if (!chunk) return false;
+		await db.releaseChunkLock(env.ATTIC_DB, chunk.id).catch(() => {});
+		return true;
+	};
+}
+
+/**
+ * POST /_api/v1/upload-path/chunks/complete — assemble the NAR from chunk
+ * references. Locks every chunk; if any vanished (e.g. GC raced), responds
+ * 409 with the missing hashes so the client re-uploads those and retries.
+ * The assembled NAR hash is trusted from the client, like the transport this
+ * replaced — verifying would mean re-reading and decompressing everything.
+ */
+export async function handleCdcComplete(env: Env, body: CdcManifest): Promise<Response> {
+	const denied = validateManifest(body);
+	if (denied) return denied;
+	const info = body.nar_info;
+	const cache = await db.findCache(env.ATTIC_DB, info.cache);
+	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
+
+	const existingNar = await db.tryLockNar(env.ATTIC_DB, info.nar_hash);
+	if (existingNar) return finishDeduplicated(env, info, cache.id, existingNar.id);
+
+	// Lock chunks (deduplicating repeats within the NAR: one lock per row).
+	const lockedByHash = new Map<string, NarChunkRecord>();
+	const records: NarChunkRecord[] = [];
+	const missing: string[] = [];
+	for (const chunk of body.chunks) {
+		let record = lockedByHash.get(chunk.hash);
+		if (!record) {
+			const row = await db.tryLockChunk(env.ATTIC_DB, `sha256:${chunk.hash}`, 'zstd');
+			if (!row) {
+				if (!missing.includes(chunk.hash)) missing.push(chunk.hash);
+				continue;
+			}
+			record = {
+				chunkId: row.id,
+				locked: true,
+				hash: chunk.hash,
+				size: chunk.size,
+				fileHash: row.file_hash,
+				fileSize: row.file_size
+			};
+			lockedByHash.set(chunk.hash, record);
+		}
+		records.push(record);
+	}
+	if (missing.length > 0) {
+		await releaseChunkLocks(env, [...lockedByHash.values()]);
+		return json({ missing_chunk_hashes: missing }, 409);
+	}
+
+	await linkChunkedNarDeduped(env, info, cache.id, records, [...lockedByHash.values()], body);
+	const fileSize = records.every((r) => r.fileSize != null)
+		? records.reduce((sum, r) => sum + (r.fileSize ?? 0), 0)
+		: null;
+	return uploadedResult(fileSize, 0);
+}
+
+/**
+ * linkChunkedNar writes one chunkref per records entry and releases each
+ * lock once per entry — with repeated chunks the same row appears multiple
+ * times, so locks (held once per unique row) are released separately.
+ */
+async function linkChunkedNarDeduped(
+	env: Env,
+	info: UploadNarInfo,
+	cacheId: number,
+	records: NarChunkRecord[],
+	uniqueLocked: NarChunkRecord[],
+	body: CdcManifest
+): Promise<void> {
+	const releasable = new Set(uniqueLocked);
+	const perRef = records.map((r) => ({ ...r, locked: releasable.delete(r) }));
+	await linkChunkedNar(env, info, cacheId, 'zstd', perRef, body.nar_size);
 }

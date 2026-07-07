@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -182,36 +182,52 @@ func (c *Client) UploadPath(
 	return result, nil
 }
 
-type ChunkedUpload struct {
-	Token     string `json:"upload_token"`
-	ChunkSize int64  `json:"chunk_size"`
+// ChunkDesc describes one CDC chunk: raw sha256 hex and uncompressed size.
+type ChunkDesc struct {
+	Hash string `json:"hash"`
+	Size int64  `json:"size"`
 }
 
-func (c *Client) StartChunkedUpload(
+type cdcManifest struct {
+	NarInfo *NarInfo    `json:"nar_info"`
+	NarSize int64       `json:"nar_size"`
+	Chunks  []ChunkDesc `json:"chunks"`
+}
+
+// ChunkQueryResult is the server's answer to a chunk manifest: either the
+// whole NAR deduplicated, or the subset of chunk hashes it lacks.
+type ChunkQueryResult struct {
+	Kind               string   `json:"kind"`
+	MissingChunkHashes []string `json:"missing_chunk_hashes"`
+}
+
+// QueryChunks reports which of the NAR's chunks the server is missing,
+// deduplicating the whole NAR when it already exists.
+func (c *Client) QueryChunks(
 	ctx context.Context,
 	info *NarInfo,
 	narSize int64,
-) (*ChunkedUpload, error) {
-	out := &ChunkedUpload{}
-	body := map[string]any{"nar_info": info, "nar_size": narSize}
-	if err := c.doJSON(ctx, http.MethodPost, "/_api/v1/upload-path/start", body, out); err != nil {
+	chunks []ChunkDesc,
+) (*ChunkQueryResult, error) {
+	out := &ChunkQueryResult{}
+	body := cdcManifest{NarInfo: info, NarSize: narSize, Chunks: chunks}
+	if err := c.doJSON(ctx, http.MethodPost, "/_api/v1/upload-path/chunks", body, out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *Client) UploadChunk(ctx context.Context, token string, part int, data []byte) error {
+// UploadChunk stores one zstd-compressed chunk under its raw-content hash.
+func (c *Client) UploadChunk(ctx context.Context, cache, hash string, data []byte) error {
 	req, err := c.newRequest(
 		ctx,
 		http.MethodPut,
-		"/_api/v1/upload-path/chunk",
+		"/_api/v1/upload-path/chunks/"+hash+"?cache="+url.QueryEscape(cache),
 		bytes.NewReader(data),
 	)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-Upload-Token", token)
-	req.Header.Set("X-Part-Number", strconv.Itoa(part))
 	req.Header.Set("Content-Type", "application/octet-stream")
 	res, err := c.hc.Do(req)
 	if err != nil {
@@ -220,19 +236,49 @@ func (c *Client) UploadChunk(ctx context.Context, token string, part int, data [
 	return decodeOrError(res, nil)
 }
 
-func (c *Client) CompleteChunkedUpload(ctx context.Context, token string) (*UploadResult, error) {
-	result := &UploadResult{}
-	body := map[string]any{"upload_token": token}
-	if err := c.doJSON(
+// CompleteChunks assembles the NAR from its chunk references. When the server
+// lost chunks in the meantime (HTTP 409) it returns their hashes with a nil
+// result so the caller can re-upload and retry.
+func (c *Client) CompleteChunks(
+	ctx context.Context,
+	info *NarInfo,
+	narSize int64,
+	chunks []ChunkDesc,
+) (*UploadResult, []string, error) {
+	data, err := json.Marshal(cdcManifest{NarInfo: info, NarSize: narSize, Chunks: chunks})
+	if err != nil {
+		return nil, nil, err
+	}
+	req, err := c.newRequest(
 		ctx,
 		http.MethodPost,
-		"/_api/v1/upload-path/complete",
-		body,
-		result,
-	); err != nil {
-		return nil, err
+		"/_api/v1/upload-path/chunks/complete",
+		bytes.NewReader(data),
+	)
+	if err != nil {
+		return nil, nil, err
 	}
-	return result, nil
+	req.Header.Set("Content-Type", "application/json")
+	res, err := c.hc.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	if res.StatusCode == http.StatusConflict {
+		var out struct {
+			MissingChunkHashes []string `json:"missing_chunk_hashes"`
+		}
+		err := json.NewDecoder(res.Body).Decode(&out)
+		_ = res.Body.Close()
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, out.MissingChunkHashes, nil
+	}
+	result := &UploadResult{}
+	if err := decodeOrError(res, result); err != nil {
+		return nil, nil, err
+	}
+	return result, nil, nil
 }
 
 // Cache create/configure bodies are open maps so retention_period can be an

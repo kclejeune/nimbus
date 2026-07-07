@@ -31,10 +31,11 @@ import {
 	type VerifiedToken
 } from './token';
 import {
-	handleCompleteChunked,
-	handleStartChunked,
-	handleUploadChunk,
-	handleUploadPath
+	handleCdcChunkPut,
+	handleCdcComplete,
+	handleCdcQuery,
+	handleUploadPath,
+	type CdcManifest
 } from './upload';
 
 type Env = App.Platform['env'];
@@ -394,25 +395,39 @@ async function handleV1(
 	const canPush = (cacheName: string) => permissionForCache(token, cacheName).push;
 
 	if (route === 'upload-path') {
+		// The CDC endpoints are stateless, so authorization rides along on each
+		// request: the manifest body carries the cache for POSTs, and chunk PUTs
+		// carry it as a query param.
+		const parseManifest = async (): Promise<CdcManifest | Response> => {
+			const body = await (request.json() as Promise<CdcManifest>).catch(() => null);
+			if (!body?.nar_info?.cache || typeof body.nar_size !== 'number') {
+				return errorResponse(400, 'Invalid request body');
+			}
+			if (!canPush(body.nar_info.cache)) return errorResponse(403, 'Permission denied: push');
+			return body;
+		};
+
 		let response: Response;
 		if (method === 'PUT' && segments.length === 3) {
 			response = await handleUploadPath(request, env, canPush);
-		} else if (method === 'POST' && segments[3] === 'start' && segments.length === 4) {
-			const body = await (request.json() as Promise<{ nar_info?: never; nar_size?: number }>).catch(
-				() => null
-			);
-			if (!body || !body.nar_info || typeof body.nar_size !== 'number') {
-				return errorResponse(400, 'Invalid request body');
-			}
-			const info = body.nar_info as import('./upload').UploadNarInfo;
-			if (!canPush(info.cache)) return errorResponse(403, 'Permission denied: push');
-			response = await handleStartChunked(env, { nar_info: info, nar_size: body.nar_size });
-		} else if (method === 'PUT' && segments[3] === 'chunk' && segments.length === 4) {
-			response = await handleUploadChunk(request, env, canPush);
-		} else if (method === 'POST' && segments[3] === 'complete' && segments.length === 4) {
-			const body = await (request.json() as Promise<{ upload_token?: string }>).catch(() => null);
-			if (!body?.upload_token) return errorResponse(400, 'Missing upload_token');
-			response = await handleCompleteChunked(env, ctx, body.upload_token, canPush);
+		} else if (method === 'POST' && segments[3] === 'chunks' && segments.length === 4) {
+			const manifest = await parseManifest();
+			if (manifest instanceof Response) return manifest;
+			response = await handleCdcQuery(env, manifest);
+		} else if (method === 'PUT' && segments[3] === 'chunks' && segments.length === 5) {
+			const cacheName = url.searchParams.get('cache');
+			if (!cacheName) return errorResponse(400, 'Missing cache parameter');
+			if (!canPush(cacheName)) return errorResponse(403, 'Permission denied: push');
+			response = await handleCdcChunkPut(request, env, segments[4]);
+		} else if (
+			method === 'POST' &&
+			segments[3] === 'chunks' &&
+			segments[4] === 'complete' &&
+			segments.length === 5
+		) {
+			const manifest = await parseManifest();
+			if (manifest instanceof Response) return manifest;
+			response = await handleCdcComplete(env, manifest);
 		} else {
 			return errorResponse(404, 'Not found');
 		}
