@@ -11,20 +11,30 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nil-go/konf"
+	"github.com/nil-go/konf/provider/env"
 	toml "github.com/pelletier/go-toml/v2"
 )
 
-// Environment overrides, for CI and one-off use without a config file:
-// EndpointEnv defines the server whenever the cache reference does not name
-// one explicitly, and TokenEnv overrides whichever token resolution found.
+// Environment configuration. Any config field can be set or overridden with
+// NIMBUS_-prefixed variables mirroring the file's shape:
+//
+//	NIMBUS_DEFAULT_SERVER            default-server
+//	NIMBUS_SERVERS_<NAME>_ENDPOINT   servers.<name>.endpoint
+//	NIMBUS_SERVERS_<NAME>_TOKEN      servers.<name>.token
+//
+// Two shortcuts cover the common CI case without naming a server: EndpointEnv
+// defines the server whenever the cache reference does not name one
+// explicitly, and TokenEnv overrides whichever token resolution found.
 const (
 	EndpointEnv = "NIMBUS_ENDPOINT"
 	TokenEnv    = "NIMBUS_AUTH_TOKEN"
+	envPrefix   = "NIMBUS_"
 )
 
 type Server struct {
-	Endpoint string `toml:"endpoint"`
-	Token    string `toml:"token,omitempty"`
+	Endpoint string `toml:"endpoint"        konf:"endpoint"`
+	Token    string `toml:"token,omitempty" konf:"token"`
 }
 
 // NormalizeEndpoint accepts a full http(s) URL or a bare host[:port] (which
@@ -48,8 +58,8 @@ func NormalizeEndpoint(endpoint string) (string, error) {
 }
 
 type Config struct {
-	DefaultServer string            `toml:"default-server,omitempty"`
-	Servers       map[string]Server `toml:"servers,omitempty"`
+	DefaultServer string            `toml:"default-server,omitempty" konf:"default-server"`
+	Servers       map[string]Server `toml:"servers,omitempty"        konf:"servers"`
 }
 
 // Path returns the config file location under the XDG config directory.
@@ -75,7 +85,10 @@ func XDGConfigHome() (string, error) {
 	return filepath.Join(home, ".config"), nil
 }
 
-func Load(path string) (*Config, error) {
+// LoadFile reads the config file alone — the layer Save writes back. Flows
+// that mutate and persist config (login) use this so environment overlays
+// never end up baked into the file.
+func LoadFile(path string) (*Config, error) {
 	if path == "" {
 		var err error
 		if path, err = Path(); err != nil {
@@ -92,6 +105,71 @@ func Load(path string) (*Config, error) {
 	}
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	if cfg.Servers == nil {
+		cfg.Servers = map[string]Server{}
+	}
+	return cfg, nil
+}
+
+// mapLoader adapts an already-parsed config map to konf's Loader interface.
+type mapLoader map[string]any
+
+func (m mapLoader) Load() (map[string]any, error) { return m, nil }
+
+// splitEnvName maps a NIMBUS_ variable name onto the config's key shape;
+// names that mirror no config field (including the EndpointEnv/TokenEnv
+// shortcuts, handled in ResolveServer) are ignored.
+func splitEnvName(name string) []string {
+	name = strings.TrimPrefix(name, envPrefix)
+	if name == "DEFAULT_SERVER" {
+		return []string{"default-server"}
+	}
+	parts := strings.Split(name, "_")
+	// NIMBUS_SERVERS_<NAME>_ENDPOINT|TOKEN; underscores inside <NAME> are
+	// kept (server names cannot contain the field being set anyway).
+	if len(parts) >= 3 && parts[0] == "SERVERS" {
+		field := strings.ToLower(parts[len(parts)-1])
+		if field == "endpoint" || field == "token" {
+			server := strings.ToLower(strings.Join(parts[1:len(parts)-1], "_"))
+			return []string{"servers", server, field}
+		}
+	}
+	return nil
+}
+
+// Load returns the effective configuration: the file overlaid with NIMBUS_
+// environment variables (which win).
+func Load(path string) (*Config, error) {
+	fileCfg, err := LoadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Round-trip the typed file config through its TOML shape so konf merges
+	// maps with the same keys the env splitter produces.
+	fileData, err := toml.Marshal(fileCfg)
+	if err != nil {
+		return nil, err
+	}
+	fileMap := map[string]any{}
+	if err := toml.Unmarshal(fileData, &fileMap); err != nil {
+		return nil, err
+	}
+
+	var k konf.Config
+	if err := k.Load(mapLoader(fileMap)); err != nil {
+		return nil, err
+	}
+	if err := k.Load(
+		env.New(env.WithPrefix(envPrefix), env.WithNameSplitter(splitEnvName)),
+	); err != nil {
+		return nil, err
+	}
+
+	cfg := &Config{}
+	if err := k.Unmarshal("", cfg); err != nil {
+		return nil, fmt.Errorf("merging config: %w", err)
 	}
 	if cfg.Servers == nil {
 		cfg.Servers = map[string]Server{}

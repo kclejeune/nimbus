@@ -48,7 +48,8 @@ available (local graphical session), or the device-code flow when not
 				}
 			}
 
-			cfg, err := loadConfig()
+			// File-only load: environment overlays must not be saved back.
+			cfg, err := config.LoadFile(cfgFile)
 			if err != nil {
 				return err
 			}

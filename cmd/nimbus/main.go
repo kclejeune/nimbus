@@ -27,9 +27,11 @@ func main() {
 		Long: `nimbus pushes store paths to and configures caches on a nimbus server
 (attic-compatible protocol on Cloudflare Workers).
 
-Servers come from the config file (nimbus login). NIMBUS_ENDPOINT selects a
-server without one (whenever no server is named explicitly), and
-NIMBUS_AUTH_TOKEN overrides the token — useful in CI.`,
+Servers come from the config file (nimbus login), overlaid with environment
+variables mirroring its shape: NIMBUS_DEFAULT_SERVER,
+NIMBUS_SERVERS_<NAME>_ENDPOINT, and NIMBUS_SERVERS_<NAME>_TOKEN. For CI,
+the shortcuts NIMBUS_ENDPOINT (server when none is named) and
+NIMBUS_AUTH_TOKEN (token override) skip naming a server entirely.`,
 		SilenceUsage: true,
 	}
 
