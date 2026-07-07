@@ -14,7 +14,13 @@ import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-au
 import * as db from './db';
 import { maybeSizeTriggeredGc, runGc } from './gc';
 import { errorResponse, jsonResponse, withVisibility } from './http';
-import { filterUpstreamPaths, findExistingPaths, parseUpstreams } from './missing-paths';
+import {
+	filterUpstreamPaths,
+	findExistingPaths,
+	findUpstreamNar,
+	parseUpstreams
+} from './missing-paths';
+import { extractPublicKey } from './signing';
 import { cacheTag, serveStore, type ExecutionContext } from './store';
 import {
 	NO_PERMISSION,
@@ -163,7 +169,20 @@ async function handleNarInfo(
 
 	const auth = await authorizeCacheRead(request, env, cacheName);
 	if ('response' in auth) return auth.response;
-	return forwardToStore(request, env, ctx);
+
+	// The narinfo body embeds a signature from the cache keypair, so the edge
+	// cache key must include the signing identity: rotating the keypair makes
+	// every old entry unreachable immediately, instead of relying on the
+	// best-effort tag purge (which cross_version_cache would otherwise outlive
+	// across deploys). NARs are content-addressed and signature-free, so they
+	// stay keyed by URL alone.
+	const keyed = new URL(request.url);
+	try {
+		keyed.searchParams.set('pk', extractPublicKey(auth.cache.keypair));
+	} catch {
+		// no valid keypair: stored client sigs are served, nothing to vary on
+	}
+	return forwardToStore(new Request(keyed, request), env, ctx);
 }
 
 async function handleNar(
@@ -188,7 +207,25 @@ async function handleNar(
 		const touch = db.touchObjectsForNarHash(env.ATTIC_DB, cacheName, narHashRaw).catch(() => {});
 		ctx?.waitUntil(touch);
 	}
-	return forwardToStore(request, env, ctx);
+
+	// NARs are content-addressed, so the store request drops the cache name:
+	// every cache referencing a NAR shares one edge entry, and a miss reads R2
+	// once instead of once per cache. Cache-specific concerns stay here: the
+	// visibility header is stamped per request, and a store miss falls back to
+	// the cache's upstreams (passthrough narinfo NAR URLs resolve that way).
+	const shared = new URL(request.url);
+	shared.pathname = `/_nar/${filename}`;
+	const response = await forwardToStore(new Request(shared, request), env, ctx);
+
+	if (response.status === 404) {
+		const upstreamUrl = await findUpstreamNar(
+			parseUpstreams(auth.cache.upstream_caches),
+			`nar/${filename}`
+		);
+		if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
+		return response;
+	}
+	return withVisibility(new Response(response.body, response), auth.cache.is_public === 1);
 }
 
 /**

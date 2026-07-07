@@ -10,7 +10,7 @@
 
 import * as db from './db';
 import { errorResponse, withVisibility } from './http';
-import { fetchUpstreamNarInfo, findUpstreamNar, parseUpstreams } from './missing-paths';
+import { fetchUpstreamNarInfo, parseUpstreams } from './missing-paths';
 import { buildNarInfo } from './narinfo';
 
 type Env = App.Platform['env'];
@@ -64,8 +64,12 @@ export async function serveStore(
 	if (segments.length === 2 && segments[1].endsWith('.narinfo')) {
 		return serveNarInfo(env, segments[0], segments[1].slice(0, -'.narinfo'.length));
 	}
-	if (segments.length === 3 && segments[1] === 'nar') {
-		return serveNar(env, ctx, segments[0], segments[2]);
+	// NARs are content-addressed and shared across caches, so their route
+	// carries no cache name: every cache referencing a NAR hits the same edge
+	// entry, and R2 is read once instead of per cache. The gateway authorizes
+	// against the requested cache and stamps visibility before forwarding here.
+	if (segments.length === 2 && segments[0] === '_nar') {
+		return serveNar(env, ctx, segments[1]);
 	}
 	return errorResponse(404, 'Not found');
 }
@@ -114,28 +118,17 @@ async function serveNarInfo(env: Env, cacheName: string, storePathHash: string):
 async function serveNar(
 	env: Env,
 	ctx: ExecutionContext | undefined,
-	cacheName: string,
 	filename: string
 ): Promise<Response> {
 	const narHashRaw = filename.split('.')[0];
 	if (!narHashRaw) return errorResponse(400, 'Invalid NAR path');
 
-	const [cache, nar] = await Promise.all([
-		db.findCache(env.ATTIC_DB, cacheName),
-		db
-			.findNarByHash(env.ATTIC_DB, `sha256:${narHashRaw}`)
-			.then((n) => n ?? db.findNarByHash(env.ATTIC_DB, narHashRaw))
-	]);
-	if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
-	const isPublic = cache.is_public === 1;
+	const nar =
+		(await db.findNarByHash(env.ATTIC_DB, `sha256:${narHashRaw}`)) ??
+		(await db.findNarByHash(env.ATTIC_DB, narHashRaw));
 	if (!nar) {
-		// NAR URLs from passthrough narinfo (see serveNarInfo) resolve here:
-		// redirect to the upstream copy rather than storing it.
-		const upstreamUrl = await findUpstreamNar(
-			parseUpstreams(cache.upstream_caches),
-			`nar/${filename}`
-		);
-		if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
+		// The gateway turns this 404 into an upstream redirect when the cache
+		// has upstreams (passthrough narinfo NAR URLs resolve that way).
 		return errorResponse(404, 'Not found', 'NoSuchObject');
 	}
 
@@ -162,10 +155,7 @@ async function serveNar(
 		const object = await env.CACHE_BUCKET.get(keys[0]);
 		if (!object) return errorResponse(404, `File not found in storage: ${keys[0]}`);
 		baseHeaders.set('Content-Length', String(object.size));
-		return withVisibility(
-			new Response(object.body as unknown as BodyInit, { status: 200, headers: baseHeaders }),
-			isPublic
-		);
+		return new Response(object.body as unknown as BodyInit, { status: 200, headers: baseHeaders });
 	}
 
 	// Multi-chunk: stream the stored files back to back (zstd and gzip both
@@ -191,5 +181,5 @@ async function serveNar(
 	ctx?.waitUntil(pumping);
 
 	if (totalSize != null) baseHeaders.set('Content-Length', String(totalSize));
-	return withVisibility(new Response(readable, { status: 200, headers: baseHeaders }), isPublic);
+	return new Response(readable, { status: 200, headers: baseHeaders });
 }
