@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,9 +14,37 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 )
 
+// Environment overrides, for CI and one-off use without a config file:
+// EndpointEnv defines the server whenever the cache reference does not name
+// one explicitly, and TokenEnv overrides whichever token resolution found.
+const (
+	EndpointEnv = "NIMBUS_ENDPOINT"
+	TokenEnv    = "NIMBUS_AUTH_TOKEN"
+)
+
 type Server struct {
 	Endpoint string `toml:"endpoint"`
 	Token    string `toml:"token,omitempty"`
+}
+
+// NormalizeEndpoint accepts a full http(s) URL or a bare host[:port] (which
+// gets https://) and strips trailing slashes.
+func NormalizeEndpoint(endpoint string) (string, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", errors.New("empty endpoint")
+	}
+	if !strings.Contains(endpoint, "://") {
+		endpoint = "https://" + endpoint
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Hostname() == "" {
+		return "", fmt.Errorf("invalid endpoint %q", endpoint)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("endpoint %q must be http(s)", endpoint)
+	}
+	return strings.TrimRight(endpoint, "/"), nil
 }
 
 type Config struct {
@@ -95,30 +124,46 @@ type CacheRef struct {
 	Cache      string
 }
 
-// ResolveServer returns the named server, falling back to the default (or
-// the only configured server) when name is empty.
+// ResolveServer returns the named server, falling back to NIMBUS_ENDPOINT,
+// then the default (or only) configured server when name is empty. A set
+// NIMBUS_AUTH_TOKEN overrides the resolved token either way.
 func (c *Config) ResolveServer(name string) (string, Server, error) {
-	if name == "" {
-		name = c.DefaultServer
+	var server Server
+	if name == "" && os.Getenv(EndpointEnv) != "" {
+		name = "env"
+		server = Server{Endpoint: os.Getenv(EndpointEnv)}
+	} else {
 		if name == "" {
-			if len(c.Servers) == 1 {
-				for only := range c.Servers {
-					name = only
+			name = c.DefaultServer
+			if name == "" {
+				if len(c.Servers) == 1 {
+					for only := range c.Servers {
+						name = only
+					}
+				} else {
+					return "", Server{}, errors.New(
+						"no default server configured; name one explicitly, run `nimbus login`, or set " + EndpointEnv,
+					)
 				}
-			} else {
-				return "", Server{}, errors.New(
-					"no default server configured; name one explicitly or run `nimbus login` first",
-				)
 			}
 		}
+		var ok bool
+		if server, ok = c.Servers[name]; !ok {
+			return "", Server{}, fmt.Errorf(
+				"unknown server %q; run `nimbus login %s <endpoint>` first",
+				name,
+				name,
+			)
+		}
 	}
-	server, ok := c.Servers[name]
-	if !ok {
-		return "", Server{}, fmt.Errorf(
-			"unknown server %q; run `nimbus login %s <endpoint>` first",
-			name,
-			name,
-		)
+
+	endpoint, err := NormalizeEndpoint(server.Endpoint)
+	if err != nil {
+		return "", Server{}, fmt.Errorf("server %q: %w", name, err)
+	}
+	server.Endpoint = endpoint
+	if token := os.Getenv(TokenEnv); token != "" {
+		server.Token = token
 	}
 	return name, server, nil
 }

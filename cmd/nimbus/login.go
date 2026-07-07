@@ -32,7 +32,11 @@ available (local graphical session), or the device-code flow when not
 (SSH, headless). Force a flow with --web or --device.`,
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, endpoint := args[0], args[1]
+			name := args[0]
+			endpoint, err := config.NormalizeEndpoint(args[1])
+			if err != nil {
+				return err
+			}
 
 			var token string
 			if len(args) == 3 {

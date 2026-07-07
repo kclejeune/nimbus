@@ -25,7 +25,11 @@ func main() {
 		Use:   "nimbus",
 		Short: "Client for nimbus, a self-hostable Nix binary cache",
 		Long: `nimbus pushes store paths to and configures caches on a nimbus server
-(attic-compatible protocol on Cloudflare Workers).`,
+(attic-compatible protocol on Cloudflare Workers).
+
+Servers come from the config file (nimbus login). NIMBUS_ENDPOINT selects a
+server without one (whenever no server is named explicitly), and
+NIMBUS_AUTH_TOKEN overrides the token — useful in CI.`,
 		SilenceUsage: true,
 	}
 
