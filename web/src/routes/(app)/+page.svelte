@@ -18,6 +18,13 @@
 		data.globalMaxBytes ? Math.round((s.storageBytes / data.globalMaxBytes) * 100) : null
 	);
 
+	// Bytes the store would hold without NAR- and chunk-level dedup, minus what
+	// it actually holds.
+	const dedupBytes = $derived(Math.max(0, s.logicalBytes - s.storageBytes));
+	const dedupPct = $derived(
+		s.logicalBytes > 0 ? Math.round((dedupBytes / s.logicalBytes) * 100) : 0
+	);
+
 	const tiles = $derived([
 		{
 			label: 'Caches',
@@ -32,7 +39,11 @@
 		{
 			label: 'NARs stored',
 			value: formatCount(s.nars),
-			foot: `${formatCount(s.pendingNars)} pending upload`
+			foot:
+				dedupBytes > 0
+					? `${formatBytes(dedupBytes)} saved by deduplication`
+					: 'Store paths with identical content share one NAR',
+			badge: dedupBytes > 0 ? `−${dedupPct}%` : null
 		},
 		{
 			label: 'Storage used',

@@ -24,34 +24,53 @@ export const load: PageServerLoad = async ({ platform }) => {
 		)
 		.bind(ingestSince);
 
-	const [caches, objects, nars, storage, pending, orphanNars, orphanChunks, globalLimit, ingest] =
-		await Promise.all([
-			db.prepare('SELECT COUNT(*) AS n FROM cache WHERE deleted_at IS NULL').first<Count>(),
-			db
-				.prepare(
-					'SELECT COUNT(*) AS n FROM object o JOIN cache c ON c.id = o.cache_id WHERE c.deleted_at IS NULL'
-				)
-				.first<Count>(),
-			db.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'V'").first<Count>(),
-			db
-				.prepare("SELECT COALESCE(SUM(file_size), 0) AS n FROM chunk WHERE state = 'V'")
-				.first<Count>(),
-			db.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'P'").first<Count>(),
-			db
-				.prepare(
-					'SELECT COUNT(*) AS n FROM nar n WHERE NOT EXISTS (SELECT 1 FROM object o WHERE o.nar_id = n.id)'
-				)
-				.first<Count>(),
-			db
-				.prepare(
-					'SELECT COUNT(*) AS n FROM chunk WHERE NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id)'
-				)
-				.first<Count>(),
-			db
-				.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
-				.first<{ value: string }>(),
-			ingestStmt.all<{ bucket: string; paths: number; bytes: number }>()
-		]);
+	const [
+		caches,
+		objects,
+		nars,
+		storage,
+		logical,
+		pending,
+		orphanNars,
+		orphanChunks,
+		globalLimit,
+		ingest
+	] = await Promise.all([
+		db.prepare('SELECT COUNT(*) AS n FROM cache WHERE deleted_at IS NULL').first<Count>(),
+		db
+			.prepare(
+				'SELECT COUNT(*) AS n FROM object o JOIN cache c ON c.id = o.cache_id WHERE c.deleted_at IS NULL'
+			)
+			.first<Count>(),
+		db.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'V'").first<Count>(),
+		db
+			.prepare("SELECT COALESCE(SUM(file_size), 0) AS n FROM chunk WHERE state = 'V'")
+			.first<Count>(),
+		// Logical bytes: every object's NAR counted once per reference. The
+		// excess over physical storage is what NAR- and chunk-level dedup saves.
+		db
+			.prepare(
+				'SELECT COALESCE(SUM(sz.bytes), 0) AS n FROM object o ' +
+					'JOIN (SELECT cr.nar_id, SUM(ch.file_size) AS bytes FROM chunkref cr ' +
+					'JOIN chunk ch ON ch.id = cr.chunk_id GROUP BY cr.nar_id) sz ON sz.nar_id = o.nar_id'
+			)
+			.first<Count>(),
+		db.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'P'").first<Count>(),
+		db
+			.prepare(
+				'SELECT COUNT(*) AS n FROM nar n WHERE NOT EXISTS (SELECT 1 FROM object o WHERE o.nar_id = n.id)'
+			)
+			.first<Count>(),
+		db
+			.prepare(
+				'SELECT COUNT(*) AS n FROM chunk WHERE NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id)'
+			)
+			.first<Count>(),
+		db
+			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
+			.first<{ value: string }>(),
+		ingestStmt.all<{ bucket: string; paths: number; bytes: number }>()
+	]);
 
 	// Zero-fill so the chart doesn't interpolate across idle days.
 	const byDay = new Map(ingest.results.map((r) => [r.bucket, r]));
@@ -68,6 +87,7 @@ export const load: PageServerLoad = async ({ platform }) => {
 			objects: objects?.n ?? 0,
 			nars: nars?.n ?? 0,
 			storageBytes: storage?.n ?? 0,
+			logicalBytes: logical?.n ?? 0,
 			pendingNars: pending?.n ?? 0,
 			orphanNars: orphanNars?.n ?? 0,
 			orphanChunks: orphanChunks?.n ?? 0
