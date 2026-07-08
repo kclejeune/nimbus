@@ -8,26 +8,13 @@
 // the entrypoint, stores the full 200 response, and slices ranges itself — a
 // Worker-returned 206 would never be stored, so no range logic lives here.
 
+import { errorResponse, withVisibility } from '../attic/http';
+import { buildNarInfo } from '../attic/narinfo';
 import * as db from './db';
-import { errorResponse, withVisibility } from './http';
 import { fetchUpstreamNarInfo, parseUpstreams } from './missing-paths';
-import { buildNarInfo } from './narinfo';
+import type { ExecutionContext } from './platform';
 
 type Env = App.Platform['env'];
-
-/**
- * Execution context extended with the loopback bindings for the entrypoints
- * exported from worker-entry.ts; @cloudflare/workers-types does not model
- * ctx.exports yet.
- */
-export type ExecutionContext = App.Platform['ctx'] & {
-	exports?: {
-		CachedStore?: {
-			fetch(request: Request): Promise<Response>;
-			purgeTags(tags: string[]): Promise<void>;
-		};
-	};
-};
 
 // NAR URLs are content-addressed by nar hash, so a cached body can never go
 // stale — cache for a year. A GC'd NAR served from cache is still valid data.

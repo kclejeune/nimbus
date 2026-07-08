@@ -8,7 +8,8 @@
 // next (retention deletes objects -> orphans NARs -> orphans chunks -> R2).
 
 import { chunkKey, PARAM_BATCH, runBatched } from './db';
-import { narinfoTag, type ExecutionContext } from './store';
+import { type ExecutionContext } from './platform';
+import { narinfoTag } from './store';
 
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];

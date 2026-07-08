@@ -1,5 +1,5 @@
 import { fail, redirect, error } from '@sveltejs/kit';
-import { CacheConfigError, createCache } from '$lib/server/attic/cache-config';
+import { CacheConfigError, createCache } from '$lib/server/cache/cache-config';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { Actions } from './$types';
 

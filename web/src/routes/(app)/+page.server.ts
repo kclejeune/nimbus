@@ -1,5 +1,5 @@
 import { error, fail } from '@sveltejs/kit';
-import { runGc } from '$lib/server/attic/gc';
+import { runGc } from '$lib/server/cache/gc';
 import type { PageServerLoad, Actions } from './$types';
 
 type Count = { n: number };

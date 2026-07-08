@@ -13,9 +13,9 @@
 
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import sveltekit from './.svelte-kit/cloudflare/_worker.js';
-import { runGc } from './src/lib/server/attic/gc';
-import { handleCacheApi } from './src/lib/server/attic/router';
-import { serveStore } from './src/lib/server/attic/store';
+import { runGc } from './src/lib/server/cache/gc';
+import { handleCacheApi } from './src/lib/server/cache/router';
+import { serveStore } from './src/lib/server/cache/store';
 
 type Env = App.Platform['env'];
 

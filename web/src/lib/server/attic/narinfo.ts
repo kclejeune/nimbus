@@ -2,9 +2,32 @@
 // (field order, base32 conversion). The cache's own key always signs the
 // narinfo; client-supplied sigs are served only when the cache has no keypair.
 
-import type { ChunkRow, NarRow, ObjectRow } from './db';
 import { convertHashToBase32 } from './nix-base32';
 import { computeFingerprint, signMessage } from './signing';
+
+// Protocol-level input shapes; the cache engine's DB rows satisfy these
+// structurally (this module must not depend on the storage layer).
+export interface NarInfoObject {
+	store_path: string;
+	/** JSON-encoded string array. */
+	refs: string;
+	system: string | null;
+	deriver: string | null;
+	/** JSON-encoded string array. */
+	sigs: string;
+	ca: string | null;
+}
+
+export interface NarInfoNar {
+	nar_hash: string;
+	nar_size: number;
+	compression: string;
+}
+
+export interface NarInfoChunk {
+	file_hash: string | null;
+	file_size: number | null;
+}
 
 export function compressionExtension(compression: string): string {
 	switch (compression) {
@@ -35,9 +58,9 @@ function parseJsonArray(raw: string): string[] {
 const HEX64 = /^[0-9a-fA-F]{64}$/;
 
 export async function buildNarInfo(
-	object: ObjectRow,
-	nar: NarRow,
-	chunks: ChunkRow[],
+	object: NarInfoObject,
+	nar: NarInfoNar,
+	chunks: NarInfoChunk[],
 	keypair: string | null
 ): Promise<string> {
 	const lines: string[] = [];

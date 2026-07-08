@@ -13,15 +13,16 @@ import {
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import * as db from './db';
 import { maybeSizeTriggeredGc, runGc } from './gc';
-import { errorResponse, jsonResponse, withCachePolicy, withVisibility } from './http';
+import { errorResponse, jsonResponse, withCachePolicy, withVisibility } from '../attic/http';
 import {
 	filterUpstreamPaths,
 	findExistingPaths,
 	findUpstreamNar,
 	parseUpstreams
 } from './missing-paths';
-import { extractPublicKey } from './signing';
-import { cacheTag, PREFETCH_DEPTH_HEADER, serveStore, type ExecutionContext } from './store';
+import { extractPublicKey } from '../attic/signing';
+import { type ExecutionContext } from './platform';
+import { cacheTag, PREFETCH_DEPTH_HEADER, serveStore } from './store';
 import {
 	NO_PERMISSION,
 	parseAuthToken,
@@ -29,7 +30,7 @@ import {
 	verifyAtticToken,
 	type Permission,
 	type VerifiedToken
-} from './token';
+} from '../attic/token';
 import {
 	handleCdcChunkPut,
 	handleCdcComplete,

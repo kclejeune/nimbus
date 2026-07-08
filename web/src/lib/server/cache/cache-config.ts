@@ -4,7 +4,7 @@
 
 import { validateCompressionConfig } from './compression/config';
 import * as db from './db';
-import { extractPublicKey, generateKeypair } from './signing';
+import { extractPublicKey, generateKeypair } from '../attic/signing';
 
 type Env = App.Platform['env'];
 

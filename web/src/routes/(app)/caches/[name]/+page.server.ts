@@ -6,7 +6,7 @@ import {
 	queryStorePaths,
 	countStorePaths
 } from '$lib/server/store-paths';
-import { pruneClosure } from '$lib/server/attic/gc';
+import { pruneClosure } from '$lib/server/cache/gc';
 import type { PageServerLoad, Actions } from './$types';
 
 interface CacheRow {

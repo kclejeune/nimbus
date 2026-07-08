@@ -16,6 +16,7 @@
 // assembles the NAR from chunk references.
 
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
+import { errorResponse, jsonResponse as json } from '../attic/http';
 import { FastCdcChunker, NAR_CHUNK_THRESHOLD, chunkBuffer } from './chunking';
 import {
 	compressBuffer,
@@ -26,7 +27,7 @@ import {
 	type CompressionKind
 } from './compression';
 import * as db from './db';
-import { errorResponse, jsonResponse as json } from './http';
+import { newDigestStream } from './platform';
 
 type Env = App.Platform['env'];
 
@@ -92,18 +93,6 @@ function remoteFileJson(key: string): string {
 
 function toHex(buf: ArrayBuffer): string {
 	return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-/** crypto.DigestStream is a Workers-runtime extension absent from DOM types. */
-interface DigestStreamLike extends WritableStream<BufferSource> {
-	readonly digest: Promise<ArrayBuffer>;
-}
-
-function newDigestStream(): DigestStreamLike {
-	const workersCrypto = crypto as unknown as {
-		DigestStream: new (algorithm: string) => DigestStreamLike;
-	};
-	return new workersCrypto.DigestStream('SHA-256');
 }
 
 /**

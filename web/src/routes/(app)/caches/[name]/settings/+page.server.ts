@@ -4,8 +4,8 @@ import {
 	configureCache,
 	destroyCache,
 	renameCache
-} from '$lib/server/attic/cache-config';
-import { listGcRoots } from '$lib/server/attic/gc';
+} from '$lib/server/cache/cache-config';
+import { listGcRoots } from '$lib/server/cache/gc';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { PageServerLoad, Actions } from './$types';
 
