@@ -232,7 +232,8 @@ async function handleNar(
 /**
  * POST /_api/v1/get-missing-paths — which of the client's closure hashes need
  * uploading. Requires push permission. Paths present in the cache's configured
- * upstreams (e.g. cache.nixos.org) are excluded so clients never push them.
+ * upstreams (e.g. cache.nixos.org) are excluded so clients never push them,
+ * unless the request opts out with ignore_upstream_cache_filter.
  */
 async function handleGetMissingPaths(request: Request, env: Env): Promise<Response> {
 	let token: VerifiedToken | null;
@@ -243,7 +244,11 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	}
 	if (!token) return errorResponse(401, 'No token provided');
 
-	let body: { cache?: string; store_path_hashes?: string[] };
+	let body: {
+		cache?: string;
+		store_path_hashes?: string[];
+		ignore_upstream_cache_filter?: boolean;
+	};
 	try {
 		body = await request.json();
 	} catch (e) {
@@ -263,7 +268,7 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	const existing = await findExistingPaths(env.ATTIC_DB, body.cache, hashes);
 	const missing = hashes.filter((h) => !existing.has(h));
 
-	const upstreams = parseUpstreams(cache.upstream_caches);
+	const upstreams = body.ignore_upstream_cache_filter ? [] : parseUpstreams(cache.upstream_caches);
 	const missingPaths =
 		upstreams.length > 0 && missing.length > 0
 			? await filterUpstreamPaths(env.ATTIC_DB, upstreams, missing)

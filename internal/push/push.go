@@ -31,6 +31,11 @@ type Pusher struct {
 	// always skipped (never fail the batch), but without SkipInvalid their
 	// presence makes Push return an error after the valid paths upload.
 	SkipInvalid bool
+	// NoClosure pushes exactly the given paths without computing closures.
+	NoClosure bool
+	// IgnoreUpstreamFilter asks the server not to drop paths that are already
+	// fetchable from the cache's configured upstreams.
+	IgnoreUpstreamFilter bool
 }
 
 // Push uploads the closures of the given paths, skipping whatever the server
@@ -63,7 +68,7 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 		return nil
 	}
 
-	infos, err := nix.ClosurePathInfo(ctx, paths)
+	infos, err := p.pathInfos(ctx, paths)
 	if err != nil {
 		return err
 	}
@@ -76,7 +81,7 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 		byHash[hash] = info
 	}
 
-	missing, err := p.Client.GetMissingPaths(ctx, p.Cache, hashes)
+	missing, err := p.Client.GetMissingPaths(ctx, p.Cache, hashes, p.IgnoreUpstreamFilter)
 	if err != nil {
 		return fmt.Errorf("get-missing-paths: %w", err)
 	}
@@ -130,6 +135,13 @@ feed:
 		return firstErr
 	}
 	return invalidErr
+}
+
+func (p *Pusher) pathInfos(ctx context.Context, paths []string) ([]nix.PathInfo, error) {
+	if p.NoClosure {
+		return nix.PathInfoFor(ctx, paths)
+	}
+	return nix.ClosurePathInfo(ctx, paths)
 }
 
 func (p *Pusher) uploadOne(ctx context.Context, info nix.PathInfo) error {
