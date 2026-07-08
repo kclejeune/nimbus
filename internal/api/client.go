@@ -21,11 +21,16 @@ type Client struct {
 }
 
 func New(endpoint, token string) *Client {
+	// The default transport keeps only 2 idle connections per host; concurrent
+	// path jobs and chunk uploads all target one host, so without this every
+	// worker past the second pays a fresh TLS handshake per request.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = 16
 	return &Client{
 		endpoint: strings.TrimRight(endpoint, "/"),
 		token:    token,
 		// Uploads of large NARs can legitimately take a while.
-		hc: &http.Client{Timeout: 30 * time.Minute},
+		hc: &http.Client{Timeout: 30 * time.Minute, Transport: transport},
 	}
 }
 

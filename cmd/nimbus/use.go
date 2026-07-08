@@ -117,16 +117,23 @@ func editNixConf(path string, edits []confEdit) error {
 				continue
 			}
 			found = true
+			// Split off any trailing inline comment before tokenizing so that
+			// comment tokens are never treated as real values.
+			valueStr, comment, hasComment := strings.Cut(rest, "#")
+			values := strings.Fields(valueStr)
+			var newLine string
 			if edit.replace {
-				lines[i] = fmt.Sprintf("%s = %s", edit.key, edit.value)
-				break
+				newLine = fmt.Sprintf("%s = %s", edit.key, edit.value)
+			} else {
+				if !slices.Contains(values, edit.value) {
+					values = append(values, edit.value)
+				}
+				newLine = fmt.Sprintf("%s = %s", edit.key, strings.Join(values, " "))
 			}
-			values := strings.Fields(rest)
-			merged := slices.Contains(values, edit.value)
-			if !merged {
-				values = append(values, edit.value)
+			if hasComment {
+				newLine += " #" + comment
 			}
-			lines[i] = fmt.Sprintf("%s = %s", edit.key, strings.Join(values, " "))
+			lines[i] = newLine
 			break
 		}
 		if !found {

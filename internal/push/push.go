@@ -2,6 +2,7 @@
 package push
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,6 +22,10 @@ import (
 // Above this NAR size (the Workers request-body limit) the client cuts the
 // NAR with FastCDC itself and uploads only the chunks the server is missing.
 const chunkedThreshold = 100 * 1024 * 1024
+
+// Concurrent compress+PUT workers per chunked NAR; also bounds how many raw
+// chunks (≤16 MiB each) are buffered at once.
+const chunkUploadJobs = 8
 
 type Pusher struct {
 	Client *api.Client
@@ -272,15 +277,37 @@ func (p *Pusher) uploadMissingChunks(
 	if len(missing) == 0 {
 		return nil
 	}
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	// SpeedBetterCompression is close to the server's zstd level at a fraction
+	// of SpeedBestCompression's CPU; the client's choice is what gets stored
+	// for chunked NARs, so don't drop below this without considering ratio.
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = enc.Close() }()
 
+	// Compression and PUTs fan out across chunks (bounded, so at most
+	// chunkUploadJobs raw chunks are held in memory); the dump/cut/hash pass
+	// stays sequential. Content-addressed PUTs are idempotent, and the
+	// complete call is only sent after every upload lands.
+	uctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	sem := make(chan struct{}, chunkUploadJobs)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var uploadErr error
+	fail := func(err error) {
+		mu.Lock()
+		if uploadErr == nil {
+			uploadErr = err
+			cancel()
+		}
+		mu.Unlock()
+	}
+
 	idx := 0
 	sent := make(map[string]bool, len(missing))
-	err = p.eachChunk(ctx, info.Path, func(chunk []byte) error {
+	err = p.eachChunk(uctx, info.Path, func(chunk []byte) error {
 		if idx >= len(descs) {
 			return errors.New("store path changed between passes")
 		}
@@ -294,8 +321,32 @@ func (p *Pusher) uploadMissingChunks(
 			return nil
 		}
 		sent[desc.Hash] = true
-		return p.Client.UploadChunk(ctx, p.Cache, desc.Hash, enc.EncodeAll(chunk, nil))
+		// The chunker reuses its buffer across cuts; copy before handing off.
+		owned := bytes.Clone(chunk)
+		select {
+		case sem <- struct{}{}:
+		case <-uctx.Done():
+			return context.Cause(uctx)
+		}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			if err := p.Client.UploadChunk(
+				uctx,
+				p.Cache,
+				desc.Hash,
+				enc.EncodeAll(owned, nil),
+			); err != nil {
+				fail(fmt.Errorf("chunk %s: %w", desc.Hash[:12], err))
+			}
+		})
+		return nil
 	})
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if uploadErr != nil {
+		return uploadErr
+	}
 	if err != nil {
 		return err
 	}

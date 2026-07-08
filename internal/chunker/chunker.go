@@ -89,13 +89,17 @@ func (c *Chunker) scan(emit func([]byte) error) error {
 			mask = maskS
 		}
 		if hash&mask == 0 || i >= MaxChunk {
-			if err := emit(c.buf[:i]); err != nil {
-				return err
-			}
+			err := emit(c.buf[:i])
+			// Compact and reset state regardless of emit outcome so the
+			// chunker's invariants hold even when the caller returns an error.
 			copy(c.buf, c.buf[i:c.len])
 			c.len -= i
 			i = 0
 			hash = 0
+			if err != nil {
+				c.scanned, c.hash = 0, 0
+				return err
+			}
 		}
 	}
 	c.scanned = i
