@@ -24,6 +24,9 @@ func pushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := requireToken(ref); err != nil {
+				return err
+			}
 
 			paths := args[1:]
 			if stdin {

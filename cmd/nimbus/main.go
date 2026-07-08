@@ -3,7 +3,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
@@ -72,4 +74,17 @@ func resolveCache(ref string) (*config.CacheRef, *api.Client, error) {
 		return nil, nil, err
 	}
 	return resolved, api.New(resolved.Server.Endpoint, resolved.Server.Token), nil
+}
+
+// requireToken guards commands that cannot work anonymously (pushes), so a
+// missing token fails up front instead of as an opaque 401 mid-run — e.g. CI
+// where the secret resolved to an empty NIMBUS_AUTH_TOKEN.
+func requireToken(ref *config.CacheRef) error {
+	if strings.TrimSpace(ref.Server.Token) == "" {
+		return fmt.Errorf(
+			"no auth token for server %q (%s); run `nimbus login` or set %s",
+			ref.ServerName, ref.Server.Endpoint, config.TokenEnv,
+		)
+	}
+	return nil
 }

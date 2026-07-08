@@ -35,6 +35,9 @@ func watchStoreCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := requireToken(ref); err != nil {
+				return err
+			}
 			pusher := &push.Pusher{
 				Client: client,
 				Cache:  ref.Cache,
@@ -70,6 +73,9 @@ while COMMAND is still running.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref, client, err := resolveCache(args[0])
 			if err != nil {
+				return err
+			}
+			if err := requireToken(ref); err != nil {
 				return err
 			}
 			pusher := &push.Pusher{
