@@ -63,8 +63,7 @@
 	);
 	const gcReclaimed = $derived(
 		form?.gcStats
-			? (form.gcStats.abandoned_uploads_reaped ?? 0) +
-					(form.gcStats.abandoned_caches_reaped ?? 0) +
+			? (form.gcStats.abandoned_caches_reaped ?? 0) +
 					(form.gcStats.expired_objects_reaped ?? 0) +
 					(form.gcStats.size_evicted_objects ?? 0) +
 					(form.gcStats.global_evicted_objects ?? 0) +

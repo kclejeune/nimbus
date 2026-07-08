@@ -18,13 +18,89 @@ function getJwks(teamDomain: string) {
 	return jwks;
 }
 
+const SESSION_COOKIE = 'nimbus-cf-session';
+const SESSION_TTL_SECONDS = 15 * 60; // 15 minutes
+
+// Imported per isolate: SESSION_SECRET is stable, and the key import would
+// otherwise be the dominant cost of the cookie fast path.
+const hmacKeys = new Map<string, Promise<CryptoKey>>();
+
+function importHmacKey(secret: string): Promise<CryptoKey> {
+	let key = hmacKeys.get(secret);
+	if (!key) {
+		key = crypto.subtle.importKey(
+			'raw',
+			new TextEncoder().encode(secret),
+			{ name: 'HMAC', hash: 'SHA-256' },
+			false,
+			['sign', 'verify']
+		);
+		hmacKeys.set(secret, key);
+		key.catch(() => hmacKeys.delete(secret));
+	}
+	return key;
+}
+
+function b64url(buf: ArrayBuffer): string {
+	let str = '';
+	for (const b of new Uint8Array(buf)) str += String.fromCharCode(b);
+	return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+async function mintSessionToken(userId: string, role: UserRole, secret: string): Promise<string> {
+	const expiry = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+	// userId may contain colons (e.g. "cfaccess:<sub>"), so we parse from the right on verify.
+	const payload = `${userId}:${role}:${expiry}`;
+	const key = await importHmacKey(secret);
+	const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+	return `${payload}.${b64url(sig)}`;
+}
+
+async function verifySessionToken(
+	value: string,
+	secret: string
+): Promise<Pick<SessionUser, 'id' | 'role'> | null> {
+	const dotIdx = value.lastIndexOf('.');
+	if (dotIdx === -1) return null;
+	const payload = value.slice(0, dotIdx);
+	const sigB64 = value.slice(dotIdx + 1);
+
+	// Split from the right: userId may contain colons (e.g. "cfaccess:<sub>").
+	const parts = payload.split(':');
+	if (parts.length < 3) return null;
+	const expiryStr = parts[parts.length - 1];
+	const role = parts[parts.length - 2];
+	const userId = parts.slice(0, parts.length - 2).join(':');
+
+	const expiry = parseInt(expiryStr, 10);
+	if (isNaN(expiry) || Math.floor(Date.now() / 1000) > expiry) return null;
+	if (role !== 'admin' && role !== 'member') return null;
+
+	const key = await importHmacKey(secret);
+	const sigBytes = Uint8Array.from(atob(sigB64.replace(/-/g, '+').replace(/_/g, '/')), (c) =>
+		c.charCodeAt(0)
+	);
+	const valid = await crypto.subtle.verify(
+		'HMAC',
+		key,
+		sigBytes,
+		new TextEncoder().encode(payload)
+	);
+	if (!valid) return null;
+
+	return { id: userId, role: role as UserRole };
+}
+
 /**
  * If the request carries a valid Cloudflare Access assertion, return the
  * corresponding user (creating one on first sight). Returns null when Access is
  * not configured or the assertion is absent/invalid.
  *
- * Access re-validates on every request, so no local session is needed for this
- * path — identity is derived per request from the signed assertion.
+ * A short-lived HMAC-signed session cookie (nimbus-cf-session, 15 min TTL) is
+ * minted after the first successful D1 resolution and verified on subsequent
+ * requests, avoiding the 3-4 D1 queries per request for returning users. The
+ * CF Access JWT is still validated on every request; the cookie only replaces
+ * the D1 user lookup.
  */
 export async function resolveCfAccessUser(
 	event: RequestEvent,
@@ -34,13 +110,13 @@ export async function resolveCfAccessUser(
 	const aud = env.CF_ACCESS_AUD;
 	if (!teamDomain || !aud) return null;
 
-	const token =
+	const accessToken =
 		event.request.headers.get('Cf-Access-Jwt-Assertion') ?? event.cookies.get('CF_Authorization');
-	if (!token) return null;
+	if (!accessToken) return null;
 
 	let payload: JWTPayload & { email?: string; name?: string };
 	try {
-		const result = await jwtVerify(token, getJwks(teamDomain), {
+		const result = await jwtVerify(accessToken, getJwks(teamDomain), {
 			issuer: teamDomain.replace(/\/$/, ''),
 			audience: aud
 		});
@@ -53,7 +129,41 @@ export async function resolveCfAccessUser(
 	const email = payload.email ?? null;
 	if (!sub) return null;
 
-	return upsertAccessUser(env, { sub, email, name: payload.name ?? email });
+	// Check session cookie before hitting D1.
+	const sessionSecret = env.SESSION_SECRET;
+	if (sessionSecret) {
+		const cookieValue = event.cookies.get(SESSION_COOKIE);
+		if (cookieValue) {
+			const cached = await verifySessionToken(cookieValue, sessionSecret);
+			if (cached) {
+				return {
+					id: cached.id,
+					sub,
+					provider: 'cf-access',
+					email,
+					name: payload.name ?? email,
+					role: cached.role
+				};
+			}
+		}
+	}
+
+	// Full D1 resolution (first visit or expired/invalid cookie).
+	const user = await upsertAccessUser(env, { sub, email, name: payload.name ?? email });
+
+	// Mint a fresh session cookie to skip D1 on subsequent requests.
+	if (sessionSecret) {
+		const cookieToken = await mintSessionToken(user.id, user.role, sessionSecret);
+		event.cookies.set(SESSION_COOKIE, cookieToken, {
+			httpOnly: true,
+			secure: true,
+			sameSite: 'lax',
+			path: '/',
+			maxAge: SESSION_TTL_SECONDS
+		});
+	}
+
+	return user;
 }
 
 async function upsertAccessUser(

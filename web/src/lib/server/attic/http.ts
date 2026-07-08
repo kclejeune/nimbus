@@ -40,3 +40,17 @@ export function withVisibility(response: Response, isPublic: boolean): Response 
 	if (isPublic) response.headers.set('X-Attic-Cache-Visibility', 'public');
 	return response;
 }
+
+/**
+ * Downstream caching policy, applied by the gateway after the internal edge
+ * cache (which stores the response as emitted, behind per-request auth): a
+ * private cache's narinfo/NAR must not land in shared caches beyond our
+ * control, so `public` is rewritten to `private` on the way out.
+ */
+export function withCachePolicy(response: Response, isPublic: boolean): Response {
+	const cacheControl = response.headers.get('Cache-Control');
+	if (isPublic || !cacheControl || !cacheControl.includes('public')) return response;
+	const rewritten = new Response(response.body, response);
+	rewritten.headers.set('Cache-Control', cacheControl.replace('public', 'private'));
+	return rewritten;
+}

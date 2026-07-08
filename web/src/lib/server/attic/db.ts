@@ -2,7 +2,19 @@
 // worker's d1.rs so both implementations stay drop-in compatible on the same
 // database.
 
-import type { D1Database } from '@cloudflare/workers-types';
+import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types';
+
+/** D1 caps bound parameters per statement; IN-lists are windowed to this. */
+export const PARAM_BATCH = 99;
+/** Statements per db.batch() call; larger sets are split into sequential batches. */
+export const STMT_BATCH = 100;
+
+/** Run statements in batches of STMT_BATCH. Only atomic within each batch. */
+export async function runBatched(db: D1Database, stmts: D1PreparedStatement[]): Promise<void> {
+	for (let i = 0; i < stmts.length; i += STMT_BATCH) {
+		await db.batch(stmts.slice(i, i + STMT_BATCH));
+	}
+}
 
 export interface CacheRow {
 	id: number;
@@ -70,72 +82,160 @@ export async function findCache(db: D1Database, name: string): Promise<CacheRow 
 		.first<CacheRow>();
 }
 
-export interface ObjectWithNar {
+export interface ObjectWithNarChunks {
 	object: ObjectRow;
 	nar: NarRow;
+	chunks: ChunkRow[];
 }
 
-export async function findObject(
-	db: D1Database,
-	cacheName: string,
-	storePathHash: string
-): Promise<ObjectWithNar | null> {
-	const row = await db
-		.prepare(
-			'SELECT o.id, o.store_path_hash, o.store_path, o.refs, o.system, o.deriver, ' +
-				'o.sigs, o.ca, ' +
-				'n.id AS nar_id, n.state, n.nar_hash, n.nar_size, n.compression, n.num_chunks ' +
-				'FROM object o ' +
-				'INNER JOIN cache c ON o.cache_id = c.id ' +
-				'INNER JOIN nar n ON o.nar_id = n.id ' +
-				"WHERE c.name = ?1 AND c.deleted_at IS NULL AND o.store_path_hash = ?2 AND n.state = 'V'"
-		)
-		.bind(cacheName, storePathHash)
-		.first<ObjectRow & NarRow & { nar_id: number }>();
-	if (!row) return null;
+export interface NarWithChunks {
+	nar: NarRow;
+	chunks: ChunkRow[];
+}
+
+/** One joined row of object/nar plus (nullable) chunk columns. */
+interface JoinedChunkColumns {
+	chunk_id: number | null;
+	chunk_state: string | null;
+	chunk_hash: string | null;
+	chunk_size: number | null;
+	file_hash: string | null;
+	file_size: number | null;
+	chunk_compression: string | null;
+	remote_file: string | null;
+}
+
+const CHUNK_JOIN_COLUMNS =
+	'ch.id AS chunk_id, ch.state AS chunk_state, ch.chunk_hash, ch.chunk_size, ' +
+	'ch.file_hash, ch.file_size, ch.compression AS chunk_compression, ch.remote_file ';
+
+function chunkFromJoined(row: JoinedChunkColumns): ChunkRow | null {
+	if (row.chunk_id == null) return null;
 	return {
-		object: {
-			id: row.id,
-			store_path_hash: row.store_path_hash,
-			store_path: row.store_path,
-			refs: row.refs,
-			system: row.system,
-			deriver: row.deriver,
-			sigs: row.sigs,
-			ca: row.ca
-		},
-		nar: {
-			id: row.nar_id,
-			state: row.state,
-			nar_hash: row.nar_hash,
-			nar_size: row.nar_size,
-			compression: row.compression,
-			num_chunks: row.num_chunks
-		}
+		id: row.chunk_id,
+		state: row.chunk_state!,
+		chunk_hash: row.chunk_hash!,
+		chunk_size: row.chunk_size!,
+		file_hash: row.file_hash,
+		file_size: row.file_size,
+		compression: row.chunk_compression!,
+		remote_file: row.remote_file!
 	};
 }
 
-export async function findNarByHash(db: D1Database, narHash: string): Promise<NarRow | null> {
-	return db
-		.prepare(
-			'SELECT id, state, nar_hash, nar_size, compression, num_chunks ' +
-				"FROM nar WHERE nar_hash = ?1 AND state = 'V'"
-		)
-		.bind(narHash)
-		.first<NarRow>();
-}
-
-export async function findChunksForNar(db: D1Database, narId: number): Promise<ChunkRow[]> {
+/**
+ * Object, its NAR, and the NAR's chunks in one round-trip (the cold narinfo
+ * path is latency-sensitive: it runs once per store path of a closure walk).
+ * Chunkrefs with a missing chunk row yield no ChunkRow; callers compare
+ * chunks.length against nar.num_chunks for completeness.
+ */
+export async function findObjectWithChunks(
+	db: D1Database,
+	cacheName: string,
+	storePathHash: string
+): Promise<ObjectWithNarChunks | null> {
 	const { results } = await db
 		.prepare(
-			'SELECT ch.id, ch.state, ch.chunk_hash, ch.chunk_size, ch.file_hash, ' +
-				'ch.file_size, ch.compression, ch.remote_file ' +
-				'FROM chunk ch INNER JOIN chunkref cr ON cr.chunk_id = ch.id ' +
-				'WHERE cr.nar_id = ?1 ORDER BY cr.seq'
+			'SELECT o.id, o.store_path_hash, o.store_path, o.refs, o.system, o.deriver, ' +
+				'o.sigs, o.ca, ' +
+				'n.id AS nar_id, n.state AS nar_state, n.nar_hash, n.nar_size, ' +
+				'n.compression AS nar_compression, n.num_chunks, ' +
+				CHUNK_JOIN_COLUMNS +
+				'FROM object o ' +
+				'INNER JOIN cache c ON o.cache_id = c.id ' +
+				'INNER JOIN nar n ON o.nar_id = n.id ' +
+				'LEFT JOIN chunkref cr ON cr.nar_id = n.id ' +
+				'LEFT JOIN chunk ch ON ch.id = cr.chunk_id ' +
+				"WHERE c.name = ?1 AND c.deleted_at IS NULL AND o.store_path_hash = ?2 AND n.state = 'V' " +
+				'ORDER BY cr.seq'
 		)
-		.bind(narId)
-		.all<ChunkRow>();
-	return results;
+		.bind(cacheName, storePathHash)
+		.all<
+			ObjectRow & {
+				nar_id: number;
+				nar_state: string;
+				nar_hash: string;
+				nar_size: number;
+				nar_compression: string;
+				num_chunks: number;
+			} & JoinedChunkColumns
+		>();
+	const first = results[0];
+	if (!first) return null;
+	return {
+		object: {
+			id: first.id,
+			store_path_hash: first.store_path_hash,
+			store_path: first.store_path,
+			refs: first.refs,
+			system: first.system,
+			deriver: first.deriver,
+			sigs: first.sigs,
+			ca: first.ca
+		},
+		nar: {
+			id: first.nar_id,
+			state: first.nar_state,
+			nar_hash: first.nar_hash,
+			nar_size: first.nar_size,
+			compression: first.nar_compression,
+			num_chunks: first.num_chunks
+		},
+		chunks: results.map(chunkFromJoined).filter((c): c is ChunkRow => c !== null)
+	};
+}
+
+/**
+ * Valid NAR and its chunks in one round-trip, matching any of the given hash
+ * spellings (earlier entries win, e.g. `sha256:`-prefixed before bare).
+ */
+export async function findNarWithChunks(
+	db: D1Database,
+	narHashes: string[]
+): Promise<NarWithChunks | null> {
+	const placeholders = narHashes.map((_, i) => `?${i + 1}`).join(', ');
+	const { results } = await db
+		.prepare(
+			'SELECT n.id AS nar_id, n.state AS nar_state, n.nar_hash, n.nar_size, ' +
+				'n.compression AS nar_compression, n.num_chunks, ' +
+				CHUNK_JOIN_COLUMNS +
+				'FROM nar n ' +
+				'LEFT JOIN chunkref cr ON cr.nar_id = n.id ' +
+				'LEFT JOIN chunk ch ON ch.id = cr.chunk_id ' +
+				`WHERE n.nar_hash IN (${placeholders}) AND n.state = 'V' ` +
+				'ORDER BY n.id, cr.seq'
+		)
+		.bind(...narHashes)
+		.all<
+			{
+				nar_id: number;
+				nar_state: string;
+				nar_hash: string;
+				nar_size: number;
+				nar_compression: string;
+				num_chunks: number;
+			} & JoinedChunkColumns
+		>();
+	if (results.length === 0) return null;
+	// Prefer the earliest hash spelling that matched, then the lowest nar id.
+	const rank = new Map(narHashes.map((h, i) => [h, i]));
+	results.sort(
+		(a, b) =>
+			(rank.get(a.nar_hash) ?? Infinity) - (rank.get(b.nar_hash) ?? Infinity) || a.nar_id - b.nar_id
+	);
+	const chosen = results[0].nar_id;
+	const rows = results.filter((r) => r.nar_id === chosen);
+	return {
+		nar: {
+			id: rows[0].nar_id,
+			state: rows[0].nar_state,
+			nar_hash: rows[0].nar_hash,
+			nar_size: rows[0].nar_size,
+			compression: rows[0].nar_compression,
+			num_chunks: rows[0].num_chunks
+		},
+		chunks: rows.map(chunkFromJoined).filter((c): c is ChunkRow => c !== null)
+	};
 }
 
 /** Bump last_accessed_at for LRU retention (best-effort; callers ignore errors). */
@@ -227,10 +327,12 @@ export interface NewNar {
 }
 
 export async function createNar(db: D1Database, nar: NewNar): Promise<number> {
+	// holders_count 0: a fresh 'P' row is protected from the orphan reaper by
+	// its 1h grace period until the linking batch lands the object row.
 	const result = await db
 		.prepare(
 			'INSERT INTO nar (state, nar_hash, nar_size, compression, num_chunks, ' +
-				'completeness_hint, holders_count, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, ?6)'
+				'completeness_hint, holders_count, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6)'
 		)
 		.bind(nar.state, nar.nar_hash, nar.nar_size, nar.compression, nar.num_chunks, nowRfc3339())
 		.run();
@@ -248,12 +350,20 @@ export interface NewChunk {
 	remote_file_id: string;
 }
 
-export async function createChunk(db: D1Database, chunk: NewChunk): Promise<number> {
-	const result = await db
+/**
+ * Insert a chunk row, converging on the existing row when a concurrent upload
+ * of the same (chunk_hash, compression) already created one — both describe
+ * the same content-addressed R2 object. holders_count starts at 0: newborn
+ * rows are protected by the orphan reaper's grace period until a chunkref
+ * lands. Statement form for use inside atomic batches.
+ */
+export function insertChunkStmt(db: D1Database, chunk: NewChunk): D1PreparedStatement {
+	return db
 		.prepare(
 			'INSERT INTO chunk (state, chunk_hash, chunk_size, file_hash, file_size, ' +
 				'compression, remote_file, remote_file_id, holders_count, created_at) ' +
-				'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)'
+				'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9) ' +
+				'ON CONFLICT (chunk_hash, compression) DO NOTHING'
 		)
 		.bind(
 			chunk.state,
@@ -265,26 +375,51 @@ export async function createChunk(db: D1Database, chunk: NewChunk): Promise<numb
 			chunk.remote_file,
 			chunk.remote_file_id,
 			nowRfc3339()
-		)
-		.run();
-	return requireRowId(result, 'chunk');
+		);
 }
 
-export async function createChunkRef(
+/** Insert one chunk row; returns false when an existing row won the conflict. */
+export async function insertChunk(db: D1Database, chunk: NewChunk): Promise<boolean> {
+	const result = await insertChunkStmt(db, chunk).run();
+	return (result.meta.changes ?? 0) > 0;
+}
+
+/** Valid chunk row for (hash, compression), without taking a hold. */
+export async function findChunk(
+	db: D1Database,
+	chunkHash: string,
+	compression: string
+): Promise<ChunkRow | null> {
+	return db
+		.prepare(
+			'SELECT id, state, chunk_hash, chunk_size, file_hash, file_size, compression, remote_file ' +
+				"FROM chunk WHERE chunk_hash = ?1 AND compression = ?2 AND state = 'V'"
+		)
+		.bind(chunkHash, compression)
+		.first<ChunkRow>();
+}
+
+/**
+ * Chunkref insert for atomic batches. When chunkId is null the row links to
+ * whichever chunk row won (chunk_hash, compression) — deterministic under the
+ * unique index, and non-null as long as the chunk insert precedes it in the
+ * same or an earlier batch.
+ */
+export function insertChunkRefStmt(
 	db: D1Database,
 	narId: number,
 	seq: number,
-	chunkId: number,
+	chunkId: number | null,
 	chunkHash: string,
 	compression: string
-): Promise<void> {
-	await db
+): D1PreparedStatement {
+	return db
 		.prepare(
 			'INSERT INTO chunkref (nar_id, seq, chunk_id, chunk_hash, compression) ' +
-				'VALUES (?1, ?2, ?3, ?4, ?5)'
+				'VALUES (?1, ?2, COALESCE(?3, ' +
+				'(SELECT id FROM chunk WHERE chunk_hash = ?4 AND compression = ?5)), ?4, ?5)'
 		)
-		.bind(narId, seq, chunkId, chunkHash, compression)
-		.run();
+		.bind(narId, seq, chunkId, chunkHash, compression);
 }
 
 export interface NewObject {
@@ -299,8 +434,8 @@ export interface NewObject {
 	ca: string | null;
 }
 
-export async function createObject(db: D1Database, object: NewObject): Promise<void> {
-	await db
+export function insertObjectStmt(db: D1Database, object: NewObject): D1PreparedStatement {
+	return db
 		.prepare(
 			'INSERT INTO object (cache_id, nar_id, store_path_hash, store_path, ' +
 				'refs, system, deriver, sigs, ca, created_at, created_by) ' +
@@ -318,12 +453,23 @@ export async function createObject(db: D1Database, object: NewObject): Promise<v
 			JSON.stringify(object.sigs),
 			object.ca,
 			nowRfc3339()
-		)
-		.run();
+		);
+}
+
+export async function createObject(db: D1Database, object: NewObject): Promise<void> {
+	await insertObjectStmt(db, object).run();
+}
+
+export function updateNarStateStmt(
+	db: D1Database,
+	narId: number,
+	state: string
+): D1PreparedStatement {
+	return db.prepare('UPDATE nar SET state = ?1 WHERE id = ?2').bind(state, narId);
 }
 
 export async function updateNarState(db: D1Database, narId: number, state: string): Promise<void> {
-	await db.prepare('UPDATE nar SET state = ?1 WHERE id = ?2').bind(state, narId).run();
+	await updateNarStateStmt(db, narId, state).run();
 }
 
 /**
@@ -336,9 +482,8 @@ export async function findExistingChunkHashes(
 	compression: string
 ): Promise<Set<string>> {
 	const existing = new Set<string>();
-	const BATCH = 99;
-	for (let i = 0; i < chunkHashes.length; i += BATCH) {
-		const batch = chunkHashes.slice(i, i + BATCH);
+	for (let i = 0; i < chunkHashes.length; i += PARAM_BATCH) {
+		const batch = chunkHashes.slice(i, i + PARAM_BATCH);
 		const placeholders = batch.map((_, j) => `?${j + 2}`).join(', ');
 		const { results } = await db
 			.prepare(
@@ -353,24 +498,21 @@ export async function findExistingChunkHashes(
 }
 
 /**
- * Optimistic dedup lock: atomically bump holders_count if it still has the
- * value we read. Returns the NAR when the CAS wins, null otherwise.
+ * Dedup hold: atomically bump holders_count on the valid NAR row, returning
+ * it, or null when none exists. The orphan reaper skips held rows, so a NAR
+ * locked here cannot be reaped between the dedup decision and the object row
+ * landing — release with releaseNarLock when done.
  */
 export async function tryLockNar(db: D1Database, narHash: string): Promise<NarRow | null> {
-	const nar = await findNarByHash(db, narHash);
-	if (!nar) return null;
-	const current = await db
-		.prepare('SELECT holders_count FROM nar WHERE id = ?1')
-		.bind(nar.id)
-		.first<{ holders_count: number }>();
-	if (!current) return null;
-	const result = await db
+	const row = await db
 		.prepare(
-			'UPDATE nar SET holders_count = holders_count + 1 WHERE id = ?1 AND holders_count = ?2'
+			'UPDATE nar SET holders_count = holders_count + 1, held_at = ?2 ' +
+				"WHERE id = (SELECT id FROM nar WHERE nar_hash = ?1 AND state = 'V' ORDER BY id LIMIT 1) " +
+				'RETURNING id, state, nar_hash, nar_size, compression, num_chunks'
 		)
-		.bind(nar.id, current.holders_count)
-		.run();
-	return (result.meta.changes ?? 0) > 0 ? nar : null;
+		.bind(narHash, nowRfc3339())
+		.first<NarRow>();
+	return row ?? null;
 }
 
 export async function releaseNarLock(db: D1Database, narId: number): Promise<void> {
@@ -381,106 +523,68 @@ export async function releaseNarLock(db: D1Database, narId: number): Promise<voi
 }
 
 /**
- * Chunk-level dedup lock, the chunk analog of tryLockNar. Matches on hash AND
+ * Chunk-level dedup hold, the chunk analog of tryLockNar. Matches on hash AND
  * compression (a chunk stored with a different codec is a different file).
  */
+function tryLockChunkStmt(
+	db: D1Database,
+	chunkHash: string,
+	compression: string
+): D1PreparedStatement {
+	return db
+		.prepare(
+			'UPDATE chunk SET holders_count = holders_count + 1, held_at = ?3 ' +
+				'WHERE id = (SELECT id FROM chunk ' +
+				"WHERE chunk_hash = ?1 AND compression = ?2 AND state = 'V') " +
+				'RETURNING id, state, chunk_hash, chunk_size, file_hash, file_size, compression, remote_file'
+		)
+		.bind(chunkHash, compression, nowRfc3339());
+}
+
 export async function tryLockChunk(
 	db: D1Database,
 	chunkHash: string,
 	compression: string
 ): Promise<ChunkRow | null> {
-	const chunk = await db
-		.prepare(
-			'SELECT id, state, chunk_hash, chunk_size, file_hash, file_size, compression, remote_file ' +
-				"FROM chunk WHERE chunk_hash = ?1 AND compression = ?2 AND state = 'V'"
-		)
-		.bind(chunkHash, compression)
-		.first<ChunkRow>();
-	if (!chunk) return null;
-	const current = await db
-		.prepare('SELECT holders_count FROM chunk WHERE id = ?1')
-		.bind(chunk.id)
-		.first<{ holders_count: number }>();
-	if (!current) return null;
-	const result = await db
-		.prepare(
-			'UPDATE chunk SET holders_count = holders_count + 1 WHERE id = ?1 AND holders_count = ?2'
-		)
-		.bind(chunk.id, current.holders_count)
-		.run();
-	return (result.meta.changes ?? 0) > 0 ? chunk : null;
+	const row = await tryLockChunkStmt(db, chunkHash, compression).first<ChunkRow>();
+	return row ?? null;
 }
 
-export async function releaseChunkLock(db: D1Database, chunkId: number): Promise<void> {
-	await db
+/** Lock many chunks in one batch round-trip; returns rows keyed by chunk_hash. */
+export async function tryLockChunks(
+	db: D1Database,
+	chunkHashes: string[],
+	compression: string
+): Promise<Map<string, ChunkRow>> {
+	const locked = new Map<string, ChunkRow>();
+	for (let i = 0; i < chunkHashes.length; i += STMT_BATCH) {
+		const window = chunkHashes.slice(i, i + STMT_BATCH);
+		const results = await db.batch<ChunkRow>(
+			window.map((hash) => tryLockChunkStmt(db, hash, compression))
+		);
+		for (const result of results) {
+			const row = result.results?.[0];
+			if (row) locked.set(row.chunk_hash, row);
+		}
+	}
+	return locked;
+}
+
+function releaseChunkLockStmt(db: D1Database, chunkId: number): D1PreparedStatement {
+	return db
 		.prepare(
 			'UPDATE chunk SET holders_count = holders_count - 1 WHERE id = ?1 AND holders_count > 0'
 		)
-		.bind(chunkId)
-		.run();
+		.bind(chunkId);
 }
 
-export interface PendingUploadRow {
-	token: string;
-	cache_id: number;
-	cache_name: string;
-	r2_upload_id: string;
-	r2_key: string;
-	storage_key: string;
-	nar_info: string;
-	expected_nar_size: number;
-	compression: string;
-	parts_uploaded: number;
-	bytes_received: number;
-	uploaded_parts: string;
-}
-
-export async function createPendingUpload(db: D1Database, u: PendingUploadRow): Promise<void> {
-	await db
-		.prepare(
-			'INSERT INTO pending_upload (token, cache_id, cache_name, r2_upload_id, r2_key, ' +
-				'storage_key, nar_info, expected_nar_size, compression, parts_uploaded, ' +
-				"bytes_received, uploaded_parts, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, '[]', ?10)"
-		)
-		.bind(
-			u.token,
-			u.cache_id,
-			u.cache_name,
-			u.r2_upload_id,
-			u.r2_key,
-			u.storage_key,
-			u.nar_info,
-			u.expected_nar_size,
-			u.compression,
-			nowRfc3339()
-		)
-		.run();
-}
-
-export async function getPendingUpload(
-	db: D1Database,
-	token: string
-): Promise<PendingUploadRow | null> {
-	return db.prepare('SELECT * FROM pending_upload WHERE token = ?1').bind(token).first();
-}
-
-export async function updatePendingUpload(
-	db: D1Database,
-	token: string,
-	partsUploaded: number,
-	bytesReceived: number,
-	uploadedParts: string
-): Promise<void> {
-	await db
-		.prepare(
-			'UPDATE pending_upload SET parts_uploaded = ?1, bytes_received = ?2, uploaded_parts = ?3 WHERE token = ?4'
-		)
-		.bind(partsUploaded, bytesReceived, uploadedParts, token)
-		.run();
-}
-
-export async function deletePendingUpload(db: D1Database, token: string): Promise<void> {
-	await db.prepare('DELETE FROM pending_upload WHERE token = ?1').bind(token).run();
+/** Release many chunk holds in one batch round-trip. */
+export async function releaseChunkLocksById(db: D1Database, chunkIds: number[]): Promise<void> {
+	if (chunkIds.length === 0) return;
+	await runBatched(
+		db,
+		chunkIds.map((id) => releaseChunkLockStmt(db, id))
+	);
 }
 
 export interface CacheUpdate {
@@ -593,16 +697,15 @@ export async function renameCacheRow(
 
 /** Hard-remove a soft-deleted tombstone so its name can be reused. */
 export async function purgeDeletedCache(db: D1Database, name: string): Promise<void> {
-	for (const sql of [
-		'DELETE FROM object_ref WHERE object_id IN (SELECT o.id FROM object o ' +
-			'JOIN cache c ON c.id = o.cache_id WHERE c.name = ?1 AND c.deleted_at IS NOT NULL)',
-		'DELETE FROM gc_root WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
-		'DELETE FROM object WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
-		'DELETE FROM pending_upload WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
-		'DELETE FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL'
-	]) {
-		await db.prepare(sql).bind(name).run();
-	}
+	await db.batch(
+		[
+			'DELETE FROM object_ref WHERE object_id IN (SELECT o.id FROM object o ' +
+				'JOIN cache c ON c.id = o.cache_id WHERE c.name = ?1 AND c.deleted_at IS NOT NULL)',
+			'DELETE FROM gc_root WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
+			'DELETE FROM object WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
+			'DELETE FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL'
+		].map((sql) => db.prepare(sql).bind(name))
+	);
 }
 
 export interface DeviceAuthRow {

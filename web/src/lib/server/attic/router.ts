@@ -13,7 +13,7 @@ import {
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import * as db from './db';
 import { maybeSizeTriggeredGc, runGc } from './gc';
-import { errorResponse, jsonResponse, withVisibility } from './http';
+import { errorResponse, jsonResponse, withCachePolicy, withVisibility } from './http';
 import {
 	filterUpstreamPaths,
 	findExistingPaths,
@@ -21,7 +21,7 @@ import {
 	parseUpstreams
 } from './missing-paths';
 import { extractPublicKey } from './signing';
-import { cacheTag, serveStore, type ExecutionContext } from './store';
+import { cacheTag, PREFETCH_DEPTH_HEADER, serveStore, type ExecutionContext } from './store';
 import {
 	NO_PERMISSION,
 	parseAuthToken,
@@ -147,6 +147,9 @@ function forwardToStore(
 ): Promise<Response> {
 	const forwarded = new Request(request);
 	forwarded.headers.delete('Authorization');
+	// Internal recursion control for reference prefetch; a client-supplied
+	// value would inflate the loopback fan-out.
+	forwarded.headers.delete(PREFETCH_DEPTH_HEADER);
 	const store = ctx?.exports?.CachedStore;
 	if (!store) {
 		if (!warnedStoreUnavailable) {
@@ -183,7 +186,8 @@ async function handleNarInfo(
 	} catch {
 		// no valid keypair: stored client sigs are served, nothing to vary on
 	}
-	return forwardToStore(new Request(keyed, request), env, ctx);
+	const response = await forwardToStore(new Request(keyed, request), env, ctx);
+	return withCachePolicy(response, auth.cache.is_public === 1);
 }
 
 async function handleNar(
@@ -220,13 +224,17 @@ async function handleNar(
 
 	if (response.status === 404) {
 		const upstreamUrl = await findUpstreamNar(
+			env.ATTIC_DB,
 			parseUpstreams(auth.cache.upstream_caches),
 			`nar/${filename}`
 		);
 		if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
 		return response;
 	}
-	return withVisibility(new Response(response.body, response), auth.cache.is_public === 1);
+	return withCachePolicy(
+		withVisibility(new Response(response.body, response), auth.cache.is_public === 1),
+		auth.cache.is_public === 1
+	);
 }
 
 /**

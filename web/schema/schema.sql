@@ -22,22 +22,34 @@ CREATE INDEX IF NOT EXISTS idx_cache_name ON cache(name);
 CREATE INDEX IF NOT EXISTS idx_cache_deleted ON cache(deleted_at);
 
 -- Direct references between store paths, derived from object.refs JSON.
--- ref_hash is the 32-char store path hash of the referenced path; resolution
--- to an object row is per-cache via (cache_id, store_path_hash).
+-- ref_hash is the 32-char store path hash of the referenced path and the
+-- source of truth; child_id caches its per-cache resolution to an object row
+-- so closure CTEs traverse integers (maintained by GC's ref-sync pass, NULL
+-- while the referenced path is absent, cleared when the child is deleted).
 CREATE TABLE IF NOT EXISTS object_ref (
     object_id INTEGER NOT NULL REFERENCES object(id),
     ref_hash TEXT NOT NULL,
+    child_id INTEGER REFERENCES object(id),
     PRIMARY KEY (object_id, ref_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_object_ref_ref_hash ON object_ref(ref_hash);
+CREATE INDEX IF NOT EXISTS idx_object_ref_child ON object_ref(child_id);
+-- Dangling edges awaiting resolution (referenced path not yet pushed).
+CREATE INDEX IF NOT EXISTS idx_object_ref_unresolved ON object_ref(ref_hash)
+    WHERE child_id IS NULL;
 
 -- Pinned store paths: GC always keeps the full closure of every root.
+-- closure_objects/closure_bytes are display stats cached by GC (stats_at is
+-- the refresh time); the dashboard reads them instead of recomputing.
 CREATE TABLE IF NOT EXISTS gc_root (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cache_id INTEGER NOT NULL REFERENCES cache(id),
     store_path_hash TEXT NOT NULL,
     note TEXT,
     created_at TEXT NOT NULL,
+    closure_objects INTEGER,
+    closure_bytes INTEGER,
+    stats_at TEXT,
     UNIQUE (cache_id, store_path_hash)
 );
 
@@ -66,7 +78,8 @@ CREATE TABLE IF NOT EXISTS nar (
     compression TEXT NOT NULL DEFAULT 'none',
     num_chunks INTEGER NOT NULL DEFAULT 1,
     completeness_hint INTEGER NOT NULL DEFAULT 0,
-    holders_count INTEGER NOT NULL DEFAULT 0,
+    holders_count INTEGER NOT NULL DEFAULT 0, -- active dedup holds; orphan reaping skips held rows
+    held_at TEXT, -- last hold acquisition, for stale-hold recovery
     created_at TEXT NOT NULL
 );
 
@@ -108,11 +121,14 @@ CREATE TABLE IF NOT EXISTS chunk (
     compression TEXT NOT NULL DEFAULT 'none',
     remote_file TEXT NOT NULL, -- JSON-encoded RemoteFile
     remote_file_id TEXT NOT NULL,
-    holders_count INTEGER NOT NULL DEFAULT 0,
+    holders_count INTEGER NOT NULL DEFAULT 0, -- active dedup holds; orphan reaping skips held rows
+    held_at TEXT, -- last hold acquisition, for stale-hold recovery
     created_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_chunk_hash ON chunk(chunk_hash, compression);
+-- Unique: racing uploads of one chunk must converge on a single row, because
+-- rows share the content-addressed R2 object and GC deletes through them.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chunk_hash ON chunk(chunk_hash, compression);
 CREATE INDEX IF NOT EXISTS idx_chunk_state ON chunk(state);
 
 -- ChunkRef table (NAR to chunk mapping)
@@ -127,25 +143,6 @@ CREATE TABLE IF NOT EXISTS chunkref (
 
 CREATE INDEX IF NOT EXISTS idx_chunkref_nar ON chunkref(nar_id, seq);
 CREATE INDEX IF NOT EXISTS idx_chunkref_chunk ON chunkref(chunk_id);
-
--- Pending chunked-upload state (server-side; the client holds only an opaque token)
-CREATE TABLE IF NOT EXISTS pending_upload (
-    token TEXT PRIMARY KEY,
-    cache_id INTEGER NOT NULL REFERENCES cache(id),
-    cache_name TEXT NOT NULL,
-    r2_upload_id TEXT NOT NULL,
-    r2_key TEXT NOT NULL,
-    storage_key TEXT NOT NULL,
-    nar_info TEXT NOT NULL,
-    expected_nar_size INTEGER NOT NULL,
-    compression TEXT NOT NULL,
-    parts_uploaded INTEGER NOT NULL DEFAULT 0,
-    bytes_received INTEGER NOT NULL DEFAULT 0,
-    uploaded_parts TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_pending_upload_created ON pending_upload(created_at);
 
 -- OAuth device-authorization grants for headless CLI login
 CREATE TABLE IF NOT EXISTS device_auth (

@@ -37,17 +37,31 @@ export function extractPublicKey(keypair: string): string {
 	return `${name}:${encodeBase64(bytes.slice(32))}`;
 }
 
+// Imported signing keys per keypair string, so a narinfo miss doesn't re-run
+// base64 + PKCS#8 assembly + importKey. Isolate-lifetime; rotation stores a
+// new keypair string, which simply misses this cache.
+const signingKeys = new Map<string, Promise<CryptoKey>>();
+
+function importSigningKey(keypair: string): Promise<CryptoKey> {
+	let key = signingKeys.get(keypair);
+	if (!key) {
+		const { bytes } = decodeKeypair(keypair);
+		const pkcs8 = new Uint8Array(PKCS8_ED25519_PREFIX.length + 32);
+		pkcs8.set(PKCS8_ED25519_PREFIX);
+		pkcs8.set(bytes.slice(0, 32), PKCS8_ED25519_PREFIX.length);
+		key = crypto.subtle.importKey('pkcs8', pkcs8 as BufferSource, 'Ed25519', false, ['sign']);
+		signingKeys.set(keypair, key);
+		key.catch(() => signingKeys.delete(keypair));
+	}
+	return key;
+}
+
 /** Sign a message with a Nix-format keypair, returning `{name}:{base64 sig}`. */
 export async function signMessage(keypair: string, message: Uint8Array): Promise<string> {
-	const { name, bytes } = decodeKeypair(keypair);
-
-	const pkcs8 = new Uint8Array(PKCS8_ED25519_PREFIX.length + 32);
-	pkcs8.set(PKCS8_ED25519_PREFIX);
-	pkcs8.set(bytes.slice(0, 32), PKCS8_ED25519_PREFIX.length);
-
-	const key = await crypto.subtle.importKey('pkcs8', pkcs8 as BufferSource, 'Ed25519', false, [
-		'sign'
-	]);
+	// A cache hit implies a prior successful decode of this exact string, so
+	// the name can be sliced without re-validating the key material.
+	const key = await importSigningKey(keypair);
+	const name = keypair.slice(0, keypair.indexOf(':'));
 	const sig = await crypto.subtle.sign('Ed25519', key, message as BufferSource);
 	return `${name}:${encodeBase64(new Uint8Array(sig))}`;
 }

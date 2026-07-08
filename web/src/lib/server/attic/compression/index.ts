@@ -170,7 +170,7 @@ function toHex(buf: ArrayBuffer): string {
 	return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/** One-shot compression with dual hashing, for buffered (≤15MB) uploads. */
+/** One-shot compression with dual hashing, for buffered (≤16MB) inputs. */
 export async function compressBuffer(
 	input: Uint8Array,
 	kind: CompressionKind
@@ -180,6 +180,11 @@ export async function compressBuffer(
 	let data: Uint8Array;
 	if (kind === 'none') {
 		data = input;
+	} else if (kind === 'zstd') {
+		// The whole input is in hand: one frame, so matches span the full
+		// buffer instead of stopping at the streaming path's block boundaries.
+		await initZstd();
+		data = zstdCompress(input);
 	} else {
 		const compressor = await makeCompressor(kind);
 		const parts = [...(await compressor.transform(input)), ...(await compressor.finish())];

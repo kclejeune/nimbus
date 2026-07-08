@@ -62,7 +62,7 @@ export async function serveStore(
 	const segments = new URL(request.url).pathname.split('/').filter(Boolean);
 
 	if (segments.length === 2 && segments[1].endsWith('.narinfo')) {
-		return serveNarInfo(env, segments[0], segments[1].slice(0, -'.narinfo'.length));
+		return serveNarInfo(request, env, ctx, segments[0], segments[1].slice(0, -'.narinfo'.length));
 	}
 	// NARs are content-addressed and shared across caches, so their route
 	// carries no cache name: every cache referencing a NAR hits the same edge
@@ -74,12 +74,85 @@ export async function serveStore(
 	return errorResponse(404, 'Not found');
 }
 
-async function serveNarInfo(env: Env, cacheName: string, storePathHash: string): Promise<Response> {
+// Predictive reference prefetch: a narinfo served here missed the edge cache,
+// and Nix's closure walk (`nix copy`, substitution) will ask for the direct
+// references next — warm them through the CachedStore loopback so the client
+// only ever pays a cold miss every PREFETCH_DEPTH+1 levels of the walk. The
+// depth header bounds recursion; each prefetched URL is one loopback fetch in
+// THIS invocation, while deeper levels spend their own invocation's budget.
+// Already-warm entries are served by the edge without running this code, so
+// repeat prefetches of a warmed path cost nothing downstream.
+// Internal-only: the gateway strips this header from client requests, so a
+// caller can't start the recursion at an inflated depth.
+export const PREFETCH_DEPTH_HEADER = 'X-Nimbus-Prefetch-Depth';
+const PREFETCH_DEPTH = 2;
+const PREFETCH_MAX_REFS = 64;
+
+function prefetchReferences(
+	ctx: ExecutionContext | undefined,
+	request: Request,
+	cacheName: string,
+	servedHash: string,
+	refsJson: string
+): void {
+	const store = ctx?.exports?.CachedStore;
+	if (!store || !ctx?.waitUntil) return;
+	const raw = request.headers.get(PREFETCH_DEPTH_HEADER);
+	const depth = raw == null ? PREFETCH_DEPTH : Number(raw);
+	if (!Number.isInteger(depth) || depth <= 0) return;
+
+	let refs: unknown;
+	try {
+		refs = JSON.parse(refsJson);
+	} catch {
+		return;
+	}
+	if (!Array.isArray(refs)) return;
+	const hashes = [
+		...new Set(
+			refs
+				.filter((r): r is string => typeof r === 'string' && r.length >= 32)
+				.map((r) => r.slice(0, 32))
+		)
+	]
+		.filter((h) => h !== servedHash)
+		.slice(0, PREFETCH_MAX_REFS);
+	if (hashes.length === 0) return;
+
+	// Reuse the request URL as the base so the gateway's ?pk= cache keying is
+	// preserved — the warmed entries must land under the keys clients hit.
+	const base = new URL(request.url);
+	ctx.waitUntil(
+		Promise.all(
+			hashes.map(async (hash) => {
+				const url = new URL(base);
+				url.pathname = `/${cacheName}/${hash}.narinfo`;
+				try {
+					const res = await store.fetch(
+						new Request(url, { headers: { [PREFETCH_DEPTH_HEADER]: String(depth - 1) } })
+					);
+					// narinfo bodies are tiny; consume so the cache write completes.
+					await res.arrayBuffer();
+				} catch {
+					// best-effort
+				}
+			})
+		)
+	);
+}
+
+async function serveNarInfo(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	cacheName: string,
+	storePathHash: string
+): Promise<Response> {
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
 	const [cache, found] = await Promise.all([
 		db.findCache(env.ATTIC_DB, cacheName),
-		db.findObject(env.ATTIC_DB, cacheName, storePathHash)
+		db.findObjectWithChunks(env.ATTIC_DB, cacheName, storePathHash)
 	]);
 	if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
 	const isPublic = cache.is_public === 1;
@@ -99,8 +172,8 @@ async function serveNarInfo(env: Env, cacheName: string, storePathHash: string):
 		return errorResponse(404, 'Not found', 'NoSuchObject');
 	}
 
-	const chunks = await db.findChunksForNar(env.ATTIC_DB, found.nar.id);
-	const narinfo = await buildNarInfo(found.object, found.nar, chunks, cache.keypair);
+	const narinfo = await buildNarInfo(found.object, found.nar, found.chunks, cache.keypair);
+	prefetchReferences(ctx, request, cacheName, storePathHash, found.object.refs);
 
 	return withVisibility(
 		new Response(narinfo, {
@@ -123,16 +196,14 @@ async function serveNar(
 	const narHashRaw = filename.split('.')[0];
 	if (!narHashRaw) return errorResponse(400, 'Invalid NAR path');
 
-	const nar =
-		(await db.findNarByHash(env.ATTIC_DB, `sha256:${narHashRaw}`)) ??
-		(await db.findNarByHash(env.ATTIC_DB, narHashRaw));
-	if (!nar) {
+	const found = await db.findNarWithChunks(env.ATTIC_DB, [`sha256:${narHashRaw}`, narHashRaw]);
+	if (!found) {
 		// The gateway turns this 404 into an upstream redirect when the cache
 		// has upstreams (passthrough narinfo NAR URLs resolve that way).
 		return errorResponse(404, 'Not found', 'NoSuchObject');
 	}
 
-	const chunks = await db.findChunksForNar(env.ATTIC_DB, nar.id);
+	const { nar, chunks } = found;
 	if (chunks.length === 0) return errorResponse(500, 'NAR has no chunks');
 	if (chunks.length < nar.num_chunks) {
 		return errorResponse(503, 'Some chunks of this NAR are missing', 'IncompleteNar');

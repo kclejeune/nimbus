@@ -189,17 +189,34 @@ export async function fetchUpstreamNarInfo(
 	return null;
 }
 
-/** URL of an upstream copy of a NAR file (e.g. "nar/<filehash>.nar.xz"). */
+/**
+ * URL of an upstream copy of a NAR file (e.g. "nar/<filehash>.nar.xz").
+ * Verdicts ride the upstream_check table under a `nar:` pseudo-hash so hot
+ * misses don't HEAD the upstream on every download; like the narinfo
+ * verdicts, "present" is trusted until the table prune (an upstream GC'ing a
+ * NAR inside that window would leave a stale redirect).
+ */
 export async function findUpstreamNar(
+	db: D1,
 	upstreams: string[],
 	narPath: string
 ): Promise<string | null> {
+	const key = `nar:${narPath}`;
 	for (const rawUpstream of upstreams) {
 		const upstream = rawUpstream.replace(/\/+$/, '');
 		const url = `${upstream}/${narPath}`;
+		const verdict = (await cachedVerdicts(db, upstream, [key])).get(key);
+		if (verdict === false) continue;
+		if (verdict === true) return url;
 		try {
 			const res = await fetch(url, { method: 'HEAD' });
-			if (res.status === 200) return url;
+			if (res.status === 200) {
+				await recordVerdicts(db, upstream, [{ hash: key, present: true }]).catch(() => {});
+				return url;
+			}
+			if (res.status === 404) {
+				await recordVerdicts(db, upstream, [{ hash: key, present: false }]).catch(() => {});
+			}
 		} catch {
 			// try the next upstream
 		}

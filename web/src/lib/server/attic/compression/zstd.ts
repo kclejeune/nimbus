@@ -19,10 +19,12 @@ export function initZstd(): Promise<void> {
 	return initialized;
 }
 
-// Level 12 measured ~13% smaller than 3 on real NARs at ~1s/50MB native
-// (wasm ~3-5x slower) — comfortably inside the request CPU budget for
-// ≤16 MiB inputs. 19 would save another ~10% but risks the CPU ceiling.
-export const ZSTD_LEVEL = 12;
+// Level 9 keeps most of level 12's ratio (12 measured ~13% smaller than 3 on
+// real NARs; 9 gives up ~1-2% of that) at roughly half the CPU. That matters
+// here because WASM runs ~3-5x slower than native and a streaming 100 MB
+// upload compresses ~12 chunks in one invocation: level 12's ~1-1.6s per
+// 16 MiB chunk stacked up to 12-20s of CPU per push.
+export const ZSTD_LEVEL = 9;
 
 /** Compress bytes as a single zstd frame. Call initZstd() first. */
 export function zstdCompress(data: Uint8Array, level = ZSTD_LEVEL): Uint8Array {

@@ -15,6 +15,7 @@
 // lacks (pre-compressed, stored verbatim), and a stateless complete call
 // assembles the NAR from chunk references.
 
+import type { D1PreparedStatement } from '@cloudflare/workers-types';
 import { FastCdcChunker, NAR_CHUNK_THRESHOLD, chunkBuffer } from './chunking';
 import {
 	compressBuffer,
@@ -33,6 +34,19 @@ const MAX_BUFFERED_SIZE = 15 * 1024 * 1024;
 const MAX_PREAMBLE_SIZE = 1024 * 1024;
 /** Upper bound on a single CDC chunk — matches the chunker's MAX_CHUNK. */
 const CDC_MAX_CHUNK = 16 * 1024 * 1024;
+/**
+ * Serving a NAR costs one R2 subrequest per chunk against the invocation's
+ * ~1000-subrequest budget; manifests that could never be served are rejected
+ * at upload time instead.
+ */
+const MAX_NAR_CHUNKS = 800;
+/**
+ * In-flight processNarChunk tasks per streaming upload. Bounds peak memory:
+ * each task can hold a raw chunk (≤16 MiB) plus its compressed output while
+ * dedup/PUT round-trips overlap. zstd itself is synchronous and single-
+ * threaded, so compression never interleaves.
+ */
+const STREAM_CONCURRENT_CHUNKS = 3;
 
 const NAR_INFO_HEADER = 'X-Attic-Nar-Info';
 const NAR_INFO_PREAMBLE_HEADER = 'X-Attic-Nar-Info-Preamble-Size';
@@ -50,9 +64,11 @@ export interface UploadNarInfo {
 }
 
 function uploadedResult(fileSize: number | null, fracDeduplicated: number): Response {
+	// file_size is omitted (not null) when unknown, like the reference's
+	// skip_serializing_if.
 	return json({
 		kind: fracDeduplicated === 1 ? 'deduplicated' : 'uploaded',
-		file_size: fileSize,
+		...(fileSize != null ? { file_size: fileSize } : {}),
 		frac_deduplicated: fracDeduplicated
 	});
 }
@@ -191,7 +207,15 @@ async function processNarChunk(
 	};
 }
 
-/** nar + chunk + chunkref + object rows for a CDC-chunked NAR. */
+/**
+ * nar + chunk + chunkref + object rows for a CDC-chunked NAR, in batched
+ * statements instead of per-row round-trips. Chunk inserts converge on the
+ * winner under the (chunk_hash, compression) unique index, and each chunkref
+ * links by hash, so a concurrent upload of the same chunk is adopted without
+ * a race window: adopted rows are held (the reaper skips them) and fresh rows
+ * are created in the same or an earlier batch than the chunkref that
+ * references them.
+ */
 async function linkChunkedNar(
 	env: Env,
 	info: UploadNarInfo,
@@ -209,11 +233,11 @@ async function linkChunkedNar(
 		num_chunks: records.length
 	});
 	try {
-		for (const [seq, record] of records.entries()) {
-			let chunkId = record.chunkId;
-			if (chunkId === undefined) {
-				try {
-					chunkId = await db.createChunk(d1, {
+		const stmts: D1PreparedStatement[] = [];
+		for (const record of records) {
+			if (record.chunkId === undefined) {
+				stmts.push(
+					db.insertChunkStmt(d1, {
 						state: 'V',
 						chunk_hash: `sha256:${record.hash}`,
 						chunk_size: record.size,
@@ -222,34 +246,34 @@ async function linkChunkedNar(
 						compression: kind,
 						remote_file: remoteFileJson(record.key!),
 						remote_file_id: record.key!
-					});
-				} catch (e) {
-					// Unique-constraint race: a concurrent upload created the same
-					// chunk row between our dedup check and now. Adopt theirs.
-					const raced = await db.tryLockChunk(d1, `sha256:${record.hash}`, kind);
-					if (!raced) throw e;
-					chunkId = raced.id;
-					record.locked = true;
-				}
-				record.chunkId = chunkId;
+					})
+				);
 			}
-			await db.createChunkRef(d1, narId, seq, chunkId, `sha256:${record.hash}`, kind);
 		}
-		await db.updateNarState(d1, narId, 'V');
-		await db.createObject(d1, {
-			cache_id: cacheId,
-			nar_id: narId,
-			store_path_hash: info.store_path_hash,
-			store_path: info.store_path,
-			references: info.references,
-			system: info.system,
-			deriver: info.deriver,
-			sigs: info.sigs,
-			ca: info.ca
-		});
+		for (const [seq, record] of records.entries()) {
+			stmts.push(
+				db.insertChunkRefStmt(d1, narId, seq, record.chunkId ?? null, `sha256:${record.hash}`, kind)
+			);
+		}
+		stmts.push(db.updateNarStateStmt(d1, narId, 'V'));
+		stmts.push(
+			db.insertObjectStmt(d1, {
+				cache_id: cacheId,
+				nar_id: narId,
+				store_path_hash: info.store_path_hash,
+				store_path: info.store_path,
+				references: info.references,
+				system: info.system,
+				deriver: info.deriver,
+				sigs: info.sigs,
+				ca: info.ca
+			})
+		);
+		await db.runBatched(d1, stmts);
 	} catch (e) {
 		// Freshly stored R2 objects are content-addressed and adopted by any
-		// retry, so only the DB rows are rolled back here.
+		// retry, so only the DB rows are rolled back here (the orphan reaper
+		// clears whatever landed before the failure).
 		await db.updateNarState(d1, narId, 'D').catch(() => {});
 		throw e;
 	} finally {
@@ -274,11 +298,10 @@ async function finalizeChunkedNar(
 }
 
 async function releaseChunkLocks(env: Env, records: NarChunkRecord[]): Promise<void> {
-	for (const record of records) {
-		if (record.locked && record.chunkId !== undefined) {
-			await db.releaseChunkLock(env.ATTIC_DB, record.chunkId).catch(() => {});
-		}
-	}
+	const ids = records
+		.filter((r) => r.locked && r.chunkId !== undefined)
+		.map((r) => r.chunkId as number);
+	await db.releaseChunkLocksById(env.ATTIC_DB, ids).catch(() => {});
 }
 
 /** nar + chunk + chunkref + object rows for a freshly stored single-chunk NAR. */
@@ -303,35 +326,107 @@ async function createUploadRows(
 		num_chunks: 1
 	});
 	try {
-		const chunkId = await db.createChunk(d1, {
-			state: 'V',
-			chunk_hash: info.nar_hash,
-			chunk_size: opts.narSize,
-			file_hash: opts.fileHash,
-			file_size: opts.fileSize,
-			compression: opts.compression,
-			remote_file: remoteFileJson(opts.storageKey),
-			remote_file_id: opts.storageKey
-		});
-		await db.createChunkRef(d1, narId, 0, chunkId, info.nar_hash, opts.compression);
-		await db.updateNarState(d1, narId, 'V');
-		await db.createObject(d1, {
-			cache_id: cacheId,
-			nar_id: narId,
-			store_path_hash: info.store_path_hash,
-			store_path: info.store_path,
-			references: info.references,
-			system: info.system,
-			deriver: info.deriver,
-			sigs: info.sigs,
-			ca: info.ca
-		});
+		await d1.batch([
+			db.insertChunkStmt(d1, {
+				state: 'V',
+				chunk_hash: info.nar_hash,
+				chunk_size: opts.narSize,
+				file_hash: opts.fileHash,
+				file_size: opts.fileSize,
+				compression: opts.compression,
+				remote_file: remoteFileJson(opts.storageKey),
+				remote_file_id: opts.storageKey
+			}),
+			db.insertChunkRefStmt(d1, narId, 0, null, info.nar_hash, opts.compression),
+			db.updateNarStateStmt(d1, narId, 'V'),
+			db.insertObjectStmt(d1, {
+				cache_id: cacheId,
+				nar_id: narId,
+				store_path_hash: info.store_path_hash,
+				store_path: info.store_path,
+				references: info.references,
+				system: info.system,
+				deriver: info.deriver,
+				sigs: info.sigs,
+				ca: info.ca
+			})
+		]);
 	} catch (e) {
-		await env.CACHE_BUCKET.delete(opts.storageKey).catch(() => {});
 		await db.updateNarState(d1, narId, 'D').catch(() => {});
+		// The stored object is content-addressed: a racing identical upload may
+		// have adopted the key, so only delete it when no chunk row claims it.
+		if (!(await db.findChunk(d1, info.nar_hash, opts.compression).catch(() => null))) {
+			await env.CACHE_BUCKET.delete(opts.storageKey).catch(() => {});
+		}
 		throw e;
 	}
 	return uploadedResult(opts.fileSize, 0);
+}
+
+/**
+ * Split the leading `size` bytes off a stream without buffering the rest:
+ * returns the head plus a stream of everything after it, or null when the
+ * body ends early.
+ */
+async function splitStream(
+	body: ReadableStream<Uint8Array>,
+	size: number
+): Promise<{ head: Uint8Array; rest: ReadableStream<Uint8Array> } | null> {
+	const reader = body.getReader();
+	const head = new Uint8Array(size);
+	let got = 0;
+	let leftover: Uint8Array | null = null;
+	while (got < size) {
+		const { done, value } = await reader.read();
+		if (done) return null;
+		if (!value || value.length === 0) continue;
+		const take = Math.min(size - got, value.length);
+		head.set(value.subarray(0, take), got);
+		got += take;
+		if (take < value.length) leftover = value.subarray(take);
+	}
+	const rest = new ReadableStream<Uint8Array>({
+		start(controller) {
+			if (leftover) controller.enqueue(leftover);
+		},
+		async pull(controller) {
+			const { done, value } = await reader.read();
+			if (done) controller.close();
+			else controller.enqueue(value);
+		},
+		cancel(reason) {
+			return reader.cancel(reason);
+		}
+	});
+	return { head, rest };
+}
+
+/** Collect a stream whose declared length fits in memory. */
+async function readAll(
+	body: ReadableStream<Uint8Array>,
+	limit: number
+): Promise<Uint8Array | null> {
+	const parts: Uint8Array[] = [];
+	let total = 0;
+	const reader = body.getReader();
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		if (!value || value.length === 0) continue;
+		total += value.length;
+		if (total > limit) {
+			await reader.cancel().catch(() => {});
+			return null;
+		}
+		parts.push(value);
+	}
+	const out = new Uint8Array(total);
+	let offset = 0;
+	for (const part of parts) {
+		out.set(part, offset);
+		offset += part.length;
+	}
+	return out;
 }
 
 /** PUT /_api/v1/upload-path */
@@ -341,8 +436,17 @@ export async function handleUploadPath(
 	canPush: (cacheName: string) => boolean
 ): Promise<Response> {
 	// NAR info comes from a header, or as a JSON preamble before the NAR bytes.
+	// Either way the NAR itself stays a stream; nothing is buffered until the
+	// size-based branch below decides to.
 	let info: UploadNarInfo | null = null;
-	let preambleBody: Uint8Array | null = null;
+	let narBody: ReadableStream<Uint8Array> | null = request.body;
+	// Bytes of NAR expected, when the client declared a length; null means
+	// unknown (chunked transfer encoding) and forces the streaming path.
+	let narLength: number | null = null;
+	const contentLengthRaw = request.headers.get('content-length');
+	if (contentLengthRaw != null && /^\d+$/.test(contentLengthRaw)) {
+		narLength = Number(contentLengthRaw);
+	}
 
 	const headerRaw = request.headers.get(NAR_INFO_HEADER);
 	if (headerRaw) {
@@ -358,14 +462,16 @@ export async function handleUploadPath(
 		if (!Number.isInteger(preambleSize) || preambleSize <= 0 || preambleSize > MAX_PREAMBLE_SIZE) {
 			return errorResponse(400, 'Invalid preamble size');
 		}
-		const body = new Uint8Array(await request.arrayBuffer());
-		if (body.length < preambleSize) return errorResponse(400, 'Body shorter than preamble');
+		if (!request.body) return errorResponse(400, 'Missing request body');
+		const split = await splitStream(request.body, preambleSize);
+		if (!split) return errorResponse(400, 'Body shorter than preamble');
 		try {
-			info = JSON.parse(new TextDecoder().decode(body.subarray(0, preambleSize)));
+			info = JSON.parse(new TextDecoder().decode(split.head));
 		} catch (e) {
 			return errorResponse(400, `Invalid NAR info preamble: ${e}`);
 		}
-		preambleBody = body.subarray(preambleSize);
+		narBody = split.rest;
+		if (narLength != null) narLength = Math.max(0, narLength - preambleSize);
 	}
 	if (!info) return errorResponse(400, 'Missing NAR info');
 	if (!canPush(info.cache)) return errorResponse(403, 'Permission denied: push');
@@ -377,7 +483,7 @@ export async function handleUploadPath(
 	// after the client proves possession by streaming the claimed bytes.
 	const existing = await db.tryLockNar(env.ATTIC_DB, info.nar_hash);
 	if (existing) {
-		const denied = await verifyPossession(preambleBody ?? request.body, info.nar_hash);
+		const denied = await verifyPossession(narBody, info.nar_hash);
 		if (denied) {
 			await db.releaseNarLock(env.ATTIC_DB, existing.id).catch(() => {});
 			return denied;
@@ -386,20 +492,14 @@ export async function handleUploadPath(
 	}
 
 	const kind = uploadCompressionFor(cache.compression);
+	if (!narBody) return errorResponse(400, 'Missing request body');
 
-	if (preambleBody) return handleBufferedUpload(env, info, cache.id, kind, preambleBody);
-
-	const contentLength = Number(request.headers.get('content-length') ?? 0);
-	if (contentLength > MAX_BUFFERED_SIZE) {
-		return handleStreamingUpload(env, request, info, cache.id, kind);
+	if (narLength != null && narLength <= MAX_BUFFERED_SIZE) {
+		const body = await readAll(narBody, MAX_BUFFERED_SIZE);
+		if (!body) return errorResponse(400, 'Body exceeds declared Content-Length');
+		return handleBufferedUpload(env, info, cache.id, kind, body);
 	}
-	return handleBufferedUpload(
-		env,
-		info,
-		cache.id,
-		kind,
-		new Uint8Array(await request.arrayBuffer())
-	);
+	return handleStreamingUpload(env, narBody, info, cache.id, kind);
 }
 
 async function handleBufferedUpload(
@@ -417,14 +517,19 @@ async function handleBufferedUpload(
 				`NAR hash mismatch: expected ${stripSha256(info.nar_hash)}, got ${narHash}`
 			);
 		}
-		const records: NarChunkRecord[] = [];
-		try {
-			for (const raw of chunkBuffer(body)) {
-				records.push(await processNarChunk(env, kind, raw));
-			}
-		} catch (e) {
+		// Buffered bodies are ≤15 MB (at most a handful of chunks), so all of
+		// them process concurrently: dedup checks and R2 puts overlap while the
+		// synchronous zstd calls serialize themselves on the single thread.
+		const settled = await Promise.allSettled(
+			chunkBuffer(body).map((raw) => processNarChunk(env, kind, raw))
+		);
+		const records = settled
+			.filter((s): s is PromiseFulfilledResult<NarChunkRecord> => s.status === 'fulfilled')
+			.map((s) => s.value);
+		const failed = settled.find((s) => s.status === 'rejected');
+		if (failed) {
 			await releaseChunkLocks(env, records);
-			throw e;
+			throw failed.reason;
 		}
 		return finalizeChunkedNar(env, info, cacheId, kind, records, body.length);
 	}
@@ -459,21 +564,54 @@ async function handleBufferedUpload(
  */
 async function handleStreamingUpload(
 	env: Env,
-	request: Request,
+	body: ReadableStream<Uint8Array>,
 	info: UploadNarInfo,
 	cacheId: number,
 	kind: CompressionKind
 ): Promise<Response> {
-	if (!request.body) return errorResponse(400, 'No request body');
-
 	const narHasher = newDigestStream();
 	const narWriter = narHasher.getWriter();
 	const chunker = new FastCdcChunker();
-	const records: NarChunkRecord[] = [];
+	// Chunks process concurrently with reading the body, bounded so at most
+	// STREAM_CONCURRENT_CHUNKS raw chunks (≤16 MiB each) plus their compressed
+	// outputs are held at once. Admission awaits the oldest pending chunk
+	// FIFO-style; rejections are surfaced by the allSettled collection below
+	// (the extra catch just marks them handled in the meantime).
+	const pending: Promise<NarChunkRecord>[] = [];
+	let admitted = 0;
+	const admit = async (raw: Uint8Array) => {
+		if (pending.length - admitted >= STREAM_CONCURRENT_CHUNKS) {
+			await pending[admitted++].catch(() => {});
+		}
+		const task = processNarChunk(env, kind, raw);
+		task.catch(() => {});
+		pending.push(task);
+	};
 	let narSize = 0;
 
+	// Settled promises re-await instantly, so collecting twice is harmless;
+	// the flag ensures holds are only released once.
+	const collectRecords = async (): Promise<{
+		records: NarChunkRecord[];
+		failure: unknown | null;
+	}> => {
+		const settled = await Promise.allSettled(pending);
+		return {
+			records: settled
+				.filter((s): s is PromiseFulfilledResult<NarChunkRecord> => s.status === 'fulfilled')
+				.map((s) => s.value),
+			failure: settled.find((s) => s.status === 'rejected')?.reason ?? null
+		};
+	};
+	let released = false;
+	const releaseAll = async () => {
+		if (released) return;
+		released = true;
+		await releaseChunkLocks(env, (await collectRecords()).records);
+	};
+
 	try {
-		const reader = request.body.getReader();
+		const reader = body.getReader();
 		for (;;) {
 			const { done, value } = await reader.read();
 			if (done) break;
@@ -481,17 +619,20 @@ async function handleStreamingUpload(
 			narSize += value.length;
 			await narWriter.write(value as unknown as BufferSource);
 			for (const raw of chunker.push(value)) {
-				records.push(await processNarChunk(env, kind, raw));
+				await admit(raw);
 			}
 		}
 		const rest = chunker.finish();
-		if (rest) records.push(await processNarChunk(env, kind, rest));
+		if (rest) await admit(rest);
 
 		await narWriter.close();
 		const narHash = toHex(await narHasher.digest);
 
+		const { records, failure } = await collectRecords();
+		if (failure) throw failure;
+
 		if (narHash !== stripSha256(info.nar_hash)) {
-			await releaseChunkLocks(env, records);
+			await releaseAll();
 			return errorResponse(
 				400,
 				`NAR hash mismatch: expected ${stripSha256(info.nar_hash)}, got ${narHash}`
@@ -500,12 +641,13 @@ async function handleStreamingUpload(
 		if (records.length === 0) {
 			return errorResponse(400, 'Empty NAR');
 		}
+		// From here linkChunkedNar owns the holds (its finally releases them).
+		released = true;
+		return finalizeChunkedNar(env, info, cacheId, kind, records, narSize);
 	} catch (e) {
-		await releaseChunkLocks(env, records);
+		await releaseAll();
 		throw e;
 	}
-
-	return finalizeChunkedNar(env, info, cacheId, kind, records, narSize);
 }
 
 // --- Client-side CDC protocol (>100MB NARs) ---
@@ -523,6 +665,12 @@ const HEX64 = /^[0-9a-f]{64}$/;
 function validateManifest(body: CdcManifest): Response | null {
 	if (!Array.isArray(body.chunks) || body.chunks.length === 0) {
 		return errorResponse(400, 'Manifest has no chunks');
+	}
+	if (body.chunks.length > MAX_NAR_CHUNKS) {
+		return errorResponse(
+			400,
+			`Manifest has ${body.chunks.length} chunks; NARs above ${MAX_NAR_CHUNKS} chunks cannot be served`
+		);
 	}
 	let total = 0;
 	for (const chunk of body.chunks) {
@@ -589,41 +737,27 @@ export async function handleCdcChunkPut(
 		return errorResponse(400, `Chunk hash mismatch: expected ${hash}, got ${actual}`);
 	}
 
-	if (await db.tryLockChunk(env.ATTIC_DB, `sha256:${hash}`, 'zstd').then(releaseIfLocked(env))) {
-		// Already stored (raced or the client re-sent); nothing to do.
+	if (await db.findChunk(env.ATTIC_DB, `sha256:${hash}`, 'zstd')) {
+		// Already stored (raced or the client re-sent); nothing to do. If GC
+		// reaps it before the complete call, the 409 retry re-uploads it.
 		return json({ ok: true, deduplicated: true });
 	}
 
 	const key = chunkStorageKey(hash, 'zstd');
 	await env.CACHE_BUCKET.put(key, compressed as unknown as ArrayBuffer);
-	try {
-		await db.createChunk(env.ATTIC_DB, {
-			state: 'V',
-			chunk_hash: `sha256:${hash}`,
-			chunk_size: raw.length,
-			file_hash: toHex(await crypto.subtle.digest('SHA-256', compressed as BufferSource)),
-			file_size: compressed.length,
-			compression: 'zstd',
-			remote_file: remoteFileJson(key),
-			remote_file_id: key
-		});
-	} catch (e) {
-		// Unique-constraint race: a concurrent upload of the same chunk won the
-		// row; theirs describes the bytes its own PUT stored. Adopt it.
-		const raced = await db.tryLockChunk(env.ATTIC_DB, `sha256:${hash}`, 'zstd');
-		if (!raced) throw e;
-		await db.releaseChunkLock(env.ATTIC_DB, raced.id).catch(() => {});
-	}
-	return json({ ok: true, deduplicated: false });
-}
-
-/** Curried helper: release a freshly acquired chunk lock, return whether it existed. */
-function releaseIfLocked(env: Env): (chunk: { id: number } | null) => Promise<boolean> {
-	return async (chunk) => {
-		if (!chunk) return false;
-		await db.releaseChunkLock(env.ATTIC_DB, chunk.id).catch(() => {});
-		return true;
-	};
+	// A concurrent PUT of the same chunk stored the same bytes; whichever row
+	// wins the unique index describes them.
+	const inserted = await db.insertChunk(env.ATTIC_DB, {
+		state: 'V',
+		chunk_hash: `sha256:${hash}`,
+		chunk_size: raw.length,
+		file_hash: toHex(await crypto.subtle.digest('SHA-256', compressed as BufferSource)),
+		file_size: compressed.length,
+		compression: 'zstd',
+		remote_file: remoteFileJson(key),
+		remote_file_id: key
+	});
+	return json({ ok: true, deduplicated: !inserted });
 }
 
 /**
@@ -643,14 +777,21 @@ export async function handleCdcComplete(env: Env, body: CdcManifest): Promise<Re
 	const existingNar = await db.tryLockNar(env.ATTIC_DB, info.nar_hash);
 	if (existingNar) return finishDeduplicated(env, info, cache.id, existingNar.id);
 
-	// Lock chunks (deduplicating repeats within the NAR: one lock per row).
+	// Lock chunks in one batch round-trip (deduplicating repeats within the
+	// NAR: one lock per unique row).
+	const uniqueHashes = [...new Set(body.chunks.map((c) => c.hash))];
+	const lockedRows = await db.tryLockChunks(
+		env.ATTIC_DB,
+		uniqueHashes.map((h) => `sha256:${h}`),
+		'zstd'
+	);
 	const lockedByHash = new Map<string, NarChunkRecord>();
 	const records: NarChunkRecord[] = [];
 	const missing: string[] = [];
 	for (const chunk of body.chunks) {
 		let record = lockedByHash.get(chunk.hash);
 		if (!record) {
-			const row = await db.tryLockChunk(env.ATTIC_DB, `sha256:${chunk.hash}`, 'zstd');
+			const row = lockedRows.get(`sha256:${chunk.hash}`);
 			if (!row) {
 				if (!missing.includes(chunk.hash)) missing.push(chunk.hash);
 				continue;
@@ -672,7 +813,14 @@ export async function handleCdcComplete(env: Env, body: CdcManifest): Promise<Re
 		return json({ missing_chunk_hashes: missing }, 409);
 	}
 
-	await linkChunkedNarDeduped(env, info, cache.id, records, [...lockedByHash.values()], body);
+	await linkChunkedNarDeduped(
+		env,
+		info,
+		cache.id,
+		records,
+		[...lockedByHash.values()],
+		body.nar_size
+	);
 	const fileSize = records.every((r) => r.fileSize != null)
 		? records.reduce((sum, r) => sum + (r.fileSize ?? 0), 0)
 		: null;
@@ -690,9 +838,9 @@ async function linkChunkedNarDeduped(
 	cacheId: number,
 	records: NarChunkRecord[],
 	uniqueLocked: NarChunkRecord[],
-	body: CdcManifest
+	narSize: number
 ): Promise<void> {
 	const releasable = new Set(uniqueLocked);
 	const perRef = records.map((r) => ({ ...r, locked: releasable.delete(r) }));
-	await linkChunkedNar(env, info, cacheId, 'zstd', perRef, body.nar_size);
+	await linkChunkedNar(env, info, cacheId, 'zstd', perRef, narSize);
 }

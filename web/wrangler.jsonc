@@ -23,6 +23,12 @@
 	},
 	"observability": { "enabled": true },
 
+	// Headroom over the 30s default: zstd-in-WASM on a near-100MB streaming
+	// upload costs seconds of CPU per chunk, and GC sweeps are CPU-bound on
+	// large stores. Billing is per CPU-ms actually used, so this costs nothing
+	// when idle.
+	"limits": { "cpu_ms": 300000 },
+
 	// Nightly garbage collection (closure-aware retention, orphan reaping).
 	"triggers": { "crons": ["0 3 * * *"] },
 
