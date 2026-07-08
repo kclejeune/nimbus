@@ -16,6 +16,21 @@ export async function runBatched(db: D1Database, stmts: D1PreparedStatement[]): 
 	}
 }
 
+/**
+ * Session routed to the nearest read replica (D1 Sessions API), isolating the
+ * read-heavy serving path from writer contention on the primary. Reads may
+ * lag the primary slightly, which callers tolerate — the edge cache already
+ * serves far staler data. Writes issued through a session are forwarded to
+ * the primary, so passing this anywhere is safe. Falls back to the base
+ * binding when sessions are unavailable (replication not enabled).
+ */
+export function readSession(db: D1Database): D1Database {
+	const session = (db as { withSession?: (constraint: string) => unknown }).withSession?.(
+		'first-unconstrained'
+	);
+	return (session ?? db) as D1Database;
+}
+
 export interface CacheRow {
 	id: number;
 	name: string;

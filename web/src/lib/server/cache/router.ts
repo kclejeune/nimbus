@@ -20,9 +20,8 @@ import {
 	findUpstreamNar,
 	parseUpstreams
 } from './missing-paths';
-import { extractPublicKey } from '../attic/signing';
 import { type ExecutionContext } from './platform';
-import { cacheTag, PREFETCH_DEPTH_HEADER, serveStore } from './store';
+import { cacheTag, keyedNarinfoUrl, PREFETCH_DEPTH_HEADER, serveStore } from './store';
 import {
 	NO_PERMISSION,
 	parseAuthToken,
@@ -98,7 +97,9 @@ async function authorizeCacheRead(
 	}
 	const hasDiscovery = Object.values(permission).some(Boolean);
 
-	const cache = await db.findCache(env.ATTIC_DB, cacheName);
+	// Replica read: a cache-config change (e.g. visibility flip) taking effect
+	// with sub-second replica lag is acceptable for read authorization.
+	const cache = await db.findCache(db.readSession(env.ATTIC_DB), cacheName);
 	if (!cache) {
 		if (hasDiscovery) {
 			return { response: errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache') };
@@ -176,17 +177,17 @@ async function handleNarInfo(
 	if ('response' in auth) return auth.response;
 
 	// The narinfo body embeds a signature from the cache keypair, so the edge
-	// cache key must include the signing identity: rotating the keypair makes
-	// every old entry unreachable immediately, instead of relying on the
-	// best-effort tag purge (which cross_version_cache would otherwise outlive
-	// across deploys). NARs are content-addressed and signature-free, so they
-	// stay keyed by URL alone.
-	const keyed = new URL(request.url);
-	try {
-		keyed.searchParams.set('pk', extractPublicKey(auth.cache.keypair));
-	} catch {
-		// no valid keypair: stored client sigs are served, nothing to vary on
-	}
+	// cache key must include the signing identity (keyedNarinfoUrl): rotating
+	// the keypair makes every old entry unreachable immediately, instead of
+	// relying on the best-effort tag purge (which cross_version_cache would
+	// otherwise outlive across deploys). NARs are content-addressed and
+	// signature-free, so they stay keyed by URL alone.
+	const keyed = keyedNarinfoUrl(
+		new URL(request.url).origin,
+		cacheName,
+		storePathHash,
+		auth.cache.keypair
+	);
 	const response = await forwardToStore(new Request(keyed, request), env, ctx);
 	return withCachePolicy(response, auth.cache.is_public === 1);
 }
@@ -274,13 +275,16 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	if (!cache) return errorResponse(404, `Cache not found: ${body.cache}`, 'NoSuchCache');
 
 	const hashes = body.store_path_hashes.filter((h) => typeof h === 'string' && h.length === 32);
-	const existing = await findExistingPaths(env.ATTIC_DB, body.cache, hashes);
+	// Replica reads: staleness at worst re-reports a just-pushed path as
+	// missing, and the upload path dedups the re-push.
+	const session = db.readSession(env.ATTIC_DB);
+	const existing = await findExistingPaths(session, body.cache, hashes);
 	const missing = hashes.filter((h) => !existing.has(h));
 
 	const upstreams = body.ignore_upstream_cache_filter ? [] : parseUpstreams(cache.upstream_caches);
 	const missingPaths =
 		upstreams.length > 0 && missing.length > 0
-			? await filterUpstreamPaths(env.ATTIC_DB, upstreams, missing)
+			? await filterUpstreamPaths(session, upstreams, missing)
 			: missing;
 
 	return new Response(JSON.stringify({ missing_paths: missingPaths }), {
@@ -423,11 +427,11 @@ async function handleV1(
 
 		let response: Response;
 		if (method === 'PUT' && segments.length === 3) {
-			response = await handleUploadPath(request, env, canPush);
+			response = await handleUploadPath(request, env, ctx, canPush);
 		} else if (method === 'POST' && segments[3] === 'chunks' && segments.length === 4) {
 			const manifest = await parseManifest();
 			if (manifest instanceof Response) return manifest;
-			response = await handleCdcQuery(env, manifest);
+			response = await handleCdcQuery(env, ctx, url.origin, manifest);
 		} else if (method === 'PUT' && segments[3] === 'chunks' && segments.length === 5) {
 			const cacheName = url.searchParams.get('cache');
 			if (!cacheName) return errorResponse(400, 'Missing cache parameter');
@@ -441,7 +445,7 @@ async function handleV1(
 		) {
 			const manifest = await parseManifest();
 			if (manifest instanceof Response) return manifest;
-			response = await handleCdcComplete(env, manifest);
+			response = await handleCdcComplete(env, ctx, url.origin, manifest);
 		} else {
 			return errorResponse(404, 'Not found');
 		}

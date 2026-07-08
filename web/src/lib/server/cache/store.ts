@@ -10,6 +10,7 @@
 
 import { errorResponse, withVisibility } from '../attic/http';
 import { buildNarInfo } from '../attic/narinfo';
+import { extractPublicKey } from '../attic/signing';
 import * as db from './db';
 import { fetchUpstreamNarInfo, parseUpstreams } from './missing-paths';
 import type { ExecutionContext } from './platform';
@@ -24,6 +25,13 @@ const NAR_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 // when a purge is missed (e.g. rate-limited). stale-while-revalidate refreshes
 // expiring entries in the background instead of on the critical path.
 const NARINFO_CACHE_CONTROL = 'public, max-age=2592000, stale-while-revalidate=86400';
+// Negative caching: absent paths (mostly upstream-filtered references) are
+// re-queried by every closure walk, so an uncacheable 404 sends each walk to
+// D1 for the whole set. The 404 carries the same narinfo tag a real entry
+// would, and uploads purge it (warmNarinfoAfterUpload), so a landed path
+// becomes visible immediately; max-age only bounds staleness when that purge
+// is missed (e.g. rate-limited on a mass push).
+const NARINFO_404_CACHE_CONTROL = 'public, max-age=600';
 
 /** Cache-Tag attached to narinfo responses; GC purges it on object deletion. */
 export function narinfoTag(cacheName: string, storePathHash: string): string {
@@ -39,6 +47,58 @@ export function cacheTag(cacheName: string): string {
 
 function narinfoTags(cacheName: string, storePathHash: string): string {
 	return `${narinfoTag(cacheName, storePathHash)},${cacheTag(cacheName)}`;
+}
+
+/**
+ * narinfo URL as the gateway keys it for the edge cache: the pk param ties
+ * cached entries to the signing identity, so keypair rotation invalidates
+ * them instantly (see handleNarInfo in router.ts).
+ */
+export function keyedNarinfoUrl(
+	origin: string,
+	cacheName: string,
+	storePathHash: string,
+	keypair: string | null
+): URL {
+	const url = new URL(`${origin}/${cacheName}/${storePathHash}.narinfo`);
+	if (keypair) {
+		try {
+			url.searchParams.set('pk', extractPublicKey(keypair));
+		} catch {
+			// no valid keypair: stored client sigs are served, nothing to vary on
+		}
+	}
+	return url;
+}
+
+/**
+ * After an upload lands an object, purge its narinfo tag (covering both a
+ * negatively-cached 404 and a stale narinfo from re-pushing an existing
+ * path), then re-fetch through the loopback so the edge holds the fresh
+ * entry before the next closure walk asks. O(1) per upload, best-effort:
+ * on failure the entry corrects itself when the 404 TTL or purge lands.
+ */
+export async function warmNarinfoAfterUpload(
+	ctx: ExecutionContext | undefined,
+	origin: string,
+	cache: { name: string; keypair: string | null },
+	storePathHash: string
+): Promise<void> {
+	const store = ctx?.exports?.CachedStore;
+	if (!store) return;
+	try {
+		await store.purgeTags([narinfoTag(cache.name, storePathHash)]);
+	} catch {
+		// stale entry expires via its max-age
+	}
+	try {
+		const res = await store.fetch(
+			new Request(keyedNarinfoUrl(origin, cache.name, storePathHash, cache.keypair))
+		);
+		await res.arrayBuffer();
+	} catch {
+		// best-effort: the next client miss populates the entry instead
+	}
 }
 
 export async function serveStore(
@@ -142,9 +202,10 @@ async function serveNarInfo(
 ): Promise<Response> {
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
+	const session = db.readSession(env.ATTIC_DB);
 	const [cache, found] = await Promise.all([
-		db.findCache(env.ATTIC_DB, cacheName),
-		db.findObjectWithChunks(env.ATTIC_DB, cacheName, storePathHash)
+		db.findCache(session, cacheName),
+		db.findObjectWithChunks(session, cacheName, storePathHash)
 	]);
 	if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
 	const isPublic = cache.is_public === 1;
@@ -152,7 +213,7 @@ async function serveNarInfo(
 		// Paths available upstream are filtered out of pushes, so a complete
 		// closure needs the upstream's narinfo served through this cache.
 		const upstream = await fetchUpstreamNarInfo(
-			env.ATTIC_DB,
+			session,
 			parseUpstreams(cache.upstream_caches),
 			storePathHash
 		);
@@ -161,7 +222,10 @@ async function serveNarInfo(
 			upstream.headers.set('Cache-Tag', narinfoTags(cacheName, storePathHash));
 			return withVisibility(upstream, isPublic);
 		}
-		return errorResponse(404, 'Not found', 'NoSuchObject');
+		const absent = errorResponse(404, 'Not found', 'NoSuchObject');
+		absent.headers.set('Cache-Control', NARINFO_404_CACHE_CONTROL);
+		absent.headers.set('Cache-Tag', narinfoTags(cacheName, storePathHash));
+		return withVisibility(absent, isPublic);
 	}
 
 	const narinfo = await buildNarInfo(found.object, found.nar, found.chunks, cache.keypair);
@@ -188,7 +252,10 @@ async function serveNar(
 	const narHashRaw = filename.split('.')[0];
 	if (!narHashRaw) return errorResponse(400, 'Invalid NAR path');
 
-	const found = await db.findNarWithChunks(env.ATTIC_DB, [`sha256:${narHashRaw}`, narHashRaw]);
+	const found = await db.findNarWithChunks(db.readSession(env.ATTIC_DB), [
+		`sha256:${narHashRaw}`,
+		narHashRaw
+	]);
 	if (!found) {
 		// The gateway turns this 404 into an upstream redirect when the cache
 		// has upstreams (passthrough narinfo NAR URLs resolve that way).

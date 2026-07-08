@@ -27,7 +27,8 @@ import {
 	type CompressionKind
 } from './compression';
 import * as db from './db';
-import { newDigestStream } from './platform';
+import { newDigestStream, type ExecutionContext } from './platform';
+import { warmNarinfoAfterUpload } from './store';
 
 type Env = App.Platform['env'];
 
@@ -422,6 +423,7 @@ async function readAll(
 export async function handleUploadPath(
 	request: Request,
 	env: Env,
+	ctx: ExecutionContext | undefined,
 	canPush: (cacheName: string) => boolean
 ): Promise<Response> {
 	// NAR info comes from a header, or as a JSON preamble before the NAR bytes.
@@ -468,6 +470,7 @@ export async function handleUploadPath(
 	const cache = await db.findCache(env.ATTIC_DB, info.cache);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
 
+	let response: Response;
 	// Dedup: an existing valid NAR with this hash just gains another object —
 	// after the client proves possession by streaming the claimed bytes.
 	const existing = await db.tryLockNar(env.ATTIC_DB, info.nar_hash);
@@ -477,18 +480,25 @@ export async function handleUploadPath(
 			await db.releaseNarLock(env.ATTIC_DB, existing.id).catch(() => {});
 			return denied;
 		}
-		return finishDeduplicated(env, info, cache.id, existing.id);
-	}
+		response = await finishDeduplicated(env, info, cache.id, existing.id);
+	} else {
+		const kind = uploadCompressionFor(cache.compression);
+		if (!narBody) return errorResponse(400, 'Missing request body');
 
-	const kind = uploadCompressionFor(cache.compression);
-	if (!narBody) return errorResponse(400, 'Missing request body');
-
-	if (narLength != null && narLength <= MAX_BUFFERED_SIZE) {
-		const body = await readAll(narBody, MAX_BUFFERED_SIZE);
-		if (!body) return errorResponse(400, 'Body exceeds declared Content-Length');
-		return handleBufferedUpload(env, info, cache.id, kind, body);
+		if (narLength != null && narLength <= MAX_BUFFERED_SIZE) {
+			const body = await readAll(narBody, MAX_BUFFERED_SIZE);
+			if (!body) return errorResponse(400, 'Body exceeds declared Content-Length');
+			response = await handleBufferedUpload(env, info, cache.id, kind, body);
+		} else {
+			response = await handleStreamingUpload(env, narBody, info, cache.id, kind);
+		}
 	}
-	return handleStreamingUpload(env, narBody, info, cache.id, kind);
+	if (response.ok) {
+		ctx?.waitUntil(
+			warmNarinfoAfterUpload(ctx, new URL(request.url).origin, cache, info.store_path_hash)
+		);
+	}
+	return response;
 }
 
 async function handleBufferedUpload(
@@ -680,7 +690,12 @@ function validateManifest(body: CdcManifest): Response | null {
  * lacks. Whole-NAR dedup first (no proof of possession possible — no bytes
  * yet); otherwise existence is checked against (chunk_hash, zstd).
  */
-export async function handleCdcQuery(env: Env, body: CdcManifest): Promise<Response> {
+export async function handleCdcQuery(
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	origin: string,
+	body: CdcManifest
+): Promise<Response> {
 	const denied = validateManifest(body);
 	if (denied) return denied;
 	const info = body.nar_info;
@@ -688,7 +703,11 @@ export async function handleCdcQuery(env: Env, body: CdcManifest): Promise<Respo
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
 
 	const existing = await db.tryLockNar(env.ATTIC_DB, info.nar_hash);
-	if (existing) return finishDeduplicated(env, info, cache.id, existing.id);
+	if (existing) {
+		const response = await finishDeduplicated(env, info, cache.id, existing.id);
+		ctx?.waitUntil(warmNarinfoAfterUpload(ctx, origin, cache, info.store_path_hash));
+		return response;
+	}
 
 	const unique = [...new Set(body.chunks.map((c) => `sha256:${c.hash}`))];
 	const present = await db.findExistingChunkHashes(env.ATTIC_DB, unique, 'zstd');
@@ -756,15 +775,26 @@ export async function handleCdcChunkPut(
  * The assembled NAR hash is trusted from the client, like the transport this
  * replaced — verifying would mean re-reading and decompressing everything.
  */
-export async function handleCdcComplete(env: Env, body: CdcManifest): Promise<Response> {
+export async function handleCdcComplete(
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	origin: string,
+	body: CdcManifest
+): Promise<Response> {
 	const denied = validateManifest(body);
 	if (denied) return denied;
 	const info = body.nar_info;
 	const cache = await db.findCache(env.ATTIC_DB, info.cache);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
+	const warm = () =>
+		ctx?.waitUntil(warmNarinfoAfterUpload(ctx, origin, cache, info.store_path_hash));
 
 	const existingNar = await db.tryLockNar(env.ATTIC_DB, info.nar_hash);
-	if (existingNar) return finishDeduplicated(env, info, cache.id, existingNar.id);
+	if (existingNar) {
+		const response = await finishDeduplicated(env, info, cache.id, existingNar.id);
+		warm();
+		return response;
+	}
 
 	// Lock chunks in one batch round-trip (deduplicating repeats within the
 	// NAR: one lock per unique row).
@@ -810,6 +840,7 @@ export async function handleCdcComplete(env: Env, body: CdcManifest): Promise<Re
 		[...lockedByHash.values()],
 		body.nar_size
 	);
+	warm();
 	const fileSize = records.every((r) => r.fileSize != null)
 		? records.reduce((sum, r) => sum + (r.fileSize ?? 0), 0)
 		: null;
