@@ -20,18 +20,23 @@ type Env = App.Platform['env'];
 // NAR URLs are content-addressed by nar hash, so a cached body can never go
 // stale — cache for a year. A GC'd NAR served from cache is still valid data.
 const NAR_CACHE_CONTROL = 'public, max-age=31536000, immutable';
-// narinfo bodies reference chunk keys that GC may reap, but GC purges the
-// narinfo tag of every object it deletes, so max-age only bounds staleness
-// when a purge is missed (e.g. rate-limited). stale-while-revalidate refreshes
-// expiring entries in the background instead of on the critical path.
-const NARINFO_CACHE_CONTROL = 'public, max-age=2592000, stale-while-revalidate=86400';
+// narinfo entries are invalidated actively — GC purges the tag of every
+// object it deletes, uploads purge+rewarm on (re-)push, and keypair rotation
+// re-keys via ?pk — so max-age only bounds staleness when a purge is missed
+// (e.g. rate-limited during a mass sweep), and the worst case of that is a
+// narinfo whose NAR has been reaped: the client falls back to building.
+// stale-while-revalidate refreshes expiring entries off the critical path;
+// stale-if-error keeps serving through origin incidents where honored.
+const NARINFO_CACHE_CONTROL =
+	'public, max-age=7776000, stale-while-revalidate=86400, stale-if-error=86400';
 // Negative caching: absent paths (mostly upstream-filtered references) are
 // re-queried by every closure walk, so an uncacheable 404 sends each walk to
 // D1 for the whole set. The 404 carries the same narinfo tag a real entry
 // would, and uploads purge it (warmNarinfoAfterUpload), so a landed path
-// becomes visible immediately; max-age only bounds staleness when that purge
-// is missed (e.g. rate-limited on a mass push).
-const NARINFO_404_CACHE_CONTROL = 'public, max-age=600';
+// becomes visible immediately; max-age bounds the invisibility when that
+// purge is missed (worst case: the next CI run rebuilds the path and the
+// re-push dedups server-side).
+const NARINFO_404_CACHE_CONTROL = 'public, max-age=1800';
 
 /** Cache-Tag attached to narinfo responses; GC purges it on object deletion. */
 export function narinfoTag(cacheName: string, storePathHash: string): string {
