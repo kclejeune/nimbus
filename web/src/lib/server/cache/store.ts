@@ -72,7 +72,12 @@ export async function serveStore(
 // Internal-only: the gateway strips this header from client requests, so a
 // caller can't start the recursion at an inflated depth.
 export const PREFETCH_DEPTH_HEADER = 'X-Nimbus-Prefetch-Depth';
-const PREFETCH_DEPTH = 2;
+// DISABLED (depth 0) after the 2026-07-08 incident: under a mass query with a
+// cold edge cache, per-miss fan-out (~25 clients x dozens of refs x depth 2)
+// stormed D1 with loopback invocations and upstream-verdict writes, 500ing
+// narinfo/NAR serving until the cache warmed. Re-enabling needs a global
+// fan-out budget and no recursion — see docs/plans.
+const PREFETCH_DEPTH = 0;
 const PREFETCH_MAX_REFS = 64;
 
 function prefetchReferences(
