@@ -61,7 +61,7 @@ func SplitValid(ctx context.Context, paths []string) (valid, invalid []string, e
 	}
 
 	invalidSet := make(map[string]bool)
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			invalidSet[line] = true
 		}
