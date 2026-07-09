@@ -40,6 +40,29 @@ export function createAuth(env: Env) {
 		secret: env.SESSION_SECRET,
 		baseURL: env.APP_URL,
 		trustedOrigins: env.APP_URL ? [env.APP_URL] : undefined,
+		// One user, many provider accounts. Providers can disagree on email
+		// (e.g. the OIDC IdP vs GitHub), so explicit linking from /settings is
+		// allowed across emails — identity is anchored to the signed-in
+		// session, not the address the provider reports.
+		account: {
+			accountLinking: {
+				enabled: true,
+				allowDifferentEmails: true
+			}
+		},
+		// GitHub is link-only: it signs in accounts previously linked from
+		// /settings but never creates users (disableImplicitSignUp). New users
+		// must arrive via the OIDC provider.
+		socialProviders:
+			env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET
+				? {
+						github: {
+							clientId: env.GITHUB_CLIENT_ID,
+							clientSecret: env.GITHUB_CLIENT_SECRET,
+							disableImplicitSignUp: true
+						}
+					}
+				: undefined,
 		user: {
 			additionalFields: {
 				// Populated out-of-band by an admin; never client-settable.

@@ -31,7 +31,8 @@ declare global {
 				OIDC_ISSUER?: string;
 				OIDC_CLIENT_ID?: string;
 				OIDC_CLIENT_SECRET?: string;
-				OIDC_REDIRECT_URI?: string;
+				GITHUB_CLIENT_ID?: string;
+				GITHUB_CLIENT_SECRET?: string;
 				CF_ACCESS_TEAM_DOMAIN?: string;
 				CF_ACCESS_AUD?: string;
 			};

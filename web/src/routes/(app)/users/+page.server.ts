@@ -137,8 +137,10 @@ export const actions: Actions = {
 			.first<{ id: string }>();
 		if (existing) return fail(400, { error: 'A user with that email already exists.' });
 
-		// Pre-provision the account; it adopts the assigned role on first sign-in
-		// (the Cloudflare Access path matches by email).
+		// Pre-provision the account; it adopts the assigned role on first sign-in.
+		// Both auth paths match by email: Cloudflare Access in upsertAccessUser,
+		// and better-auth via implicit account linking (the provider's verified
+		// email attaching to this row — emailVerified=1 below is what permits it).
 		const now = Math.floor(Date.now() / 1000);
 		await db
 			.prepare(

@@ -45,6 +45,8 @@
 	"vars": {
 		"APP_URL": "https://app.cache.kclj.io",
 		"CACHE_BASE_URL": "https://cache.kclj.io",
+		"OIDC_ISSUER": "https://auth.kclj.io",
+		"OIDC_CLIENT_ID": "nimbus",
 		"CF_ACCESS_TEAM_DOMAIN": "https://kclejeune.cloudflareaccess.com",
 		"CF_ACCESS_AUD": "623b56c404ad5907aad2ee0e6255d7c88f6e9aecf64ee2aca77090153c115217"
 	},
@@ -73,12 +75,15 @@
 	// - JWT_HS256_SECRET_BASE64: same HMAC secret the attic worker validates with;
 	//   used here to mint short-lived attic JWTs for service-binding API calls.
 	// - OIDC_CLIENT_SECRET: confidential-client secret for the OIDC token exchange.
+	// - GITHUB_CLIENT_SECRET: GitHub OAuth app secret (optional; with
+	//   GITHUB_CLIENT_ID enables GitHub sign-in for accounts linked from /settings).
 	// - SESSION_SECRET: HMAC key for signing session cookies.
 	//
 	// Vars (set in [vars] or the dashboard):
 	// - OIDC_ISSUER: OIDC discovery issuer URL (e.g. https://auth.example.com).
 	// - OIDC_CLIENT_ID: OIDC client id.
-	// - OIDC_REDIRECT_URI: this app's callback URL.
+	// - GITHUB_CLIENT_ID: GitHub OAuth app client id (optional; see
+	//   GITHUB_CLIENT_SECRET). Callback URL is <APP_URL>/api/auth/callback/github.
 	// - CF_ACCESS_TEAM_DOMAIN: e.g. https://kclejeune.cloudflareaccess.com (enables
 	//   the Cloudflare Access auth path).
 	// - CF_ACCESS_AUD: the Access application AUD tag.

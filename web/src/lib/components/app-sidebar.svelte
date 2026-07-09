@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { Boxes, ChartLine, KeyRound, LayoutDashboard, Users } from '@lucide/svelte';
+	import { Boxes, ChartLine, KeyRound, LayoutDashboard, Settings, Users } from '@lucide/svelte';
 	import Logo from './logo.svelte';
 	import NavUser from './nav-user.svelte';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
@@ -18,7 +18,8 @@
 		{ title: 'Caches', url: '/caches', icon: Boxes },
 		{ title: 'Monitoring', url: '/monitoring', icon: ChartLine },
 		{ title: 'Tokens', url: '/tokens', icon: KeyRound },
-		{ title: 'Users', url: '/users', icon: Users }
+		{ title: 'Users', url: '/users', icon: Users },
+		{ title: 'Settings', url: '/settings', icon: Settings }
 	];
 
 	function isActive(url: string): boolean {
