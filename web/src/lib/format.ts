@@ -11,3 +11,8 @@ export function formatBytes(bytes: number): string {
 export function formatCount(n: number): string {
 	return new Intl.NumberFormat('en-US').format(n);
 }
+
+/** ISO date (YYYY-MM-DD) from unix seconds. */
+export function formatDate(unix: number): string {
+	return new Date(unix * 1000).toISOString().slice(0, 10);
+}

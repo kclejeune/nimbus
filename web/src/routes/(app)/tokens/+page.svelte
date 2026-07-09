@@ -5,6 +5,7 @@
 	import { Label } from '$lib/components/ui/label/index.js';
 	import CopyField from '$lib/components/copy-field.svelte';
 	import TokenScopeFields from '$lib/components/token-scope-fields.svelte';
+	import { formatDate } from '$lib/format';
 	import { KeyRound, Trash2, TriangleAlert } from '@lucide/svelte';
 
 	let { data, form } = $props();
@@ -22,11 +23,6 @@
 		} catch {
 			return scopeJson;
 		}
-	}
-
-	function fmtDate(unix: number | null): string {
-		if (!unix) return 'never';
-		return new Date(unix * 1000).toISOString().slice(0, 10);
 	}
 </script>
 
@@ -101,7 +97,7 @@
 							{/if}
 						</div>
 						<div class="mt-0.5 text-xs text-muted-foreground">
-							{scopeLabel(t.scope)} · expires {fmtDate(t.expiresAt)}
+							{scopeLabel(t.scope)} · expires {t.expiresAt ? formatDate(t.expiresAt) : 'never'}
 						</div>
 					</div>
 					{#if t.status === 'active'}

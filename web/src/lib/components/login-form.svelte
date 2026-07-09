@@ -3,16 +3,15 @@
 	import Logo from '$lib/components/logo.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Card from '$lib/components/ui/card/index.js';
+	import type { ProviderInfo } from '$lib/server/auth/providers';
 
 	let {
-		oidcConfigured,
-		githubConfigured = false,
+		providers,
 		accessConfigured,
 		redirectTo,
 		errorCode = null
 	}: {
-		oidcConfigured: boolean;
-		githubConfigured?: boolean;
+		providers: ProviderInfo[];
 		accessConfigured: boolean;
 		redirectTo: string;
 		errorCode?: string | null;
@@ -21,39 +20,30 @@
 	let loading = $state(false);
 	let errorMessage = $state('');
 	// The callback-redirect error (?error=...) shows until a new attempt starts.
-	let attempted = $state(false);
 	const callbackError = $derived(
 		errorCode === 'signup_disabled'
-			? 'That GitHub account isn’t linked to a user here. Sign in with SSO first, then link GitHub from Settings.'
+			? 'That account isn’t linked to a user here. Sign in with SSO first, then link it from Settings.'
 			: errorCode
 				? `Sign-in failed (${errorCode}). Try again.`
 				: ''
 	);
-	const displayError = $derived(errorMessage || (attempted ? '' : callbackError));
+	const displayError = $derived(loading ? '' : errorMessage || callbackError);
 
-	async function signIn() {
+	async function signIn(provider: ProviderInfo) {
 		loading = true;
-		attempted = true;
 		errorMessage = '';
-		const { error } = await authClient.signIn.oauth2({
-			providerId: 'oidc',
-			callbackURL: redirectTo
-		});
-		if (error) {
-			errorMessage = error.message ?? 'Sign-in failed. Try again.';
-			loading = false;
-		}
-	}
-
-	async function signInGithub() {
-		loading = true;
-		attempted = true;
-		errorMessage = '';
-		const { error } = await authClient.signIn.social({
-			provider: 'github',
-			callbackURL: redirectTo,
-			errorCallbackURL: '/login'
-		});
+		const { error } =
+			provider.kind === 'social'
+				? await authClient.signIn.social({
+						provider: provider.id,
+						callbackURL: redirectTo,
+						errorCallbackURL: '/login'
+					})
+				: await authClient.signIn.oauth2({
+						providerId: provider.id,
+						callbackURL: redirectTo,
+						errorCallbackURL: '/login'
+					});
 		if (error) {
 			errorMessage = error.message ?? 'Sign-in failed. Try again.';
 			loading = false;
@@ -68,17 +58,17 @@
 		<Card.Description>Binary cache administration</Card.Description>
 	</Card.Header>
 	<Card.Content class="flex flex-col gap-3">
-		{#if oidcConfigured || githubConfigured}
-			{#if oidcConfigured}
-				<Button class="w-full" onclick={signIn} disabled={loading}>
-					{loading ? 'Redirecting…' : 'Sign in with SSO'}
+		{#if providers.length > 0}
+			{#each providers as provider, i (provider.id)}
+				<Button
+					variant={i === 0 ? 'default' : 'outline'}
+					class="w-full"
+					onclick={() => signIn(provider)}
+					disabled={loading}
+				>
+					{loading ? 'Redirecting…' : `Sign in with ${provider.label}`}
 				</Button>
-			{/if}
-			{#if githubConfigured}
-				<Button variant="outline" class="w-full" onclick={signInGithub} disabled={loading}>
-					{loading ? 'Redirecting…' : 'Sign in with GitHub'}
-				</Button>
-			{/if}
+			{/each}
 			{#if displayError}
 				<p class="text-center text-sm text-destructive">{displayError}</p>
 			{/if}

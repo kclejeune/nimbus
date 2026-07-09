@@ -77,13 +77,22 @@
 	// - OIDC_CLIENT_SECRET: confidential-client secret for the OIDC token exchange.
 	// - GITHUB_CLIENT_SECRET: GitHub OAuth app secret (optional; with
 	//   GITHUB_CLIENT_ID enables GitHub sign-in for accounts linked from /settings).
+	// - GOOGLE_CLIENT_SECRET: Google OAuth client secret (optional; link-only,
+	//   like GitHub).
+	// - CF_SSO_CLIENT_SECRET: Access for SaaS OIDC app secret (optional;
+	//   link-only Cloudflare SSO — distinct from the CF_ACCESS_* assertion path).
 	// - SESSION_SECRET: HMAC key for signing session cookies.
 	//
 	// Vars (set in [vars] or the dashboard):
 	// - OIDC_ISSUER: OIDC discovery issuer URL (e.g. https://auth.example.com).
 	// - OIDC_CLIENT_ID: OIDC client id.
-	// - GITHUB_CLIENT_ID: GitHub OAuth app client id (optional; see
-	//   GITHUB_CLIENT_SECRET). Callback URL is <APP_URL>/api/auth/callback/github.
+	// - GITHUB_CLIENT_ID: GitHub OAuth app client id (optional).
+	//   Callback URL is <APP_URL>/api/auth/callback/github.
+	// - GOOGLE_CLIENT_ID: Google OAuth client id (optional).
+	//   Callback URL is <APP_URL>/api/auth/callback/google.
+	// - CF_SSO_CLIENT_ID: Access for SaaS OIDC client id (optional; also needs
+	//   CF_ACCESS_TEAM_DOMAIN). Enable PKCE on the SaaS app. Callback URL is
+	//   <APP_URL>/api/auth/oauth2/callback/cloudflare.
 	// - CF_ACCESS_TEAM_DOMAIN: e.g. https://kclejeune.cloudflareaccess.com (enables
 	//   the Cloudflare Access auth path).
 	// - CF_ACCESS_AUD: the Access application AUD tag.

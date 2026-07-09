@@ -33,6 +33,11 @@ declare global {
 				OIDC_CLIENT_SECRET?: string;
 				GITHUB_CLIENT_ID?: string;
 				GITHUB_CLIENT_SECRET?: string;
+				GOOGLE_CLIENT_ID?: string;
+				GOOGLE_CLIENT_SECRET?: string;
+				/** Access for SaaS OIDC app (Cloudflare SSO sign-in/linking). */
+				CF_SSO_CLIENT_ID?: string;
+				CF_SSO_CLIENT_SECRET?: string;
 				CF_ACCESS_TEAM_DOMAIN?: string;
 				CF_ACCESS_AUD?: string;
 			};

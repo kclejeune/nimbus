@@ -4,6 +4,7 @@ import { genericOAuth } from 'better-auth/plugins';
 import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { getRequestEvent } from '$app/server';
 import { getDb, schema } from '$lib/server/db';
+import { buildAuthProviders } from './providers';
 
 type Env = App.Platform['env'];
 
@@ -16,24 +17,7 @@ type Env = App.Platform['env'];
  */
 export function createAuth(env: Env) {
 	const db = getDb(env.ATTIC_DB);
-
-	const providers = [];
-	if (env.OIDC_ISSUER && env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET) {
-		providers.push(
-			genericOAuth({
-				config: [
-					{
-						providerId: 'oidc',
-						discoveryUrl: `${env.OIDC_ISSUER.replace(/\/$/, '')}/.well-known/openid-configuration`,
-						clientId: env.OIDC_CLIENT_ID,
-						clientSecret: env.OIDC_CLIENT_SECRET,
-						scopes: ['openid', 'email', 'profile'],
-						pkce: true
-					}
-				]
-			})
-		);
-	}
+	const { oauth, social } = buildAuthProviders(env);
 
 	return betterAuth({
 		database: drizzleAdapter(db, { provider: 'sqlite', schema }),
@@ -50,26 +34,17 @@ export function createAuth(env: Env) {
 				allowDifferentEmails: true
 			}
 		},
-		// GitHub is link-only: it signs in accounts previously linked from
-		// /settings but never creates users (disableImplicitSignUp). New users
-		// must arrive via the OIDC provider.
-		socialProviders:
-			env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET
-				? {
-						github: {
-							clientId: env.GITHUB_CLIENT_ID,
-							clientSecret: env.GITHUB_CLIENT_SECRET,
-							disableImplicitSignUp: true
-						}
-					}
-				: undefined,
+		socialProviders: social,
 		user: {
 			additionalFields: {
 				// Populated out-of-band by an admin; never client-settable.
 				role: { type: 'string', defaultValue: 'member', input: false }
 			}
 		},
-		plugins: [...providers, sveltekitCookies(getRequestEvent)]
+		plugins: [
+			...(oauth.length > 0 ? [genericOAuth({ config: oauth })] : []),
+			sveltekitCookies(getRequestEvent)
+		]
 	});
 }
 

@@ -2,35 +2,36 @@
 	import { invalidateAll } from '$app/navigation';
 	import { authClient } from '$lib/auth-client';
 	import { Button } from '$lib/components/ui/button/index.js';
+	import { formatDate } from '$lib/format';
 	import { Link2, Unlink } from '@lucide/svelte';
+	import type { ProviderInfo } from '$lib/server/auth/providers';
 
 	let { data } = $props();
 
 	let busy = $state('');
 	let errorMessage = $state('');
 
-	const providerLabels: Record<string, string> = {
-		oidc: 'SSO (OIDC)',
-		github: 'GitHub'
-	};
+	// Labels for account rows whose provider may no longer be configured.
+	const providerLabels = $derived(
+		new Map<string, string>([
+			['oidc', 'SSO (OIDC)'],
+			...data.providers.map((p): [string, string] => [p.id, p.label])
+		])
+	);
 
 	const cfAccessSession = $derived(data.sessionProvider === 'cf-access');
 	const linked = $derived(new Set(data.accounts.map((a) => a.providerId)));
 	const unlinkable = $derived(data.accounts.length > 1);
+	const linkableProviders = $derived(data.providers.filter((p) => !linked.has(p.id)));
 
-	// Providers that are configured on the server but not yet linked.
-	const linkableProviders = $derived(
-		(['oidc', 'github'] as const).filter((p) => data.linkable[p] && !linked.has(p))
-	);
-
-	async function link(providerId: 'oidc' | 'github') {
-		busy = providerId;
+	async function link(provider: ProviderInfo) {
+		busy = provider.id;
 		errorMessage = '';
 		// Both calls redirect the page to the provider and come back here.
 		const { error } =
-			providerId === 'github'
-				? await authClient.linkSocial({ provider: 'github', callbackURL: '/settings' })
-				: await authClient.oauth2.link({ providerId: 'oidc', callbackURL: '/settings' });
+			provider.kind === 'social'
+				? await authClient.linkSocial({ provider: provider.id, callbackURL: '/settings' })
+				: await authClient.oauth2.link({ providerId: provider.id, callbackURL: '/settings' });
 		if (error) {
 			errorMessage = error.message ?? 'Linking failed. Try again.';
 			busy = '';
@@ -47,10 +48,6 @@
 			await invalidateAll();
 		}
 		busy = '';
-	}
-
-	function fmtDate(unix: number): string {
-		return new Date(unix * 1000).toISOString().slice(0, 10);
 	}
 </script>
 
@@ -82,10 +79,10 @@
 					<div class="flex items-center gap-4 px-4 py-3">
 						<div class="min-w-0 flex-1">
 							<span class="font-medium">
-								{providerLabels[account.providerId] ?? account.providerId}
+								{providerLabels.get(account.providerId) ?? account.providerId}
 							</span>
 							<div class="mt-0.5 text-xs text-muted-foreground">
-								linked {fmtDate(account.createdAt)}
+								linked {formatDate(account.createdAt)}
 							</div>
 						</div>
 						<Button
@@ -104,11 +101,11 @@
 		{/if}
 
 		{#if linkableProviders.length > 0}
-			<div class="mt-4 flex gap-2">
-				{#each linkableProviders as provider (provider)}
+			<div class="mt-4 flex flex-wrap gap-2">
+				{#each linkableProviders as provider (provider.id)}
 					<Button variant="outline" size="sm" disabled={busy !== ''} onclick={() => link(provider)}>
 						<Link2 class="size-4" />
-						{busy === provider ? 'Redirecting…' : `Link ${providerLabels[provider]}`}
+						{busy === provider.id ? 'Redirecting…' : `Link ${provider.label}`}
 					</Button>
 				{/each}
 			</div>

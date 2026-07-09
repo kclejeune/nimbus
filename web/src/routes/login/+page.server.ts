@@ -1,4 +1,5 @@
 import { redirect } from '@sveltejs/kit';
+import { configuredProviders } from '$lib/server/auth/providers';
 import type { PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async ({ locals, url, platform }) => {
@@ -6,12 +7,11 @@ export const load: PageServerLoad = async ({ locals, url, platform }) => {
 		redirect(302, url.searchParams.get('redirect') ?? '/');
 	}
 	return {
-		oidcConfigured: Boolean(platform?.env.OIDC_ISSUER),
-		githubConfigured: Boolean(platform?.env.GITHUB_CLIENT_ID && platform?.env.GITHUB_CLIENT_SECRET),
+		providers: configuredProviders(platform?.env),
 		accessConfigured: Boolean(platform?.env.CF_ACCESS_TEAM_DOMAIN),
 		redirectTo: url.searchParams.get('redirect') ?? '/',
 		// Set by better-auth's OAuth callback on a failed sign-in (e.g.
-		// signup_disabled when the GitHub account isn't linked to any user).
+		// signup_disabled when the account isn't linked to any user).
 		errorCode: url.searchParams.get('error')
 	};
 };

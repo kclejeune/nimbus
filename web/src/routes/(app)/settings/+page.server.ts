@@ -1,4 +1,5 @@
 import { error } from '@sveltejs/kit';
+import { configuredProviders } from '$lib/server/auth/providers';
 import type { PageServerLoad } from './$types';
 
 interface AccountRow {
@@ -25,19 +26,7 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 		// Cloudflare Access users have no better-auth session, so the link and
 		// unlink endpoints (which require one) are unavailable to them.
 		sessionProvider: locals.user.provider,
-		accounts: accounts.map((a) => ({
-			id: a.id,
-			providerId: a.providerId,
-			accountId: a.accountId,
-			createdAt: a.createdAt
-		})),
-		linkable: {
-			oidc: Boolean(
-				platform?.env.OIDC_ISSUER &&
-				platform?.env.OIDC_CLIENT_ID &&
-				platform?.env.OIDC_CLIENT_SECRET
-			),
-			github: Boolean(platform?.env.GITHUB_CLIENT_ID && platform?.env.GITHUB_CLIENT_SECRET)
-		}
+		accounts,
+		providers: configuredProviders(platform?.env)
 	};
 };
