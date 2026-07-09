@@ -6,7 +6,13 @@
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 
-	let { user }: { user: { name?: string | null; email?: string | null } | null } = $props();
+	let {
+		user,
+		accessConfigured = false
+	}: {
+		user: { name?: string | null; email?: string | null; provider?: string } | null;
+		accessConfigured?: boolean;
+	} = $props();
 
 	const sidebar = Sidebar.useSidebar();
 	const name = $derived(user?.name ?? user?.email ?? 'You');
@@ -14,7 +20,17 @@
 	const initial = $derived((user?.name ?? user?.email ?? '?').slice(0, 1).toUpperCase());
 
 	async function signOut() {
-		await authClient.signOut();
+		// Clear the better-auth session cookie (no-op for CF Access identities,
+		// which have no better-auth session).
+		if (user?.provider !== 'cf-access') await authClient.signOut();
+		// When Cloudflare Access fronts this domain, an Access session exists
+		// regardless of which provider produced locals.user, and only Cloudflare
+		// can clear its CF_Authorization cookie — without this hop the hooks
+		// fall straight back to the Access identity and sign-out is a no-op.
+		if (accessConfigured) {
+			window.location.href = '/cdn-cgi/access/logout';
+			return;
+		}
 		await goto('/login');
 	}
 </script>

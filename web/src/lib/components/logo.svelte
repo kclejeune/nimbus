@@ -1,12 +1,24 @@
 <script lang="ts">
 	let { class: className = '' }: { class?: string } = $props();
+	// The mask id must be unique per instance — the logo can render more than
+	// once on a page (sidebar + login card).
+	const uid = $props.id();
 </script>
 
-<!-- The nimbus mark: a cloud with a Nix-style flake punched out of it. -->
+<!-- The nimbus mark: a cloud with the Nix snowflake punched out of it. -->
 <svg viewBox="0 0 24 24" class={className} aria-hidden="true">
+	<mask id="flake-{uid}">
+		<rect width="24" height="24" fill="white" />
+		<!-- Nix snowflake (Simple Icons "NixOS", CC0), scaled into the cloud body. -->
+		<path
+			transform="translate(7.9 8.7) scale(0.36)"
+			fill="black"
+			d="M7.352 1.592l-1.364.002L5.32 2.75l1.557 2.713-3.137-.008-1.32 2.34H14.11l-1.353-2.332-3.192-.006-2.214-3.865zm6.175 0l-2.687.025 5.846 10.127 1.341-2.34-1.59-2.765 2.24-3.85-.683-1.182h-1.336l-1.57 2.705-1.56-2.72zm6.887 4.195l-5.846 10.125 2.696-.008 1.601-2.76 4.453.016.682-1.183-.666-1.157-3.13-.008L21.778 8.1l-1.365-2.313zM9.432 8.086l-2.696.008-1.601 2.76-4.453-.016L0 12.02l.666 1.157 3.13.008-1.575 2.71 1.365 2.315L9.432 8.086zM7.33 12.25l-.006.01-.002-.004-1.342 2.34 1.59 2.765-2.24 3.85.684 1.182H7.35l.004-.006h.001l1.567-2.698 1.558 2.72 2.688-.026-.004-.006h.01L7.33 12.25zm2.55 3.93l1.354 2.332 3.192.006 2.215 3.865 1.363-.002.668-1.156-1.557-2.713 3.137.008 1.32-2.34H9.881Z"
+		/>
+	</mask>
 	<path
 		fill="currentColor"
-		fill-rule="evenodd"
-		d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9ZM12.65 12.1L12.65 9L11.35 9L11.35 12.1ZM13.19 13.16L15.88 11.61L15.23 10.49L12.54 12.04ZM12.54 14.16L15.23 15.71L15.88 14.59L13.19 13.04ZM11.35 14.1L11.35 17.2L12.65 17.2L12.65 14.1ZM10.81 13.04L8.12 14.59L8.77 15.71L11.46 14.16ZM11.46 12.04L8.77 10.49L8.12 11.61L10.81 13.16Z"
+		mask="url(#flake-{uid})"
+		d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"
 	/>
 </svg>

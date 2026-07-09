@@ -8,9 +8,11 @@
 
 	let {
 		user,
+		accessConfigured = false,
 		...restProps
 	}: {
-		user: { name?: string | null; email?: string | null } | null;
+		user: { name?: string | null; email?: string | null; provider?: string } | null;
+		accessConfigured?: boolean;
 	} & ComponentProps<typeof Sidebar.Root> = $props();
 
 	const nav = [
@@ -63,6 +65,6 @@
 		</Sidebar.Group>
 	</Sidebar.Content>
 	<Sidebar.Footer>
-		<NavUser {user} />
+		<NavUser {user} {accessConfigured} />
 	</Sidebar.Footer>
 </Sidebar.Root>
