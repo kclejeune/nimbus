@@ -14,6 +14,9 @@ export const user = sqliteTable('user', {
 	role: text('role').notNull().default('member'),
 	// Exactly-protected owner(s); at least one must always exist.
 	isOwner: integer('is_owner', { mode: 'boolean' }).notNull().default(false),
+	/** Instance access gate: 'pending' until an admin or the OIDC activation
+	 *  group activates. Admins bypass (see guard.ts isActiveUser). */
+	status: text('status').notNull().default('pending'),
 	createdAt: integer('createdAt', { mode: 'timestamp' }).notNull(),
 	updatedAt: integer('updatedAt', { mode: 'timestamp' }).notNull()
 });
