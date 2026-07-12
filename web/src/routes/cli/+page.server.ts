@@ -2,9 +2,8 @@ import { error, fail, redirect } from '@sveltejs/kit';
 import { mintAndStore } from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
-import { scopeDenial, tokenScopeOptions } from '$lib/server/auth/permissions';
+import { parseTokenBits, scopeDenial, tokenScopeOptions } from '$lib/server/auth/permissions';
 import { writeAudit } from '$lib/server/audit';
-import type { CachePermission } from '$lib/server/attic-token';
 import type { PageServerLoad, Actions } from './$types';
 
 function parsePort(raw: string | null): number | null {
@@ -47,13 +46,10 @@ export const actions: Actions = {
 		const state = String(form.get('state') ?? '');
 		if (port === null || !state) return fail(400, { error: 'Invalid request.' });
 
-		const canPull = form.get('pull') === 'on';
-		const canPush = form.get('push') === 'on';
-		if (!canPull && !canPush) return fail(400, { error: 'Grant at least one permission.' });
-
-		const bits: CachePermission = {};
-		if (canPull) bits.r = 1;
-		if (canPush) bits.w = 1;
+		const bits = parseTokenBits(form);
+		if (Object.keys(bits).length === 0) {
+			return fail(400, { error: 'Grant at least one permission.' });
+		}
 		const cacheScope = String(form.get('cache') ?? '*');
 		const denial = scopeDenial(await effectiveAccessOf(locals, env.ATTIC_DB), {
 			pattern: cacheScope,

@@ -46,7 +46,7 @@ interface RawClaims {
 	[NIMBUS_CLAIM_NAMESPACE]?: { gc?: unknown };
 }
 
-function base64urlDecode(s: string): Uint8Array {
+export function base64urlDecode(s: string): Uint8Array {
 	const b64 = s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4);
 	return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }

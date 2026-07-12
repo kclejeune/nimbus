@@ -6,9 +6,10 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import type { CacheAccess, CachePermission } from '$lib/server/attic-token';
 import { patternMatches } from '$lib/server/attic/token';
+import { PERMISSION_BIT_FIELDS, type PermissionBit } from '$lib/permission-bits';
 
-export type PermissionBit = 'r' | 'w' | 'd' | 'cc' | 'cr' | 'cq' | 'cd';
-export const PERMISSION_BITS: PermissionBit[] = ['r', 'w', 'd', 'cc', 'cr', 'cq', 'cd'];
+export type { PermissionBit };
+export const PERMISSION_BITS: PermissionBit[] = PERMISSION_BIT_FIELDS.map((f) => f.bit);
 export const ALL_BITS: CachePermission = { r: 1, w: 1, d: 1, cc: 1, cr: 1, cq: 1, cd: 1 };
 
 /** Stored grant actions: the attic bits plus the global gc bit. */
@@ -141,7 +142,7 @@ export async function loadEffectiveAccess(
 	db: D1Database,
 	user: { id: string; role: string }
 ): Promise<EffectiveAccess> {
-	if (user.role === 'admin') return { caches: { '*': { ...ALL_BITS } }, gc: true };
+	if (user.role === 'admin') return ADMIN_ACCESS;
 	const { results } = await db
 		.prepare(
 			`SELECT pattern, actions FROM permission_grant
@@ -160,4 +161,13 @@ export function parseGrantActions(form: FormData): GrantActions {
 	for (const bit of PERMISSION_BITS) if (form.get(bit) === 'on') actions[bit] = 1;
 	if (form.get('gc') === 'on') actions.gc = 1;
 	return actions;
+}
+
+/** Token-issue form checkboxes -> permission bits (shared by all mint routes). */
+export function parseTokenBits(form: FormData): CachePermission {
+	const bits: CachePermission = {};
+	for (const { bit, field } of PERMISSION_BIT_FIELDS) {
+		if (form.get(field) === 'on') bits[bit] = 1;
+	}
+	return bits;
 }

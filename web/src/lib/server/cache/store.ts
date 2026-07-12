@@ -140,19 +140,19 @@ async function serveProxyNarInfo(
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
 	const session = db.readSession(env.ATTIC_DB);
-	const [cache, found] = await Promise.all([
+	const [cache, found, keypair] = await Promise.all([
 		db.findCache(session, cacheName),
-		db.findObjectWithChunks(session, cacheName, storePathHash)
+		db.findObjectWithChunks(session, cacheName, storePathHash),
+		getProxyKeypair(env).catch((e) => {
+			console.warn(`proxy keypair unavailable, serving stored sigs: ${e}`);
+			return null;
+		})
 	]);
 	if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
 	// The gateway resolved this object before forwarding, so a miss here is a
 	// deletion race — no upstream fallback at the root, no negative caching.
 	if (!found) return errorResponse(404, 'Not found', 'NoSuchObject');
 
-	const keypair = await getProxyKeypair(env).catch((e) => {
-		console.warn(`proxy keypair unavailable, serving stored sigs: ${e}`);
-		return null;
-	});
 	const narinfo = await buildNarInfo(found.object, found.nar, found.chunks, keypair);
 
 	// Same tags as the per-cache entry: GC/upload purges cover both.

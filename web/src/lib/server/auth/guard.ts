@@ -38,6 +38,21 @@ export async function requireCachePermission(
 	return access;
 }
 
+/** Any-of check — e.g. retention config accepts cq or cr. */
+export async function requireAnyCachePermission(
+	locals: App.Locals,
+	db: D1Database,
+	bits: PermissionBit[],
+	cacheName: string,
+	label: string
+): Promise<EffectiveAccess> {
+	const access = await effectiveAccessOf(locals, db);
+	if (!bits.some((bit) => canOnCache(access, bit, cacheName))) {
+		throw error(403, `Permission denied: ${label}`);
+	}
+	return access;
+}
+
 export async function requireGc(locals: App.Locals, db: D1Database): Promise<void> {
 	const access = await effectiveAccessOf(locals, db);
 	if (!access.gc) throw error(403, 'Permission denied: garbage collection');

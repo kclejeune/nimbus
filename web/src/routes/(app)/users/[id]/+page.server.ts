@@ -1,10 +1,7 @@
-import { error, fail } from '@sveltejs/kit';
+import { error } from '@sveltejs/kit';
 import { requireAdmin } from '$lib/server/auth/guard';
-import { parseGrantActions } from '$lib/server/auth/permissions';
-import { writeAudit } from '$lib/server/audit';
+import { grantActions } from '$lib/server/auth/grants';
 import type { PageServerLoad, Actions } from './$types';
-
-const PATTERN_RE = /^[a-z0-9*?][a-z0-9*?-]{0,49}$/;
 
 export const load: PageServerLoad = async ({ platform, locals, params }) => {
 	requireAdmin(locals);
@@ -37,56 +34,4 @@ export const load: PageServerLoad = async ({ platform, locals, params }) => {
 	return { subject: user, memberships: memberships.results, grants: grants.results };
 };
 
-export const actions: Actions = {
-	addGrant: async ({ request, platform, locals, params }) => {
-		requireAdmin(locals);
-		const db = platform?.env.ATTIC_DB;
-		if (!db) throw error(500, 'Database binding unavailable');
-		const form = await request.formData();
-		const pattern = String(form.get('pattern') ?? '').trim();
-		if (!PATTERN_RE.test(pattern)) {
-			return fail(400, { error: 'Pattern must be a cache name or glob (*, ?).' });
-		}
-		const actions = parseGrantActions(form);
-		if (Object.keys(actions).length === 0) {
-			return fail(400, { error: 'Pick at least one permission.' });
-		}
-		const id = crypto.randomUUID();
-		await db
-			.prepare(
-				`INSERT INTO permission_grant (id, subject_type, subject_id, pattern, actions, created_at, created_by)
-				 VALUES (?1, 'user', ?2, ?3, ?4, ?5, ?6)`
-			)
-			.bind(
-				id,
-				params.id,
-				pattern,
-				JSON.stringify(actions),
-				Math.floor(Date.now() / 1000),
-				locals.user!.id
-			)
-			.run();
-		await writeAudit(db, {
-			userId: locals.user!.id,
-			action: 'grant.create',
-			target: id,
-			detail: `user:${params.id} ${pattern}`
-		});
-		return { saved: true };
-	},
-
-	removeGrant: async ({ request, platform, locals, params }) => {
-		requireAdmin(locals);
-		const db = platform?.env.ATTIC_DB;
-		if (!db) throw error(500, 'Database binding unavailable');
-		const id = String((await request.formData()).get('id') ?? '');
-		await db
-			.prepare(
-				"DELETE FROM permission_grant WHERE id = ?1 AND subject_type = 'user' AND subject_id = ?2"
-			)
-			.bind(id, params.id)
-			.run();
-		await writeAudit(db, { userId: locals.user!.id, action: 'grant.delete', target: id });
-		return { saved: true };
-	}
-};
+export const actions: Actions = grantActions('user');

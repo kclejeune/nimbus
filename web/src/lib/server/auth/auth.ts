@@ -1,5 +1,6 @@
 import { betterAuth } from 'better-auth';
 import { createAuthMiddleware } from 'better-auth/api';
+import { and, desc, eq } from 'drizzle-orm';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { genericOAuth } from 'better-auth/plugins';
 import { sveltekitCookies } from 'better-auth/svelte-kit';
@@ -52,14 +53,15 @@ export function createAuth(env: Env) {
 				const userId = ctx.context.newSession?.user.id;
 				if (!userId) return;
 				try {
-					const row = await env.ATTIC_DB.prepare(
-						`SELECT idToken FROM account WHERE userId = ?1 AND providerId = 'oidc'
-						 ORDER BY updatedAt DESC LIMIT 1`
-					)
-						.bind(userId)
-						.first<{ idToken: string | null }>();
-					if (!row?.idToken) return;
-					const groups = extractGroups(decodeJwtClaims(row.idToken), env.OIDC_GROUPS_CLAIM);
+					const rows = await db
+						.select({ idToken: schema.account.idToken })
+						.from(schema.account)
+						.where(and(eq(schema.account.userId, userId), eq(schema.account.providerId, 'oidc')))
+						.orderBy(desc(schema.account.updatedAt))
+						.limit(1);
+					const idToken = rows[0]?.idToken;
+					if (!idToken) return;
+					const groups = extractGroups(decodeJwtClaims(idToken), env.OIDC_GROUPS_CLAIM);
 					if (groups === null) return; // claim absent: never wipe
 					await syncUserGroups(env.ATTIC_DB, userId, groups);
 				} catch (e) {

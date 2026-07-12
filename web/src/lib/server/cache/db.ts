@@ -769,45 +769,38 @@ export interface LiveCacheRow {
 	is_public: number;
 }
 
-export async function listLiveCaches(db: D1Database): Promise<LiveCacheRow[]> {
-	const { results } = await db
-		.prepare('SELECT name, priority, is_public FROM cache WHERE deleted_at IS NULL')
-		.all<LiveCacheRow>();
-	return results;
-}
-
-/** Names of live caches holding an object with this store-path hash. */
-export async function cacheNamesWithStorePathHash(
+/** Live caches holding an object with this store-path hash. */
+export async function cachesWithStorePathHash(
 	db: D1Database,
 	storePathHash: string
-): Promise<string[]> {
+): Promise<LiveCacheRow[]> {
 	const { results } = await db
 		.prepare(
-			`SELECT c.name FROM object o
+			`SELECT c.name, c.priority, c.is_public FROM object o
 			 JOIN cache c ON c.id = o.cache_id
 			 WHERE o.store_path_hash = ?1 AND c.deleted_at IS NULL`
 		)
 		.bind(storePathHash)
-		.all<{ name: string }>();
-	return results.map((r) => r.name);
+		.all<LiveCacheRow>();
+	return results;
 }
 
-/** Names of live caches referencing a NAR by hash (raw or sha256:-prefixed). */
-export async function cacheNamesWithNarHash(
+/** Live caches referencing a NAR by hash (raw or sha256:-prefixed). */
+export async function cachesWithNarHash(
 	db: D1Database,
 	narHashes: string[]
-): Promise<string[]> {
+): Promise<LiveCacheRow[]> {
 	const placeholders = narHashes.map((_, i) => `?${i + 1}`).join(', ');
 	const { results } = await db
 		.prepare(
-			`SELECT DISTINCT c.name FROM nar n
+			`SELECT DISTINCT c.name, c.priority, c.is_public FROM nar n
 			 JOIN object o ON o.nar_id = n.id
 			 JOIN cache c ON c.id = o.cache_id
 			 WHERE n.nar_hash IN (${placeholders}) AND c.deleted_at IS NULL`
 		)
 		.bind(...narHashes)
-		.all<{ name: string }>();
-	return results.map((r) => r.name);
+		.all<LiveCacheRow>();
+	return results;
 }
 
 function nowRfc3339(): string {

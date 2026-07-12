@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pickWinner, proxyKeyName, readableCacheSet } from './proxy';
+import { pickReadableWinner, proxyKeyName } from './proxy';
 import type { VerifiedToken, Permission } from '../attic/token';
 import { NO_PERMISSION } from '../attic/token';
 
@@ -15,29 +15,25 @@ function tokenWith(caches: Record<string, Partial<Permission>>): VerifiedToken {
 	return { caches: map, gc: false };
 }
 
-describe('readableCacheSet', () => {
-	it('anonymous sees only public caches', () => {
-		expect([...readableCacheSet(null, rows).keys()]).toEqual(['public-a']);
+describe('pickReadableWinner', () => {
+	it('anonymous resolves only against public caches', () => {
+		expect(pickReadableWinner(null, rows)?.name).toBe('public-a');
+		expect(pickReadableWinner(null, [rows[1]])).toBeNull();
 	});
-	it('a pull token widens the set by its patterns', () => {
-		const set = readableCacheSet(tokenWith({ 'private-*': { pull: true } }), rows);
-		expect([...set.keys()].sort()).toEqual(['private-b', 'private-c', 'public-a']);
+	it('a pull token widens the readable set by its patterns', () => {
+		expect(pickReadableWinner(tokenWith({ 'private-*': { pull: true } }), rows)?.name).toBe(
+			'private-b'
+		);
 	});
 	it('non-pull bits do not grant read', () => {
-		const set = readableCacheSet(tokenWith({ 'private-b': { push: true } }), rows);
-		expect([...set.keys()]).toEqual(['public-a']);
+		expect(pickReadableWinner(tokenWith({ 'private-b': { push: true } }), rows)?.name).toBe(
+			'public-a'
+		);
 	});
-});
-
-describe('pickWinner', () => {
-	const readable = readableCacheSet(tokenWith({ '*': { pull: true } }), rows);
 	it('orders by priority then name', () => {
-		expect(pickWinner(['public-a', 'private-c', 'private-b'], readable)?.name).toBe('private-b');
-	});
-	it('ignores unreadable candidates', () => {
-		const anon = readableCacheSet(null, rows);
-		expect(pickWinner(['private-b', 'public-a'], anon)?.name).toBe('public-a');
-		expect(pickWinner(['private-b'], anon)).toBeNull();
+		const all = tokenWith({ '*': { pull: true } });
+		expect(pickReadableWinner(all, rows)?.name).toBe('private-b');
+		expect(pickReadableWinner(all, [rows[0], rows[2]])?.name).toBe('private-c');
 	});
 });
 

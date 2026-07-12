@@ -21,7 +21,7 @@ import {
 	parseUpstreams
 } from './missing-paths';
 import { type ExecutionContext } from './platform';
-import { getProxyKeypair, pickWinner, readableCacheSet } from './proxy';
+import { getProxyKeypair, pickReadableWinner } from './proxy';
 import { extractPublicKey } from '../attic/signing';
 import { cacheTag, keyedNarinfoUrl, PREFETCH_DEPTH_HEADER, serveStore } from './store';
 import {
@@ -271,8 +271,10 @@ async function handleProxyNarInfo(
 
 	const token = await proxyToken(request, env);
 	const session = db.readSession(env.ATTIC_DB);
-	const readable = readableCacheSet(token, await db.listLiveCaches(session));
-	const winner = pickWinner(await db.cacheNamesWithStorePathHash(session, storePathHash), readable);
+	const winner = pickReadableWinner(
+		token,
+		await db.cachesWithStorePathHash(session, storePathHash)
+	);
 	// Not-found and not-readable are both 404: the root names no caches, so
 	// there is nothing to enumerate.
 	if (!winner) return errorResponse(404, 'Not found', 'NoSuchObject');
@@ -301,10 +303,9 @@ async function handleProxyNar(
 
 	const token = await proxyToken(request, env);
 	const session = db.readSession(env.ATTIC_DB);
-	const readable = readableCacheSet(token, await db.listLiveCaches(session));
-	const winner = pickWinner(
-		await db.cacheNamesWithNarHash(session, [`sha256:${narHashRaw}`, narHashRaw]),
-		readable
+	const winner = pickReadableWinner(
+		token,
+		await db.cachesWithNarHash(session, [`sha256:${narHashRaw}`, narHashRaw])
 	);
 	if (!winner) return errorResponse(404, 'Not found', 'NoSuchObject');
 

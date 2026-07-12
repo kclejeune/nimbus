@@ -7,8 +7,13 @@ import {
 	countStorePaths
 } from '$lib/server/store-paths';
 import { pruneClosure } from '$lib/server/cache/gc';
-import { canOnCache, canSeeCache } from '$lib/server/auth/permissions';
-import { effectiveAccessOf, requireCachePermission } from '$lib/server/auth/guard';
+import { extractPublicKey } from '$lib/server/attic/signing';
+import { canSeeCache } from '$lib/server/auth/permissions';
+import {
+	effectiveAccessOf,
+	requireAnyCachePermission,
+	requireCachePermission
+} from '$lib/server/auth/guard';
 import type { PageServerLoad, Actions } from './$types';
 
 interface CacheRow {
@@ -23,17 +28,10 @@ interface CacheRow {
 	keypair: string;
 }
 
-/** Keypair is stored as `{name}:{base64(secret32 || public32)}`; return the Nix trusted-key form. */
+/** The Nix trusted-key form of the cache keypair, or null when malformed. */
 function derivePublicKey(keypair: string): string | null {
-	const idx = keypair.indexOf(':');
-	if (idx < 0) return null;
-	const name = keypair.slice(0, idx);
 	try {
-		const raw = Uint8Array.from(atob(keypair.slice(idx + 1)), (c) => c.charCodeAt(0));
-		if (raw.length < 64) return null;
-		let bin = '';
-		for (const b of raw.slice(32, 64)) bin += String.fromCharCode(b);
-		return `${name}:${btoa(bin)}`;
+		return extractPublicKey(keypair);
 	} catch {
 		return null;
 	}
@@ -115,10 +113,13 @@ export const actions: Actions = {
 		const db = platform.env.ATTIC_DB;
 
 		// Pinning is a retention decision (same rule as the gc-root API route).
-		const access = await effectiveAccessOf(locals, db);
-		if (!canOnCache(access, 'cq', params.name) && !canOnCache(access, 'cr', params.name)) {
-			throw error(403, 'Permission denied: configure cache retention');
-		}
+		await requireAnyCachePermission(
+			locals,
+			db,
+			['cq', 'cr'],
+			params.name,
+			'configure cache retention'
+		);
 
 		const hash = String((await request.formData()).get('hash') ?? '');
 		if (!HASH_RE.test(hash)) return fail(400, { actionError: 'Invalid path hash.' });
@@ -138,10 +139,13 @@ export const actions: Actions = {
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 		const db = platform.env.ATTIC_DB;
 
-		const access = await effectiveAccessOf(locals, db);
-		if (!canOnCache(access, 'cq', params.name) && !canOnCache(access, 'cr', params.name)) {
-			throw error(403, 'Permission denied: configure cache retention');
-		}
+		await requireAnyCachePermission(
+			locals,
+			db,
+			['cq', 'cr'],
+			params.name,
+			'configure cache retention'
+		);
 
 		const hash = String((await request.formData()).get('hash') ?? '');
 		const cacheId = await cacheIdByName(db, params.name);

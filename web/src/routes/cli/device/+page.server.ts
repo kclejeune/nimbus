@@ -2,9 +2,8 @@ import { error, fail } from '@sveltejs/kit';
 import { mintScopedToken, insertApiToken } from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
-import { scopeDenial, tokenScopeOptions } from '$lib/server/auth/permissions';
+import { parseTokenBits, scopeDenial, tokenScopeOptions } from '$lib/server/auth/permissions';
 import { writeAudit } from '$lib/server/audit';
-import type { CachePermission } from '$lib/server/attic-token';
 import type { PageServerLoad, Actions } from './$types';
 
 interface GrantRow {
@@ -55,8 +54,6 @@ export const actions: Actions = {
 		const userCode = String(form.get('user_code') ?? '')
 			.trim()
 			.toUpperCase();
-		const canPull = form.get('pull') === 'on';
-		const canPush = form.get('push') === 'on';
 		const label = String(form.get('label') ?? 'attic CLI').slice(0, 80);
 
 		const row = await env.ATTIC_DB.prepare(
@@ -69,11 +66,10 @@ export const actions: Actions = {
 		if (row.expires_at < Math.floor(Date.now() / 1000)) {
 			return fail(400, { error: 'This code has expired — start login again.' });
 		}
-		if (!canPull && !canPush) return fail(400, { error: 'Grant at least one permission.' });
-
-		const bits: CachePermission = {};
-		if (canPull) bits.r = 1;
-		if (canPush) bits.w = 1;
+		const bits = parseTokenBits(form);
+		if (Object.keys(bits).length === 0) {
+			return fail(400, { error: 'Grant at least one permission.' });
+		}
 		const cacheScope = String(form.get('cache') ?? '*');
 		const denial = scopeDenial(await effectiveAccessOf(locals, env.ATTIC_DB), {
 			pattern: cacheScope,

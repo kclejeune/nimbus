@@ -7,7 +7,11 @@ import {
 } from '$lib/server/cache/cache-config';
 import { listGcRoots } from '$lib/server/cache/gc';
 import { canOnCache } from '$lib/server/auth/permissions';
-import { effectiveAccessOf, requireCachePermission } from '$lib/server/auth/guard';
+import {
+	effectiveAccessOf,
+	requireAnyCachePermission,
+	requireCachePermission
+} from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { PageServerLoad, Actions } from './$types';
@@ -110,11 +114,14 @@ export const actions: Actions = {
 		if (!locals.user) throw error(401, 'Not signed in');
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 
-		const access = await effectiveAccessOf(locals, platform.env.ATTIC_DB);
+		const access = await requireAnyCachePermission(
+			locals,
+			platform.env.ATTIC_DB,
+			['cq', 'cr'],
+			params.name,
+			'configure cache'
+		);
 		const canConfigure = canOnCache(access, 'cr', params.name);
-		if (!canConfigure && !canOnCache(access, 'cq', params.name)) {
-			throw error(403, 'Permission denied: configure cache');
-		}
 
 		const form = await request.formData();
 		const isPublic = form.get('is_public') === 'on';
@@ -128,6 +135,7 @@ export const actions: Actions = {
 		if (maxGib !== null && (!Number.isFinite(maxGib) || maxGib <= 0)) {
 			return fail(400, { error: 'Size limit must be a positive number of GiB.' });
 		}
+		const maxBytes = maxGib === null ? null : Math.round(maxGib * 2 ** 30);
 
 		const upstreams = parseUpstreamList(String(form.get('upstream_caches') ?? ''));
 		if (upstreams === null) {
@@ -141,29 +149,24 @@ export const actions: Actions = {
 				platform.env,
 				params.name,
 				canConfigure
-					? { is_public: isPublic, priority, compression, retention_period: retention }
-					: { retention_period: retention }
+					? {
+							is_public: isPublic,
+							priority,
+							compression,
+							retention_period: retention,
+							retention_max_bytes: maxBytes
+						}
+					: { retention_period: retention, retention_max_bytes: maxBytes }
 			);
 		} catch (e) {
 			const status = e instanceof CacheConfigError ? e.status : 502;
 			return fail(status, { error: `Failed to save: ${e instanceof Error ? e.message : e}` });
 		}
 
+		// The one column configureCache doesn't cover.
 		if (canConfigure) {
-			await platform.env.ATTIC_DB.prepare(
-				'UPDATE cache SET retention_max_bytes = ?1, upstream_caches = ?2 WHERE name = ?3'
-			)
-				.bind(
-					maxGib === null ? null : Math.round(maxGib * 2 ** 30),
-					JSON.stringify(upstreams),
-					params.name
-				)
-				.run();
-		} else {
-			await platform.env.ATTIC_DB.prepare(
-				'UPDATE cache SET retention_max_bytes = ?1 WHERE name = ?2'
-			)
-				.bind(maxGib === null ? null : Math.round(maxGib * 2 ** 30), params.name)
+			await platform.env.ATTIC_DB.prepare('UPDATE cache SET upstream_caches = ?1 WHERE name = ?2')
+				.bind(JSON.stringify(upstreams), params.name)
 				.run();
 		}
 
@@ -181,10 +184,13 @@ export const actions: Actions = {
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 		const db = platform.env.ATTIC_DB;
 
-		const access = await effectiveAccessOf(locals, db);
-		if (!canOnCache(access, 'cq', params.name) && !canOnCache(access, 'cr', params.name)) {
-			throw error(403, 'Permission denied: configure cache retention');
-		}
+		await requireAnyCachePermission(
+			locals,
+			db,
+			['cq', 'cr'],
+			params.name,
+			'configure cache retention'
+		);
 
 		const form = await request.formData();
 		const hash = parseStorePathHash(String(form.get('path') ?? ''));
@@ -216,10 +222,13 @@ export const actions: Actions = {
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 		const db = platform.env.ATTIC_DB;
 
-		const access = await effectiveAccessOf(locals, db);
-		if (!canOnCache(access, 'cq', params.name) && !canOnCache(access, 'cr', params.name)) {
-			throw error(403, 'Permission denied: configure cache retention');
-		}
+		await requireAnyCachePermission(
+			locals,
+			db,
+			['cq', 'cr'],
+			params.name,
+			'configure cache retention'
+		);
 
 		const hash = String((await request.formData()).get('hash') ?? '');
 		const cache = await getCache(db, params.name);

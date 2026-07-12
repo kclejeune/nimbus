@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { Label } from '$lib/components/ui/label/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
-	import type { PermissionBit, ScopeOption } from '$lib/server/auth/permissions';
+	import { PERMISSION_BIT_FIELDS, GC_LABEL } from '$lib/permission-bits';
+	import type { ScopeOption } from '$lib/server/auth/permissions';
 
 	let {
 		scopeOptions,
@@ -20,17 +21,8 @@
 	let selected = $state(scopeOptions[0]?.value ?? '*');
 	const bits = $derived(scopeOptions.find((o) => o.value === selected)?.bits ?? {});
 
-	const BASIC: { name: string; bit: PermissionBit; label: string }[] = [
-		{ name: 'pull', bit: 'r', label: 'Pull' },
-		{ name: 'push', bit: 'w', label: 'Push' }
-	];
-	const ADVANCED: { name: string; bit: PermissionBit; label: string }[] = [
-		{ name: 'delete', bit: 'd', label: 'Delete paths' },
-		{ name: 'create_cache', bit: 'cc', label: 'Create cache' },
-		{ name: 'configure_cache', bit: 'cr', label: 'Configure' },
-		{ name: 'configure_retention', bit: 'cq', label: 'Retention' },
-		{ name: 'destroy_cache', bit: 'cd', label: 'Destroy cache' }
-	];
+	const BASIC = PERMISSION_BIT_FIELDS.filter((f) => f.bit === 'r' || f.bit === 'w');
+	const ADVANCED = PERMISSION_BIT_FIELDS.filter((f) => f.bit !== 'r' && f.bit !== 'w');
 </script>
 
 <div class="grid grid-cols-2 gap-4">
@@ -57,12 +49,12 @@
 </div>
 
 <div class="flex flex-wrap gap-6">
-	{#each BASIC as p (p.name)}
+	{#each BASIC as p (p.field)}
 		<label class="flex items-center gap-2 text-sm" class:opacity-50={!bits[p.bit]}>
 			<input
-				name={p.name}
+				name={p.field}
 				type="checkbox"
-				checked={bits[p.bit] === 1 && (p.name === 'pull' || defaultPush)}
+				checked={bits[p.bit] === 1 && (p.bit === 'r' || defaultPush)}
 				disabled={!bits[p.bit]}
 				class="size-4 rounded border-input text-primary"
 			/>
@@ -70,10 +62,10 @@
 		</label>
 	{/each}
 	{#if advanced}
-		{#each ADVANCED as p (p.name)}
+		{#each ADVANCED as p (p.field)}
 			<label class="flex items-center gap-2 text-sm" class:opacity-50={!bits[p.bit]}>
 				<input
-					name={p.name}
+					name={p.field}
 					type="checkbox"
 					disabled={!bits[p.bit]}
 					class="size-4 rounded border-input text-primary"
@@ -84,7 +76,7 @@
 		{#if gcAllowed}
 			<label class="flex items-center gap-2 text-sm">
 				<input name="gc" type="checkbox" class="size-4 rounded border-input text-primary" />
-				Trigger GC
+				{GC_LABEL}
 			</label>
 		{/if}
 	{/if}

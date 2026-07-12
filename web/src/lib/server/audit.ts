@@ -1,4 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
+import { getDb, schema } from '$lib/server/db';
 
 /** Best-effort audit trail write; failures are logged, never surfaced. */
 export async function writeAudit(
@@ -6,20 +7,16 @@ export async function writeAudit(
 	entry: { userId: string | null; action: string; target?: string; detail?: string }
 ): Promise<void> {
 	try {
-		await db
-			.prepare(
-				`INSERT INTO audit_log (id, user_id, action, target, detail, created_at)
-				 VALUES (?1, ?2, ?3, ?4, ?5, ?6)`
-			)
-			.bind(
-				crypto.randomUUID(),
-				entry.userId,
-				entry.action,
-				entry.target ?? null,
-				entry.detail ?? null,
-				Math.floor(Date.now() / 1000)
-			)
-			.run();
+		await getDb(db)
+			.insert(schema.auditLog)
+			.values({
+				id: crypto.randomUUID(),
+				userId: entry.userId,
+				action: entry.action,
+				target: entry.target ?? null,
+				detail: entry.detail ?? null,
+				createdAt: new Date()
+			});
 	} catch (e) {
 		console.warn(`audit write failed (${entry.action}): ${e}`);
 	}

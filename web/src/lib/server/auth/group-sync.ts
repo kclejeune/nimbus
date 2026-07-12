@@ -4,6 +4,7 @@
 // CF-Access full resolutions (cf-access.ts) when the claim is present.
 
 import type { D1Database } from '@cloudflare/workers-types';
+import { base64urlDecode } from '../attic/token';
 
 /** Decode a JWT payload without verification — the token was just received
  *  from the IdP over the token endpoint; better-auth verified the exchange. */
@@ -11,9 +12,7 @@ export function decodeJwtClaims(jwt: string): Record<string, unknown> | null {
 	const parts = jwt.split('.');
 	if (parts.length < 2) return null;
 	try {
-		const b64 =
-			parts[1].replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (parts[1].length % 4)) % 4);
-		const decoded = JSON.parse(atob(b64));
+		const decoded = JSON.parse(new TextDecoder().decode(base64urlDecode(parts[1])));
 		return typeof decoded === 'object' && decoded !== null ? decoded : null;
 	} catch {
 		return null;

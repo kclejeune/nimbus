@@ -8,30 +8,19 @@ import type { LiveCacheRow } from './db';
 
 type Env = App.Platform['env'];
 
-/** Public caches plus private caches the token may pull from. */
-export function readableCacheSet(
+/**
+ * The candidate the requester may read — public caches, or private ones the
+ * token may pull from — lowest priority first, then name, so resolution is
+ * deterministic across requests.
+ */
+export function pickReadableWinner(
 	token: VerifiedToken | null,
-	caches: LiveCacheRow[]
-): Map<string, LiveCacheRow> {
-	const readable = new Map<string, LiveCacheRow>();
-	for (const row of caches) {
-		if (row.is_public === 1 || permissionForCache(token, row.name).pull) {
-			readable.set(row.name, row);
-		}
-	}
-	return readable;
-}
-
-/** Lowest priority wins, then name — deterministic across requests. */
-export function pickWinner(
-	candidateNames: string[],
-	readable: Map<string, LiveCacheRow>
+	candidates: LiveCacheRow[]
 ): LiveCacheRow | null {
-	const rows = candidateNames
-		.map((name) => readable.get(name))
-		.filter((r): r is LiveCacheRow => r !== undefined)
+	const readable = candidates
+		.filter((row) => row.is_public === 1 || permissionForCache(token, row.name).pull)
 		.sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
-	return rows[0] ?? null;
+	return readable[0] ?? null;
 }
 
 export function proxyKeyName(env: Env): string {
@@ -43,11 +32,23 @@ export function proxyKeyName(env: Env): string {
 	return 'nimbus-proxy-1';
 }
 
+// The keypair is write-once (INSERT OR IGNORE, no rotation path), so one D1
+// read per isolate suffices — same idea as the signing-key cache in signing.ts.
+let proxyKeypair: Promise<string> | undefined;
+
 /**
  * The server-wide proxy signing keypair, generated lazily into server_config.
  * INSERT OR IGNORE + re-read makes concurrent first uses converge on one key.
  */
-export async function getProxyKeypair(env: Env): Promise<string> {
+export function getProxyKeypair(env: Env): Promise<string> {
+	if (!proxyKeypair) {
+		proxyKeypair = loadProxyKeypair(env);
+		proxyKeypair.catch(() => (proxyKeypair = undefined));
+	}
+	return proxyKeypair;
+}
+
+async function loadProxyKeypair(env: Env): Promise<string> {
 	const read = () =>
 		env.ATTIC_DB.prepare("SELECT value FROM server_config WHERE key = 'proxy_keypair'").first<{
 			value: string;

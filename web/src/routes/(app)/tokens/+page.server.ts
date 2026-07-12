@@ -2,9 +2,8 @@ import { error, fail } from '@sveltejs/kit';
 import { mintAndStore } from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
-import { scopeDenial, tokenScopeOptions } from '$lib/server/auth/permissions';
+import { parseTokenBits, scopeDenial, tokenScopeOptions } from '$lib/server/auth/permissions';
 import { writeAudit } from '$lib/server/audit';
-import type { CachePermission } from '$lib/server/attic-token';
 import type { PageServerLoad, Actions } from './$types';
 
 interface TokenRow {
@@ -65,14 +64,7 @@ export const actions: Actions = {
 		const name = String(form.get('name') ?? '').trim();
 		if (!name) return fail(400, { error: 'Give the token a name.' });
 
-		const bits: CachePermission = {};
-		if (form.get('pull') === 'on') bits.r = 1;
-		if (form.get('push') === 'on') bits.w = 1;
-		if (form.get('delete') === 'on') bits.d = 1;
-		if (form.get('create_cache') === 'on') bits.cc = 1;
-		if (form.get('configure_cache') === 'on') bits.cr = 1;
-		if (form.get('configure_retention') === 'on') bits.cq = 1;
-		if (form.get('destroy_cache') === 'on') bits.cd = 1;
+		const bits = parseTokenBits(form);
 		const gc = form.get('gc') === 'on';
 		const cacheScope = String(form.get('cache') ?? '*');
 
