@@ -3,6 +3,7 @@
 
 import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
 import type { SessionUser } from '$lib/server/auth/types';
+import type { EffectiveAccess } from '$lib/server/auth/permissions';
 
 declare global {
 	namespace App {
@@ -11,6 +12,8 @@ declare global {
 		interface Locals {
 			/** The authenticated user, or null for anonymous requests. */
 			user: SessionUser | null;
+			/** Memoized per-request effective access (see guard.ts). */
+			effectiveAccess?: EffectiveAccess;
 		}
 
 		// interface PageData {}
@@ -40,6 +43,8 @@ declare global {
 				CF_SSO_CLIENT_SECRET?: string;
 				CF_ACCESS_TEAM_DOMAIN?: string;
 				CF_ACCESS_AUD?: string;
+				/** OIDC ID-token claim carrying group names; enables group sync when set. */
+				OIDC_GROUPS_CLAIM?: string;
 			};
 			ctx: ExecutionContext;
 		}

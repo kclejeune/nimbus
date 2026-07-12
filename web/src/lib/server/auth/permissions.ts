@@ -3,6 +3,7 @@
 // OR every matching pattern — deliberately wider than attic's exact-match-wins
 // rule, which still governs token *claims* (permissionForCache) unchanged.
 
+import type { D1Database } from '@cloudflare/workers-types';
 import type { CacheAccess, CachePermission } from '$lib/server/attic-token';
 import { patternMatches } from '$lib/server/attic/token';
 
@@ -133,4 +134,30 @@ export function tokenScopeOptions(access: EffectiveAccess, cacheNames: string[])
 	return [...options.entries()]
 		.map(([value, bits]) => ({ value, bits }))
 		.sort((a, b) => a.value.localeCompare(b.value));
+}
+
+/** Union of the user's direct grants and their groups' grants. Admins bypass. */
+export async function loadEffectiveAccess(
+	db: D1Database,
+	user: { id: string; role: string }
+): Promise<EffectiveAccess> {
+	if (user.role === 'admin') return { caches: { '*': { ...ALL_BITS } }, gc: true };
+	const { results } = await db
+		.prepare(
+			`SELECT pattern, actions FROM permission_grant
+			 WHERE (subject_type = 'user' AND subject_id = ?1)
+			    OR (subject_type = 'group' AND subject_id IN
+			        (SELECT group_id FROM group_member WHERE user_id = ?1))`
+		)
+		.bind(user.id)
+		.all<GrantRow>();
+	return unionAccess(results);
+}
+
+/** Grant-editor form checkboxes -> GrantActions (shared by group/user pages). */
+export function parseGrantActions(form: FormData): GrantActions {
+	const actions: GrantActions = {};
+	for (const bit of PERMISSION_BITS) if (form.get(bit) === 'on') actions[bit] = 1;
+	if (form.get('gc') === 'on') actions.gc = 1;
+	return actions;
 }
