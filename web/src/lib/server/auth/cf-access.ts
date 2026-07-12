@@ -2,8 +2,10 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { eq, sql } from 'drizzle-orm';
 import type { RequestEvent } from '@sveltejs/kit';
 import { getDb, schema } from '$lib/server/db';
-import { extractGroups, syncUserGroups } from './group-sync';
-import type { SessionUser, UserRole } from './types';
+import { activateIfPending, extractGroups, shouldAutoActivate, syncUserGroups } from './group-sync';
+import { isActiveUser } from './guard';
+import { writeAudit } from '$lib/server/audit';
+import type { SessionUser, UserRole, UserStatus } from './types';
 
 type Env = App.Platform['env'];
 
@@ -130,7 +132,9 @@ export async function resolveCfAccessUser(
 	const email = payload.email ?? null;
 	if (!sub) return null;
 
-	// Check session cookie before hitting D1.
+	// Check session cookie before hitting D1. The cookie is only ever minted
+	// for active users (below), so status is implied — a deactivation takes at
+	// most the cookie TTL (15 min) to bite on this path.
 	const sessionSecret = env.SESSION_SECRET;
 	if (sessionSecret) {
 		const cookieValue = event.cookies.get(SESSION_COOKIE);
@@ -143,7 +147,8 @@ export async function resolveCfAccessUser(
 					provider: 'cf-access',
 					email,
 					name: payload.name ?? email,
-					role: cached.role
+					role: cached.role,
+					status: 'active'
 				};
 			}
 		}
@@ -160,11 +165,23 @@ export async function resolveCfAccessUser(
 			await syncUserGroups(env.ATTIC_DB, user.id, groups).catch((e) =>
 				console.warn(`cf-access group sync failed: ${e}`)
 			);
+			if (user.status === 'pending' && shouldAutoActivate(groups, env.OIDC_ACTIVATION_GROUP)) {
+				if (await activateIfPending(env.ATTIC_DB, user.id).catch(() => false)) {
+					user.status = 'active';
+					await writeAudit(env.ATTIC_DB, {
+						userId: user.id,
+						action: 'user.activate',
+						target: user.id,
+						detail: 'auto:oidc-group'
+					});
+				}
+			}
 		}
 	}
 
-	// Mint a fresh session cookie to skip D1 on subsequent requests.
-	if (sessionSecret) {
+	// Mint a fresh session cookie to skip D1 on subsequent requests. Pending
+	// users get no cookie: the cookie fast path implies active status.
+	if (sessionSecret && isActiveUser(user)) {
 		const cookieToken = await mintSessionToken(user.id, user.role, sessionSecret);
 		event.cookies.set(SESSION_COOKIE, cookieToken, {
 			httpOnly: true,
@@ -212,11 +229,14 @@ async function upsertAccessUser(
 			provider: 'cf-access',
 			email: u.email,
 			name: u.name,
-			role
+			role,
+			status: (u.status as UserStatus) ?? 'pending'
 		};
 	}
 
 	const role: UserRole = adminExists ? 'member' : 'admin';
+	// The bootstrap owner is active; everyone else waits for activation.
+	const status: UserStatus = anyUser ? 'pending' : 'active';
 	await db.insert(schema.user).values({
 		id,
 		name: identity.name ?? identity.email ?? identity.sub,
@@ -224,6 +244,7 @@ async function upsertAccessUser(
 		emailVerified: true,
 		role,
 		isOwner: !anyUser,
+		status,
 		createdAt: now,
 		updatedAt: now
 	});
@@ -234,7 +255,8 @@ async function upsertAccessUser(
 		provider: 'cf-access',
 		email: identity.email,
 		name: identity.name,
-		role
+		role,
+		status
 	};
 }
 

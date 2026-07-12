@@ -45,6 +45,8 @@ declare global {
 				CF_ACCESS_AUD?: string;
 				/** OIDC ID-token claim carrying group names; enables group sync when set. */
 				OIDC_GROUPS_CLAIM?: string;
+				/** Groups-claim value that auto-activates pending users at login. */
+				OIDC_ACTIVATION_GROUP?: string;
 			};
 			ctx: ExecutionContext;
 		}
