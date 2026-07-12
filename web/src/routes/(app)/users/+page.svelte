@@ -1,6 +1,8 @@
 <script lang="ts">
-	import { enhance } from '$app/forms';
+	import { deserialize, enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
+	import { toast } from 'svelte-sonner';
+	import { confirmFirst, toastErrors } from '$lib/enhance';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
@@ -8,27 +10,29 @@
 	import { ShieldCheck, MoreHorizontal, Trash2, UserPlus } from '@lucide/svelte';
 
 	let { data, form } = $props();
-	let error = $state('');
 	let adding = $state(false);
 
-	async function post(action: string, fields: Record<string, string>, failMsg: string) {
-		error = '';
+	// Programmatic action submit (the dropdown items aren't forms). Failures
+	// surface the server's actual message as a toast, matching toastErrors().
+	async function post(action: string, fields: Record<string, string>) {
 		const body = new FormData();
 		for (const [k, v] of Object.entries(fields)) body.set(k, v);
 		const res = await fetch(`?/${action}`, { method: 'POST', body });
-		if (!res.ok) {
-			error = failMsg;
-			return;
+		const result = deserialize(await res.text());
+		if (result.type === 'failure') {
+			toast.error(String(result.data?.error ?? 'Request failed'));
+		} else if (result.type === 'error') {
+			toast.error(result.error?.message ?? 'Request failed');
+		} else {
+			await invalidateAll();
 		}
-		await invalidateAll();
 	}
 
-	const setRole = (userId: string, role: 'admin' | 'member') =>
-		post('setRole', { userId, role }, 'Failed to update role.');
+	const setRole = (userId: string, role: 'admin' | 'member') => post('setRole', { userId, role });
 	const setOwner = (userId: string, owner: boolean) =>
-		post('setOwner', { userId, owner: String(owner) }, 'Failed to update owner.');
+		post('setOwner', { userId, owner: String(owner) });
 	const setStatus = (userId: string, status: 'active' | 'pending') =>
-		post('setStatus', { userId, status }, 'Failed to update status.');
+		post('setStatus', { userId, status });
 
 	function protectedReason(u: (typeof data.users)[number]): string | null {
 		if (u.id === data.currentUserId) return 'You cannot delete your own account';
@@ -44,10 +48,6 @@
 			Everyone who signs in appears here. Admins can invite, manage roles, and remove users.
 		</p>
 	</header>
-
-	{#if error}
-		<p class="mb-4 text-sm text-destructive">{error}</p>
-	{/if}
 
 	<section class="mb-8 rounded-lg border bg-card p-5">
 		<h2 class="mb-1 text-sm font-medium">Invite a user</h2>
@@ -199,13 +199,9 @@
 									<form
 										method="POST"
 										action="?/deleteUser"
-										use:enhance={({ cancel }) => {
-											if (!confirm(`Delete ${u.email}? This removes their access and tokens.`)) {
-												cancel();
-												return;
-											}
-											return async ({ update }) => update();
-										}}
+										use:enhance={toastErrors(
+											confirmFirst(`Delete ${u.email}? This removes their access and tokens.`)
+										)}
 									>
 										<input type="hidden" name="userId" value={u.id} />
 										<button

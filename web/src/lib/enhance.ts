@@ -12,6 +12,24 @@ import type { SubmitFunction } from '@sveltejs/kit';
  * pending state, but with a no-op `update` so the error result is never
  * applied.
  */
+/**
+ * `use:enhance` submit wrapper for destructive forms: asks for confirmation
+ * and cancels the submit on decline. Composes with toastErrors —
+ * `use:enhance={toastErrors(confirmFirst(() => 'Delete X?'))}`.
+ */
+export function confirmFirst(
+	message: string | (() => string),
+	inner?: SubmitFunction
+): SubmitFunction {
+	return (input) => {
+		if (!confirm(typeof message === 'function' ? message() : message)) {
+			input.cancel();
+			return;
+		}
+		return inner?.(input);
+	};
+}
+
 export function toastErrors(inner?: SubmitFunction): SubmitFunction {
 	return (input) => {
 		const innerReturn = inner?.(input);

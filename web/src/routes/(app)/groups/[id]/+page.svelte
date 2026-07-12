@@ -6,7 +6,7 @@
 	import { Label } from '$lib/components/ui/label/index.js';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import GrantEditor from '$lib/components/grant-editor.svelte';
-	import { Trash2 } from '@lucide/svelte';
+	import { ArrowLeft, Trash2 } from '@lucide/svelte';
 
 	let { data, form } = $props();
 
@@ -16,6 +16,14 @@
 </script>
 
 <div class="mx-auto max-w-6xl px-8 py-8">
+	<a
+		href="/groups"
+		class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+	>
+		<ArrowLeft class="size-4" />
+		Groups
+	</a>
+
 	<header class="mb-8">
 		<h1 class="text-2xl font-semibold tracking-tight">{data.group.name}</h1>
 		{#if data.group.description}
@@ -97,5 +105,5 @@
 		</form>
 	</section>
 
-	<GrantEditor grants={data.grants} />
+	<GrantEditor grants={data.grants} cacheNames={data.cacheNames} />
 </div>

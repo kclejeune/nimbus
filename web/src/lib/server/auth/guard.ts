@@ -10,23 +10,18 @@ import {
 	type EffectiveAccess,
 	type PermissionBit
 } from './permissions';
-import type { SessionUser } from './types';
 
 export function requireAdmin(locals: App.Locals) {
 	if (!locals.user) throw error(401, 'Not signed in');
 	if (locals.user.role !== 'admin') throw error(403, 'Admins only');
 }
 
-/** Admins are never locked out by activation status. */
-export function isActiveUser(user: Pick<SessionUser, 'role' | 'status'>): boolean {
-	return user.role === 'admin' || user.status === 'active';
+/** Subject pages: admins manage anyone; a user gets their own page. */
+export function requireSelfOrAdmin(locals: App.Locals, subjectId: string) {
+	if (locals.user?.id !== subjectId) requireAdmin(locals);
 }
 
-/** For routes outside the (app) layout gate (CLI token flows). */
-export function requireActive(locals: App.Locals): void {
-	if (!locals.user) throw error(401, 'Not signed in');
-	if (!isActiveUser(locals.user)) throw error(403, 'Account pending approval');
-}
+export { isActiveUser } from './types';
 
 /** Load (once per request) the signed-in user's effective access. */
 export async function effectiveAccessOf(
@@ -47,20 +42,5 @@ export async function requireCachePermission(
 ): Promise<EffectiveAccess> {
 	const access = await effectiveAccessOf(locals, db);
 	if (!canOnCache(access, bit, cacheName)) throw error(403, `Permission denied: ${label}`);
-	return access;
-}
-
-/** Any-of check — e.g. retention config accepts cq or cr. */
-export async function requireAnyCachePermission(
-	locals: App.Locals,
-	db: D1Database,
-	bits: PermissionBit[],
-	cacheName: string,
-	label: string
-): Promise<EffectiveAccess> {
-	const access = await effectiveAccessOf(locals, db);
-	if (!bits.some((bit) => canOnCache(access, bit, cacheName))) {
-		throw error(403, `Permission denied: ${label}`);
-	}
 	return access;
 }

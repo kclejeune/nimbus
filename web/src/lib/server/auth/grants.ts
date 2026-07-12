@@ -5,8 +5,10 @@
 
 import { error, fail, type RequestEvent } from '@sveltejs/kit';
 import type { D1Database } from '@cloudflare/workers-types';
+import type { CachePermission } from '$lib/server/attic-token';
+import { patternMatches } from '$lib/server/attic/token';
 import { requireAdmin } from './guard';
-import { parseGrantActions, type GrantActions } from './permissions';
+import { parseGrantActions } from './permissions';
 import { writeAudit } from '$lib/server/audit';
 
 /** CACHE_NAME_RE widened with the attic glob characters. */
@@ -15,13 +17,43 @@ const GRANT_PATTERN_RE = /^[a-z0-9*?][a-z0-9*?-]{0,49}$/;
 /** Everything an owner needs on an existing cache. `cr` (Configure) already
  *  covers retention server-side, so cq is unnecessary; cc (create-anywhere)
  *  and gc (storage-wide) are not per-cache and excluded. */
-export const FULL_CONTROL: GrantActions = { r: 1, w: 1, d: 1, cr: 1, cd: 1 };
+export const FULL_CONTROL: CachePermission = { r: 1, w: 1, d: 1, cr: 1, cd: 1 };
+
+export type SubjectType = 'user' | 'group';
+
+/** Form-value encoding of a grant subject. The id may itself contain colons
+ *  (e.g. "cfaccess:<sub>"), so decode splits on the FIRST colon only — keep
+ *  compose and parse paired here. */
+export function encodeSubject(type: SubjectType, id: string): string {
+	return `${type}:${id}`;
+}
+
+export function decodeSubject(value: string): { type: SubjectType; id: string } | null {
+	const sep = value.indexOf(':');
+	if (sep === -1) return null;
+	const type = value.slice(0, sep);
+	const id = value.slice(sep + 1);
+	return (type === 'user' || type === 'group') && id ? { type, id } : null;
+}
+
+/** Annotate grant rows with how many existing caches each pattern currently
+ *  applies to, so the UI can link exact matches and warn on typo'd patterns
+ *  that grant nothing. */
+export function annotateGrantMatches<T extends { pattern: string }>(
+	grants: T[],
+	cacheNames: string[]
+): (T & { matches: number })[] {
+	return grants.map((g) => ({
+		...g,
+		matches: cacheNames.filter((name) => patternMatches(g.pattern, name)).length
+	}));
+}
 
 export interface NewGrant {
-	subjectType: 'user' | 'group';
+	subjectType: SubjectType;
 	subjectId: string;
 	pattern: string;
-	actions: GrantActions;
+	actions: CachePermission;
 	actorId: string | null;
 	detail?: string;
 }
@@ -57,7 +89,7 @@ export async function insertGrant(db: D1Database, grant: NewGrant): Promise<stri
 export async function removeGrantRow(
 	db: D1Database,
 	id: string,
-	subjectType: 'user' | 'group',
+	subjectType: SubjectType,
 	subjectId: string,
 	actorId: string | null
 ): Promise<void> {
@@ -68,7 +100,7 @@ export async function removeGrantRow(
 	await writeAudit(db, { userId: actorId, action: 'grant.delete', target: id });
 }
 
-export function grantActions(subjectType: 'user' | 'group') {
+export function grantActions(subjectType: SubjectType) {
 	return {
 		addGrant: async ({ request, platform, locals, params }: RequestEvent) => {
 			requireAdmin(locals);

@@ -5,6 +5,7 @@
 
 import type { D1Database } from '@cloudflare/workers-types';
 import { base64urlDecode } from '../attic/token';
+import { writeAudit } from '$lib/server/audit';
 
 /** Decode a JWT payload without verification — the token was just received
  *  from the IdP over the token endpoint; better-auth verified the exchange. */
@@ -50,6 +51,34 @@ export async function activateIfPending(db: D1Database, userId: string): Promise
 		.bind(userId)
 		.run();
 	return (res.meta.changes ?? 0) > 0;
+}
+
+/**
+ * The full login-time orchestration, shared by both auth paths (OIDC hook and
+ * CF-Access full resolution): sync group memberships from the claim, then
+ * auto-activate a pending user named by the activation group. A missing claim
+ * (null groups) skips everything — it must never wipe memberships synced by a
+ * login path that carries the claim. Returns true when this call activated
+ * the user.
+ */
+export async function syncGroupsAndMaybeActivate(
+	db: D1Database,
+	userId: string,
+	claims: Record<string, unknown> | null,
+	env: { groupsClaim: string; activationGroup?: string }
+): Promise<boolean> {
+	const groups = extractGroups(claims, env.groupsClaim);
+	if (groups === null) return false;
+	await syncUserGroups(db, userId, groups);
+	if (!shouldAutoActivate(groups, env.activationGroup)) return false;
+	if (!(await activateIfPending(db, userId))) return false;
+	await writeAudit(db, {
+		userId,
+		action: 'user.activate',
+		target: userId,
+		detail: 'auto:oidc-group'
+	});
+	return true;
 }
 
 export interface MappedGroup {

@@ -17,23 +17,25 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
-	const { results } = await db
-		.prepare(
-			`SELECT c.name, c.is_public, c.priority, c.compression, c.retention_period,
-			        COUNT(DISTINCT o.id) AS objects,
-			        COALESCE(SUM(ch.file_size), 0) AS storage_bytes
-			 FROM cache c
-			 LEFT JOIN object o ON o.cache_id = c.id
-			 LEFT JOIN nar n ON n.id = o.nar_id
-			 LEFT JOIN chunkref cr ON cr.nar_id = n.id
-			 LEFT JOIN chunk ch ON ch.id = cr.chunk_id
-			 WHERE c.deleted_at IS NULL
-			 GROUP BY c.id
-			 ORDER BY c.name`
-		)
-		.all<CacheRow>();
+	const [{ results }, access] = await Promise.all([
+		db
+			.prepare(
+				`SELECT c.name, c.is_public, c.priority, c.compression, c.retention_period,
+				        COUNT(DISTINCT o.id) AS objects,
+				        COALESCE(SUM(ch.file_size), 0) AS storage_bytes
+				 FROM cache c
+				 LEFT JOIN object o ON o.cache_id = c.id
+				 LEFT JOIN nar n ON n.id = o.nar_id
+				 LEFT JOIN chunkref cr ON cr.nar_id = n.id
+				 LEFT JOIN chunk ch ON ch.id = cr.chunk_id
+				 WHERE c.deleted_at IS NULL
+				 GROUP BY c.id
+				 ORDER BY c.name`
+			)
+			.all<CacheRow>(),
+		effectiveAccessOf(locals, db)
+	]);
 
-	const access = await effectiveAccessOf(locals, db);
 	const visible = results.filter((c) => canSeeCache(access, c.name));
 
 	return {

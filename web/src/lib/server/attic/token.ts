@@ -158,17 +158,32 @@ export async function verifyAtticToken(
 	return { sub: claims.sub, jti: claims.jti, caches, gc: flag(claims[NIMBUS_CLAIM_NAMESPACE]?.gc) };
 }
 
+// Compiled glob patterns, memoized per isolate: permission checks run this
+// per cache × bit × grant pattern on hot paths. Patterns can come from
+// user-supplied tokens, so cap the cache instead of letting it grow unbounded.
+const patternRegexCache = new Map<string, RegExp>();
+const PATTERN_REGEX_CACHE_MAX = 500;
+
 /** Glob match with `*` (any run) and `?` (single char), like attic's wildmatch. */
 export function patternMatches(pattern: string, name: string): boolean {
 	if (pattern === name) return true;
-	const regex = new RegExp(
-		'^' +
-			pattern
-				.replace(/[.+^${}()|[\]\\]/g, '\\$&')
-				.replace(/\*/g, '.*')
-				.replace(/\?/g, '.') +
-			'$'
-	);
+	let regex = patternRegexCache.get(pattern);
+	if (!regex) {
+		regex = new RegExp(
+			'^' +
+				pattern
+					.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+					.replace(/\*/g, '.*')
+					.replace(/\?/g, '.') +
+				'$'
+		);
+		if (patternRegexCache.size >= PATTERN_REGEX_CACHE_MAX) {
+			// FIFO-evict one entry so hot patterns stay warm through bursts of
+			// unique token-supplied patterns.
+			patternRegexCache.delete(patternRegexCache.keys().next().value!);
+		}
+		patternRegexCache.set(pattern, regex);
+	}
 	return regex.test(name);
 }
 

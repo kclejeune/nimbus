@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { EllipsisVertical, LogOut } from '@lucide/svelte';
+	import { EllipsisVertical, LogOut, ShieldCheck } from '@lucide/svelte';
 	import { authClient } from '$lib/auth-client';
 	import * as Avatar from '$lib/components/ui/avatar/index.js';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
@@ -9,7 +9,12 @@
 	let {
 		user
 	}: {
-		user: { name?: string | null; email?: string | null; provider?: string } | null;
+		user: {
+			id?: string;
+			name?: string | null;
+			email?: string | null;
+			provider?: string;
+		} | null;
 	} = $props();
 
 	const sidebar = Sidebar.useSidebar();
@@ -79,6 +84,12 @@
 					</div>
 				</DropdownMenu.Label>
 				<DropdownMenu.Separator />
+				{#if user?.id}
+					<DropdownMenu.Item onclick={() => goto(`/users/${user.id}`)}>
+						<ShieldCheck />
+						My access
+					</DropdownMenu.Item>
+				{/if}
 				<DropdownMenu.Item onclick={signOut}>
 					<LogOut />
 					Sign out

@@ -1,39 +1,22 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import { toastErrors } from '$lib/enhance';
+	import { confirmFirst, toastErrors } from '$lib/enhance';
 	import { formatBytes, formatCount } from '$lib/format';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
-	import { PERMISSION_BIT_FIELDS } from '$lib/permission-bits';
+	import GrantBitsPicker from '$lib/components/grant-bits-picker.svelte';
+	import { formatGrantActions } from '$lib/permission-bits';
 	import { ArrowLeft, Check, Pin, Trash2, X } from '@lucide/svelte';
 
 	let { data, form } = $props();
 	const c = $derived(data.cache);
-	// Retention-only (cq) holders may edit retention but not the full config.
+	// Destroy-only (cd) holders can view but not save configuration.
 	const canConfigure = $derived(data.permissions.canConfigure);
 	let submitting = $state(false);
 	let renaming = $state(false);
 	let deleting = $state(false);
 	let addingRoot = $state(false);
-
-	const ACCESS_BITS = PERMISSION_BIT_FIELDS.map(({ bit, label }) => ({
-		name: bit as string,
-		label
-	}));
-	const FULL_CONTROL_BITS = PERMISSION_BIT_FIELDS.map((f) => f.bit);
-	let accessChecked = $state<Record<string, boolean>>({});
-
-	function grantLabel(actions: string): string {
-		try {
-			const parsed = JSON.parse(actions);
-			return ACCESS_BITS.filter((b) => parsed[b.name] === 1)
-				.map((b) => b.label)
-				.join(', ');
-		} catch {
-			return actions;
-		}
-	}
 
 	const maxGib = $derived(
 		c.retentionMaxBytes != null
@@ -42,7 +25,7 @@
 	);
 </script>
 
-<div class="mx-auto max-w-xl px-8 py-8">
+<div class="mx-auto max-w-3xl px-8 py-8">
 	<a
 		href="/caches/{c.name}"
 		class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
@@ -126,6 +109,7 @@
 						type="number"
 						placeholder="No expiry"
 						value={c.retentionDays ?? ''}
+						disabled={!canConfigure}
 					/>
 				</div>
 				<div class="space-y-2">
@@ -138,6 +122,7 @@
 						min="0"
 						placeholder="No limit"
 						value={maxGib}
+						disabled={!canConfigure}
 					/>
 				</div>
 			</div>
@@ -175,6 +160,96 @@
 			{/if}
 		</div>
 	</form>
+
+	<hr class="my-10 border-border" />
+
+	<section class="space-y-4">
+		<div>
+			<h2 class="text-sm font-medium">Access</h2>
+			<p class="mt-1 text-sm text-muted-foreground">
+				Who can use this cache beyond {c.isPublic ? 'anonymous public pulls' : 'admins'}. Tokens are
+				permission snapshots — changes here don't alter already-minted tokens (revoke instead).
+			</p>
+		</div>
+
+		<div class="overflow-x-auto rounded-lg border">
+			<table class="w-full text-sm">
+				<thead class="border-b bg-muted/40 text-left text-xs text-muted-foreground">
+					<tr>
+						<th class="px-4 py-2.5 font-medium">Subject</th>
+						<th class="px-4 py-2.5 font-medium">Permissions</th>
+						<th class="px-4 py-2.5 font-medium">Source</th>
+						<th class="w-14 px-4 py-2.5"></th>
+					</tr>
+				</thead>
+				<tbody class="divide-y">
+					{#each data.access as grant (grant.id)}
+						<tr class="transition-colors hover:bg-muted/30">
+							<td class="px-4 py-2.5">
+								<a
+									href="/{grant.subjectType === 'group' ? 'groups' : 'users'}/{grant.subjectId}"
+									class="font-medium hover:underline">{grant.subjectLabel}</a
+								>
+							</td>
+							<td class="px-4 py-2.5 text-muted-foreground">{formatGrantActions(grant.actions)}</td>
+							<td class="px-4 py-2.5">
+								{#if grant.direct}
+									<span class="text-muted-foreground">this cache</span>
+								{:else}
+									<code class="rounded bg-muted px-1.5 py-0.5 text-xs">{grant.pattern}</code>
+									<span class="text-xs text-muted-foreground">
+										pattern grant — edit on the subject's page</span
+									>
+								{/if}
+							</td>
+							<td class="px-4 py-1.5 text-right">
+								{#if grant.direct && data.isAdmin}
+									<form method="POST" action="?/accessRemove" use:enhance={toastErrors()}>
+										<input type="hidden" name="id" value={grant.id} />
+										<input type="hidden" name="subject_type" value={grant.subjectType} />
+										<input type="hidden" name="subject_id" value={grant.subjectId} />
+										<Button type="submit" variant="ghost" size="icon" aria-label="Remove access">
+											<Trash2 class="size-4" />
+										</Button>
+									</form>
+								{/if}
+							</td>
+						</tr>
+					{:else}
+						<tr>
+							<td colspan="4" class="px-4 py-3 text-sm text-muted-foreground">
+								No grants apply to this cache.
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
+
+		{#if data.isAdmin}
+			<form method="POST" action="?/accessAdd" use:enhance={toastErrors()} class="space-y-3">
+				<div class="flex flex-wrap items-end gap-3">
+					<div class="min-w-56 flex-1 space-y-2">
+						<Label for="subject">Add access for</Label>
+						<select
+							id="subject"
+							name="subject"
+							class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+						>
+							{#each data.subjects as subject (subject.value)}
+								<option value={subject.value}>{subject.label}</option>
+							{/each}
+						</select>
+					</div>
+					<Button type="submit" variant="secondary">Add</Button>
+				</div>
+				<GrantBitsPicker />
+				{#if form?.accessError}
+					<p class="text-sm text-destructive">{form.accessError}</p>
+				{/if}
+			</form>
+		{/if}
+	</section>
 
 	<hr class="my-10 border-border" />
 
@@ -259,105 +334,6 @@
 
 	<hr class="my-10 border-border" />
 
-	<section class="space-y-4">
-		<div>
-			<h2 class="text-sm font-medium">Access</h2>
-			<p class="mt-1 text-sm text-muted-foreground">
-				Who can use this cache beyond {c.isPublic ? 'anonymous public pulls' : 'admins'}. Tokens are
-				permission snapshots — changes here don't alter already-minted tokens (revoke instead).
-			</p>
-		</div>
-
-		<ul class="divide-y rounded-lg border">
-			{#each data.access.direct as grant (grant.id)}
-				<li class="flex items-center justify-between gap-3 px-4 py-2.5">
-					<span class="text-sm">
-						<a
-							href="/{grant.subjectType === 'group' ? 'groups' : 'users'}/{grant.subjectId}"
-							class="font-medium hover:underline">{grant.subjectLabel}</a
-						>
-						<span class="text-muted-foreground">· {grantLabel(grant.actions)}</span>
-					</span>
-					{#if data.isAdmin}
-						<form method="POST" action="?/accessRemove" use:enhance={toastErrors()}>
-							<input type="hidden" name="id" value={grant.id} />
-							<input type="hidden" name="subject_type" value={grant.subjectType} />
-							<input type="hidden" name="subject_id" value={grant.subjectId} />
-							<Button type="submit" variant="ghost" size="icon" aria-label="Remove access">
-								<Trash2 class="size-4" />
-							</Button>
-						</form>
-					{/if}
-				</li>
-			{:else}
-				<li class="px-4 py-3 text-sm text-muted-foreground">No direct grants on this cache.</li>
-			{/each}
-			{#each data.access.viaPatterns as grant (grant.id)}
-				<li class="flex items-center justify-between gap-3 px-4 py-2.5">
-					<span class="text-sm">
-						<a
-							href="/{grant.subjectType === 'group' ? 'groups' : 'users'}/{grant.subjectId}"
-							class="font-medium hover:underline">{grant.subjectLabel}</a
-						>
-						<span class="text-muted-foreground">· {grantLabel(grant.actions)}</span>
-					</span>
-					<code
-						class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
-						title="Granted by this pattern — edit it from the subject's page">{grant.pattern}</code
-					>
-				</li>
-			{/each}
-		</ul>
-
-		{#if data.isAdmin}
-			<form method="POST" action="?/accessAdd" use:enhance={toastErrors()} class="space-y-3">
-				<div class="flex flex-wrap items-end gap-3">
-					<div class="min-w-56 flex-1 space-y-2">
-						<Label for="subject">Add access for</Label>
-						<select
-							id="subject"
-							name="subject"
-							class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-						>
-							{#each data.subjects as subject (subject.value)}
-								<option value={subject.value}>{subject.label}</option>
-							{/each}
-						</select>
-					</div>
-					<Button
-						type="button"
-						variant="ghost"
-						size="sm"
-						onclick={() => {
-							for (const bit of FULL_CONTROL_BITS) accessChecked[bit] = true;
-						}}
-					>
-						Full control
-					</Button>
-					<Button type="submit" variant="secondary">Add</Button>
-				</div>
-				<div class="flex flex-wrap gap-4">
-					{#each ACCESS_BITS as bit (bit.name)}
-						<label class="flex items-center gap-2 text-sm">
-							<input
-								name={bit.name}
-								type="checkbox"
-								bind:checked={accessChecked[bit.name]}
-								class="size-4 rounded border-input text-primary"
-							/>
-							{bit.label}
-						</label>
-					{/each}
-				</div>
-				{#if form?.accessError}
-					<p class="text-sm text-destructive">{form.accessError}</p>
-				{/if}
-			</form>
-		{/if}
-	</section>
-
-	<hr class="my-10 border-border" />
-
 	{#if canConfigure}
 		<section class="space-y-4">
 			<div>
@@ -404,17 +380,15 @@
 				method="POST"
 				action="?/delete"
 				class="mt-4"
-				use:enhance={toastErrors(({ cancel }) => {
-					if (!confirm(`Delete cache "${c.name}"? Clients can no longer pull from it.`)) {
-						cancel();
-						return;
-					}
-					deleting = true;
-					return async ({ update }) => {
-						await update();
-						deleting = false;
-					};
-				})}
+				use:enhance={toastErrors(
+					confirmFirst(`Delete cache "${c.name}"? Clients can no longer pull from it.`, () => {
+						deleting = true;
+						return async ({ update }) => {
+							await update();
+							deleting = false;
+						};
+					})
+				)}
 			>
 				<Button type="submit" variant="destructive" disabled={deleting}>
 					<Trash2 class="size-4" />

@@ -29,6 +29,13 @@
       "when": 1783883053778,
       "tag": "0003_user_status",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1783894997269,
+      "tag": "0004_group-member-user-index",
+      "breakpoints": true
     }
   ]
 }

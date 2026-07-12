@@ -1,52 +1,30 @@
 import { error, fail } from '@sveltejs/kit';
-import { mintAndStore } from '$lib/server/tokens';
+import {
+	auditTokenIssue,
+	boundTokenScope,
+	listUserTokens,
+	mintAndStore,
+	revokeUserToken
+} from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
-import { parseTokenBits, scopeDenial, tokenScopeOptions } from '$lib/server/auth/permissions';
-import { writeAudit } from '$lib/server/audit';
+import { tokenScopeOptions } from '$lib/server/auth/permissions';
 import type { PageServerLoad, Actions } from './$types';
-
-interface TokenRow {
-	id: string;
-	name: string;
-	permissions: string;
-	expires_at: number | null;
-	revoked_at: number | null;
-	created_at: number;
-}
 
 export const load: PageServerLoad = async ({ platform, locals }) => {
 	if (!locals.user) throw error(401, 'Not signed in');
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
-	const [{ results: tokens }, cacheNames, access] = await Promise.all([
-		db
-			.prepare(
-				`SELECT id, name, permissions, expires_at, revoked_at, created_at
-				 FROM api_token WHERE user_id = ?1 ORDER BY created_at DESC`
-			)
-			.bind(locals.user.id)
-			.all<TokenRow>(),
+	const [tokens, cacheNames, access] = await Promise.all([
+		listUserTokens(db, locals.user.id),
 		listCacheNames(db),
 		effectiveAccessOf(locals, db)
 	]);
 
-	const now = Math.floor(Date.now() / 1000);
 	return {
 		scopeOptions: tokenScopeOptions(access, cacheNames),
-		tokens: tokens.map((t) => ({
-			id: t.id,
-			name: t.name,
-			scope: t.permissions,
-			createdAt: t.created_at,
-			expiresAt: t.expires_at,
-			status: t.revoked_at
-				? ('revoked' as const)
-				: t.expires_at && t.expires_at < now
-					? ('expired' as const)
-					: ('active' as const)
-		}))
+		tokens
 	};
 };
 
@@ -63,13 +41,9 @@ export const actions: Actions = {
 		const name = String(form.get('name') ?? '').trim();
 		if (!name) return fail(400, { error: 'Give the token a name.' });
 
-		const bits = parseTokenBits(form);
-		const cacheScope = String(form.get('cache') ?? '*');
-
 		// Mint-time bounding: a token may only carry what its creator holds.
-		const access = await effectiveAccessOf(locals, env.ATTIC_DB);
-		const denial = scopeDenial(access, { pattern: cacheScope, bits });
-		if (denial) return fail(403, { error: denial });
+		const bound = await boundTokenScope(form, locals, env.ATTIC_DB);
+		if (!bound.ok) return fail(403, { error: bound.denial });
 
 		// The plaintext token is returned exactly once; only its hash is stored.
 		const minted = await mintAndStore(
@@ -77,18 +51,9 @@ export const actions: Actions = {
 			env.JWT_HS256_SECRET_BASE64,
 			locals.user.id,
 			name,
-			{
-				cacheScope,
-				bits,
-				days: Math.max(1, Math.min(3650, Number(form.get('expiry_days') ?? 90)))
-			}
+			bound.scope
 		);
-		await writeAudit(env.ATTIC_DB, {
-			userId: locals.user.id,
-			action: 'token.issue',
-			target: minted.jti,
-			detail: JSON.stringify({ scope: cacheScope, bits })
-		});
+		await auditTokenIssue(env.ATTIC_DB, locals.user.id, minted.jti, bound.scope);
 		return { issued: { name, token: minted.token } };
 	},
 
@@ -98,11 +63,7 @@ export const actions: Actions = {
 		if (!db) throw error(500, 'Database binding unavailable');
 
 		const id = String((await request.formData()).get('id') ?? '');
-		await db
-			.prepare('UPDATE api_token SET revoked_at = ?1 WHERE id = ?2 AND user_id = ?3')
-			.bind(Math.floor(Date.now() / 1000), id, locals.user.id)
-			.run();
-		await writeAudit(db, { userId: locals.user.id, action: 'token.revoke', target: id });
+		await revokeUserToken(db, id, locals.user.id, locals.user.id);
 
 		return { revoked: true };
 	}

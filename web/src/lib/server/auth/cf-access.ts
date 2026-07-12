@@ -1,13 +1,19 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
-import { eq, sql } from 'drizzle-orm';
+import { eq, or, sql } from 'drizzle-orm';
 import type { RequestEvent } from '@sveltejs/kit';
 import { getDb, schema } from '$lib/server/db';
-import { activateIfPending, extractGroups, shouldAutoActivate, syncUserGroups } from './group-sync';
-import { isActiveUser } from './guard';
-import { writeAudit } from '$lib/server/audit';
-import type { SessionUser, UserRole, UserStatus } from './types';
+import { base64urlDecode } from '$lib/server/attic/token';
+import { syncGroupsAndMaybeActivate } from './group-sync';
+import { isActiveUser, type SessionUser, type UserRole, type UserStatus } from './types';
 
 type Env = App.Platform['env'];
+
+/** How CF-Access-provisioned user ids are formed from the Access subject. */
+export const CF_ACCESS_ID_PREFIX = 'cfaccess:';
+
+export function isCfAccessId(userId: string): boolean {
+	return userId.startsWith(CF_ACCESS_ID_PREFIX);
+}
 
 // Cache one JWKS resolver per team domain across requests.
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
@@ -50,13 +56,23 @@ function b64url(buf: ArrayBuffer): string {
 	return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 
+// JSON so fields (including ids containing colons) never need delimiter
+// gymnastics; the payload is HMAC-signed opaque data with no format constraint.
+interface SessionCookiePayload {
+	id: string;
+	role: UserRole;
+	exp: number;
+}
+
 async function mintSessionToken(userId: string, role: UserRole, secret: string): Promise<string> {
-	const expiry = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
-	// userId may contain colons (e.g. "cfaccess:<sub>"), so we parse from the right on verify.
-	const payload = `${userId}:${role}:${expiry}`;
+	const payload = JSON.stringify({
+		id: userId,
+		role,
+		exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS
+	} satisfies SessionCookiePayload);
 	const key = await importHmacKey(secret);
 	const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
-	return `${payload}.${b64url(sig)}`;
+	return `${b64url(new TextEncoder().encode(payload).buffer as ArrayBuffer)}.${b64url(sig)}`;
 }
 
 async function verifySessionToken(
@@ -65,33 +81,38 @@ async function verifySessionToken(
 ): Promise<Pick<SessionUser, 'id' | 'role'> | null> {
 	const dotIdx = value.lastIndexOf('.');
 	if (dotIdx === -1) return null;
-	const payload = value.slice(0, dotIdx);
+	const payloadB64 = value.slice(0, dotIdx);
 	const sigB64 = value.slice(dotIdx + 1);
 
-	// Split from the right: userId may contain colons (e.g. "cfaccess:<sub>").
-	const parts = payload.split(':');
-	if (parts.length < 3) return null;
-	const expiryStr = parts[parts.length - 1];
-	const role = parts[parts.length - 2];
-	const userId = parts.slice(0, parts.length - 2).join(':');
-
-	const expiry = parseInt(expiryStr, 10);
-	if (isNaN(expiry) || Math.floor(Date.now() / 1000) > expiry) return null;
-	if (role !== 'admin' && role !== 'member') return null;
+	let payloadBytes: Uint8Array;
+	let sigBytes: Uint8Array;
+	try {
+		payloadBytes = base64urlDecode(payloadB64);
+		sigBytes = base64urlDecode(sigB64);
+	} catch {
+		return null;
+	}
 
 	const key = await importHmacKey(secret);
-	const sigBytes = Uint8Array.from(atob(sigB64.replace(/-/g, '+').replace(/_/g, '/')), (c) =>
-		c.charCodeAt(0)
-	);
 	const valid = await crypto.subtle.verify(
 		'HMAC',
 		key,
-		sigBytes,
-		new TextEncoder().encode(payload)
+		sigBytes as BufferSource,
+		payloadBytes as BufferSource
 	);
 	if (!valid) return null;
 
-	return { id: userId, role: role as UserRole };
+	let payload: SessionCookiePayload;
+	try {
+		payload = JSON.parse(new TextDecoder().decode(payloadBytes));
+	} catch {
+		return null;
+	}
+	if (typeof payload.id !== 'string' || !payload.id) return null;
+	if (payload.role !== 'admin' && payload.role !== 'member') return null;
+	if (typeof payload.exp !== 'number' || Math.floor(Date.now() / 1000) > payload.exp) return null;
+
+	return { id: payload.id, role: payload.role };
 }
 
 /**
@@ -157,26 +178,20 @@ export async function resolveCfAccessUser(
 	// Full D1 resolution (first visit or expired/invalid cookie).
 	const user = await upsertAccessUser(env, { sub, email, name: payload.name ?? email });
 
-	// Access can forward IdP groups as a custom claim; sync only when the
-	// claim is present so an Access JWT without it never wipes memberships.
+	// Access can forward IdP groups as a custom claim; the shared orchestration
+	// skips sync when the claim is absent so an Access JWT without it never
+	// wipes memberships. Sync failures must not block login.
 	if (env.OIDC_GROUPS_CLAIM) {
-		const groups = extractGroups(payload as Record<string, unknown>, env.OIDC_GROUPS_CLAIM);
-		if (groups !== null) {
-			await syncUserGroups(env.ATTIC_DB, user.id, groups).catch((e) =>
-				console.warn(`cf-access group sync failed: ${e}`)
-			);
-			if (user.status === 'pending' && shouldAutoActivate(groups, env.OIDC_ACTIVATION_GROUP)) {
-				if (await activateIfPending(env.ATTIC_DB, user.id).catch(() => false)) {
-					user.status = 'active';
-					await writeAudit(env.ATTIC_DB, {
-						userId: user.id,
-						action: 'user.activate',
-						target: user.id,
-						detail: 'auto:oidc-group'
-					});
-				}
-			}
-		}
+		const activated = await syncGroupsAndMaybeActivate(
+			env.ATTIC_DB,
+			user.id,
+			payload as Record<string, unknown>,
+			{ groupsClaim: env.OIDC_GROUPS_CLAIM, activationGroup: env.OIDC_ACTIVATION_GROUP }
+		).catch((e) => {
+			console.warn(`cf-access group sync failed: ${e}`);
+			return false;
+		});
+		if (activated) user.status = 'active';
 	}
 
 	// Mint a fresh session cookie to skip D1 on subsequent requests. Pending
@@ -200,42 +215,45 @@ async function upsertAccessUser(
 	identity: { sub: string; email: string | null; name: string | null }
 ): Promise<SessionUser> {
 	const db = getDb(env.ATTIC_DB);
-	const id = `cfaccess:${identity.sub}`;
+	const id = `${CF_ACCESS_ID_PREFIX}${identity.sub}`;
 	const email = identity.email ?? `${identity.sub}@cf-access.local`;
 	const now = new Date();
 
-	// Bootstrap: the deployment's first user (and any user while no admin exists)
-	// is promoted to admin so there is always someone who can manage the rest. The
-	// very first user also becomes the protected owner.
-	const [adminExists, anyUser] = await Promise.all([hasAdmin(env), hasAnyUser(env)]);
+	// One lookup covers both match rules; prefer the email match so a
+	// pre-provisioned (invited) account adopts its assigned role instead of
+	// colliding on the unique email, falling back to the Access-subject id for
+	// accounts created before invites existed.
+	const rows = await db
+		.select()
+		.from(schema.user)
+		.where(or(eq(schema.user.email, email), eq(schema.user.id, id)))
+		.limit(2);
+	const existing = rows.find((u) => u.email === email) ?? rows[0];
 
-	// Match by email first so a pre-provisioned (invited) account adopts its
-	// assigned role instead of colliding on the unique email; fall back to the
-	// Access-subject id for accounts created before invites existed.
-	let existing = await db.select().from(schema.user).where(eq(schema.user.email, email)).limit(1);
-	if (existing.length === 0) {
-		existing = await db.select().from(schema.user).where(eq(schema.user.id, id)).limit(1);
-	}
-	if (existing.length > 0) {
-		const u = existing[0];
-		let role = (u.role as UserRole) ?? 'member';
-		if (role === 'member' && !adminExists) {
-			await db.update(schema.user).set({ role: 'admin' }).where(eq(schema.user.id, u.id));
+	if (existing) {
+		let role = (existing.role as UserRole) ?? 'member';
+		// Bootstrap edge: while no admin exists, whoever signs in is promoted so
+		// there is always someone who can manage the rest.
+		if (role === 'member' && !(await hasAdmin(env))) {
+			await db.update(schema.user).set({ role: 'admin' }).where(eq(schema.user.id, existing.id));
 			role = 'admin';
 		}
 		return {
-			id: u.id,
+			id: existing.id,
 			sub: identity.sub,
 			provider: 'cf-access',
-			email: u.email,
-			name: u.name,
+			email: existing.email,
+			name: existing.name,
 			role,
-			status: (u.status as UserStatus) ?? 'pending'
+			status: (existing.status as UserStatus) ?? 'pending'
 		};
 	}
 
+	// Bootstrap: the deployment's first user (and any user while no admin
+	// exists) is promoted to admin. The very first user also becomes the
+	// protected owner and is active; everyone else waits for activation.
+	const [adminExists, anyUser] = await Promise.all([hasAdmin(env), hasAnyUser(env)]);
 	const role: UserRole = adminExists ? 'member' : 'admin';
-	// The bootstrap owner is active; everyone else waits for activation.
 	const status: UserStatus = anyUser ? 'pending' : 'active';
 	await db.insert(schema.user).values({
 		id,

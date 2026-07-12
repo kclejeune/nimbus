@@ -34,3 +34,28 @@ export const PERMISSION_BIT_FIELDS: PermissionBitField[] = [
 	{ bit: 'cr', field: 'configure_cache', label: 'Configure' },
 	{ bit: 'cd', field: 'destroy_cache', label: 'Destroy cache' }
 ];
+
+/** Checkbox options for grant forms, which post the bit itself as the field
+ *  name (see parseGrantActions). */
+export const GRANT_BIT_OPTIONS = PERMISSION_BIT_FIELDS.map(({ bit, label }) => ({
+	name: bit as string,
+	label
+}));
+
+/** Human label for a parsed bits object ("Pull, Push, …"; "—" when empty). */
+export function formatBits(parsed: Record<string, unknown>): string {
+	return (
+		GRANT_BIT_OPTIONS.filter((b) => parsed[b.name] === 1)
+			.map((b) => b.label)
+			.join(', ') || '—'
+	);
+}
+
+/** Human label for a grant row's JSON-encoded actions. */
+export function formatGrantActions(actions: string): string {
+	try {
+		return formatBits(JSON.parse(actions));
+	} catch {
+		return actions;
+	}
+}

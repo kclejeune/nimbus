@@ -12,13 +12,8 @@ import {
 	partitionCacheGrants,
 	type CacheGrantRow
 } from '$lib/server/auth/permissions';
-import { insertGrant, removeGrantRow } from '$lib/server/auth/grants';
-import {
-	effectiveAccessOf,
-	requireAdmin,
-	requireAnyCachePermission,
-	requireCachePermission
-} from '$lib/server/auth/guard';
+import { decodeSubject, encodeSubject, insertGrant, removeGrantRow } from '$lib/server/auth/grants';
+import { effectiveAccessOf, requireAdmin, requireCachePermission } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { PageServerLoad, Actions } from './$types';
@@ -59,6 +54,22 @@ function parseUpstreamList(raw: string): string[] | null {
 	return urls;
 }
 
+/** Fetch rows by id when the caller has a specific id list (non-admin label
+ *  lookups); avoids shipping whole tables for a handful of labels. */
+async function rowsByIds<T>(
+	db: App.Platform['env']['ATTIC_DB'],
+	selectSql: string,
+	ids: string[]
+): Promise<T[]> {
+	if (ids.length === 0) return [];
+	const placeholders = ids.map((_, i) => `?${i + 1}`).join(', ');
+	const { results } = await db
+		.prepare(`${selectSql} WHERE id IN (${placeholders})`)
+		.bind(...ids)
+		.all<T>();
+	return results;
+}
+
 async function getCache(db: App.Platform['env']['ATTIC_DB'], name: string): Promise<CacheRow> {
 	const cache = await db
 		.prepare(
@@ -76,41 +87,69 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	const env = platform?.env;
 	if (!env) throw error(500, 'Platform bindings unavailable');
 
-	const cache = await getCache(env.ATTIC_DB, params.name);
-
-	const access = await effectiveAccessOf(locals, env.ATTIC_DB);
+	const [cache, access] = await Promise.all([
+		getCache(env.ATTIC_DB, params.name),
+		effectiveAccessOf(locals, env.ATTIC_DB)
+	]);
 	const canConfigure = canOnCache(access, 'cr', params.name);
-	const canRetention = canConfigure || canOnCache(access, 'cq', params.name);
 	const canDestroy = canOnCache(access, 'cd', params.name);
 	// Settings is a management surface: pull-only users have nothing to do here.
-	if (!canRetention && !canDestroy) throw error(403, 'Permission denied');
+	if (!canConfigure && !canDestroy) throw error(403, 'Permission denied');
 
 	const isAdmin = locals.user!.role === 'admin';
-	const [roots, grantRows, userRows, groupRows] = await Promise.all([
+	const [roots, grantRows, adminUsers, adminGroups] = await Promise.all([
 		listGcRoots(env, cache.id),
+		// Only this cache's exact-name rows and glob rows can apply here (see
+		// partitionCacheGrants) — other caches' exact grants never match.
 		env.ATTIC_DB.prepare(
-			'SELECT id, subject_type, subject_id, pattern, actions FROM permission_grant'
-		).all<CacheGrantRow>(),
-		env.ATTIC_DB.prepare('SELECT id, name, email FROM user ORDER BY name').all<{
-			id: string;
-			name: string;
-			email: string;
-		}>(),
-		env.ATTIC_DB.prepare('SELECT id, name FROM groups ORDER BY name').all<{
-			id: string;
-			name: string;
-		}>()
+			`SELECT id, subject_type, subject_id, pattern, actions FROM permission_grant
+			 WHERE pattern = ?1 OR pattern GLOB '*[*?]*'`
+		)
+			.bind(params.name)
+			.all<CacheGrantRow>(),
+		// Admins get the full lists (they also feed the add-access picker).
+		isAdmin
+			? env.ATTIC_DB.prepare('SELECT id, name, email FROM user ORDER BY name').all<{
+					id: string;
+					name: string;
+					email: string;
+				}>()
+			: null,
+		isAdmin
+			? env.ATTIC_DB.prepare('SELECT id, name FROM groups ORDER BY name').all<{
+					id: string;
+					name: string;
+				}>()
+			: null
 	]);
 
-	// Emails are admin-only PII; non-admin viewers see display names.
-	const userLabel = new Map(
-		userRows.results.map((u) => [u.id, isAdmin ? `${u.name} (${u.email})` : u.name])
-	);
-	const groupLabel = new Map(groupRows.results.map((g) => [g.id, g.name]));
+	const { direct, viaPatterns } = partitionCacheGrants(grantRows.results, params.name);
+	const applicable = [...direct, ...viaPatterns];
+
+	// Emails are admin-only PII; non-admin viewers see display names, resolved
+	// only for the subjects that actually appear on this page.
+	const subjectIds = (type: string) => [
+		...new Set(applicable.filter((g) => g.subject_type === type).map((g) => g.subject_id))
+	];
+	const [users, groupRows] = isAdmin
+		? [adminUsers!.results, adminGroups!.results]
+		: await Promise.all([
+				rowsByIds<{ id: string; name: string; email: string }>(
+					env.ATTIC_DB,
+					'SELECT id, name, email FROM user',
+					subjectIds('user')
+				),
+				rowsByIds<{ id: string; name: string }>(
+					env.ATTIC_DB,
+					'SELECT id, name FROM groups',
+					subjectIds('group')
+				)
+			]);
+	const userLabel = new Map(users.map((u) => [u.id, isAdmin ? `${u.name} (${u.email})` : u.name]));
+	const groupLabel = new Map(groupRows.map((g) => [g.id, g.name]));
 	const subjectLabel = (g: CacheGrantRow) =>
 		(g.subject_type === 'user' ? userLabel.get(g.subject_id) : groupLabel.get(g.subject_id)) ??
 		g.subject_id;
-	const { direct, viaPatterns } = partitionCacheGrants(grantRows.results, params.name);
 	const describe = (g: CacheGrantRow) => ({
 		id: g.id,
 		subjectType: g.subject_type,
@@ -139,16 +178,24 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 			upstreams
 		},
 		roots,
-		permissions: { canConfigure, canRetention, canDestroy },
+		permissions: { canConfigure, canDestroy },
 		isAdmin,
-		access: { direct: direct.map(describe), viaPatterns: viaPatterns.map(describe) },
+		// Direct (exact-name, editable here) rows first, then read-only rows
+		// contributed by glob patterns.
+		access: [
+			...direct.map((g) => ({ ...describe(g), direct: true })),
+			...viaPatterns.map((g) => ({ ...describe(g), direct: false }))
+		],
 		subjects: isAdmin
 			? [
-					...userRows.results.map((u) => ({
-						value: `user:${u.id}`,
+					...users.map((u) => ({
+						value: encodeSubject('user', u.id),
 						label: `${u.name} (${u.email})`
 					})),
-					...groupRows.results.map((g) => ({ value: `group:${g.id}`, label: `${g.name} (group)` }))
+					...groupRows.map((g) => ({
+						value: encodeSubject('group', g.id),
+						label: `${g.name} (group)`
+					}))
 				]
 			: []
 	};
@@ -159,14 +206,13 @@ export const actions: Actions = {
 		if (!locals.user) throw error(401, 'Not signed in');
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 
-		const access = await requireAnyCachePermission(
+		await requireCachePermission(
 			locals,
 			platform.env.ATTIC_DB,
-			['cq', 'cr'],
+			'cr',
 			params.name,
 			'configure cache'
 		);
-		const canConfigure = canOnCache(access, 'cr', params.name);
 
 		const form = await request.formData();
 		const isPublic = form.get('is_public') === 'on';
@@ -188,32 +234,22 @@ export const actions: Actions = {
 		}
 
 		try {
-			// Retention-only permission (cq without cr) applies only the retention
-			// fields; the visibility/priority/compression/upstream inputs are ignored.
-			await configureCache(
-				platform.env,
-				params.name,
-				canConfigure
-					? {
-							is_public: isPublic,
-							priority,
-							compression,
-							retention_period: retention,
-							retention_max_bytes: maxBytes
-						}
-					: { retention_period: retention, retention_max_bytes: maxBytes }
-			);
+			await configureCache(platform.env, params.name, {
+				is_public: isPublic,
+				priority,
+				compression,
+				retention_period: retention,
+				retention_max_bytes: maxBytes
+			});
 		} catch (e) {
 			const status = e instanceof CacheConfigError ? e.status : 502;
 			return fail(status, { error: `Failed to save: ${e instanceof Error ? e.message : e}` });
 		}
 
 		// The one column configureCache doesn't cover.
-		if (canConfigure) {
-			await platform.env.ATTIC_DB.prepare('UPDATE cache SET upstream_caches = ?1 WHERE name = ?2')
-				.bind(JSON.stringify(upstreams), params.name)
-				.run();
-		}
+		await platform.env.ATTIC_DB.prepare('UPDATE cache SET upstream_caches = ?1 WHERE name = ?2')
+			.bind(JSON.stringify(upstreams), params.name)
+			.run();
 
 		await writeAudit(platform.env.ATTIC_DB, {
 			userId: locals.user.id,
@@ -229,13 +265,7 @@ export const actions: Actions = {
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 		const db = platform.env.ATTIC_DB;
 
-		await requireAnyCachePermission(
-			locals,
-			db,
-			['cq', 'cr'],
-			params.name,
-			'configure cache retention'
-		);
+		await requireCachePermission(locals, db, 'cr', params.name, 'configure cache retention');
 
 		const form = await request.formData();
 		const hash = parseStorePathHash(String(form.get('path') ?? ''));
@@ -267,13 +297,7 @@ export const actions: Actions = {
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 		const db = platform.env.ATTIC_DB;
 
-		await requireAnyCachePermission(
-			locals,
-			db,
-			['cq', 'cr'],
-			params.name,
-			'configure cache retention'
-		);
+		await requireCachePermission(locals, db, 'cr', params.name, 'configure cache retention');
 
 		const hash = String((await request.formData()).get('hash') ?? '');
 		const cache = await getCache(db, params.name);
@@ -299,20 +323,15 @@ export const actions: Actions = {
 			return fail(400, { renameError: 'That is already the cache name.' });
 		}
 
-		// Renaming is a configure on the source and a create on the target.
+		// Renaming is a configure on the source. Claiming the target name needs
+		// no extra permission — cache creation is open to any active user, and
+		// renameCache 409s if the name is taken.
 		await requireCachePermission(
 			locals,
 			platform.env.ATTIC_DB,
 			'cr',
 			params.name,
 			'configure cache'
-		);
-		await requireCachePermission(
-			locals,
-			platform.env.ATTIC_DB,
-			'cc',
-			newName,
-			'create cache (target name)'
 		);
 
 		try {
@@ -364,22 +383,15 @@ export const actions: Actions = {
 		const db = platform.env.ATTIC_DB;
 
 		const form = await request.formData();
-		const subject = String(form.get('subject') ?? '');
-		// Split on the FIRST colon only — subject ids may contain colons
-		// (cfaccess:<sub>), and JS split's limit discards the remainder.
-		const sep = subject.indexOf(':');
-		const subjectType = sep === -1 ? '' : subject.slice(0, sep);
-		const subjectId = sep === -1 ? '' : subject.slice(sep + 1);
-		if ((subjectType !== 'user' && subjectType !== 'group') || !subjectId) {
-			return fail(400, { accessError: 'Pick a user or group.' });
-		}
+		const subject = decodeSubject(String(form.get('subject') ?? ''));
+		if (!subject) return fail(400, { accessError: 'Pick a user or group.' });
 		const actions = parseGrantActions(form);
 		if (Object.keys(actions).length === 0) {
 			return fail(400, { accessError: 'Pick at least one permission.' });
 		}
 		await insertGrant(db, {
-			subjectType,
-			subjectId,
+			subjectType: subject.type,
+			subjectId: subject.id,
 			pattern: params.name,
 			actions,
 			actorId: locals.user!.id

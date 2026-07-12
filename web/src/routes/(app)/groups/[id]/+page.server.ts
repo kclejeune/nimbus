@@ -1,6 +1,7 @@
 import { error, fail } from '@sveltejs/kit';
 import { requireAdmin } from '$lib/server/auth/guard';
-import { grantActions } from '$lib/server/auth/grants';
+import { annotateGrantMatches, grantActions } from '$lib/server/auth/grants';
+import { listCacheNames } from '$lib/server/db/queries';
 import { writeAudit } from '$lib/server/audit';
 import type { PageServerLoad, Actions } from './$types';
 
@@ -9,13 +10,11 @@ export const load: PageServerLoad = async ({ platform, locals, params }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
-	const group = await db
-		.prepare('SELECT id, name, description, oidc_group FROM groups WHERE id = ?1')
-		.bind(params.id)
-		.first<{ id: string; name: string; description: string | null; oidc_group: string | null }>();
-	if (!group) throw error(404, 'Group not found');
-
-	const [members, grants, users] = await Promise.all([
+	const [group, members, grants, users, cacheNames] = await Promise.all([
+		db
+			.prepare('SELECT id, name, description, oidc_group FROM groups WHERE id = ?1')
+			.bind(params.id)
+			.first<{ id: string; name: string; description: string | null; oidc_group: string | null }>(),
 		db
 			.prepare(
 				`SELECT u.id, u.name, u.email, m.source FROM group_member m
@@ -32,8 +31,10 @@ export const load: PageServerLoad = async ({ platform, locals, params }) => {
 			.all<{ id: string; pattern: string; actions: string }>(),
 		db
 			.prepare('SELECT id, name, email FROM user ORDER BY name')
-			.all<{ id: string; name: string; email: string }>()
+			.all<{ id: string; name: string; email: string }>(),
+		listCacheNames(db)
 	]);
+	if (!group) throw error(404, 'Group not found');
 
 	return {
 		group: {
@@ -43,8 +44,9 @@ export const load: PageServerLoad = async ({ platform, locals, params }) => {
 			oidcGroup: group.oidc_group
 		},
 		members: members.results,
-		grants: grants.results,
-		allUsers: users.results
+		grants: annotateGrantMatches(grants.results, cacheNames),
+		allUsers: users.results,
+		cacheNames
 	};
 };
 

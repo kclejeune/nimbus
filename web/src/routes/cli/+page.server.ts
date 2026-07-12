@@ -1,9 +1,8 @@
 import { error, fail, redirect } from '@sveltejs/kit';
-import { mintAndStore } from '$lib/server/tokens';
+import { auditTokenIssue, boundTokenScope, mintAndStore } from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
-import { effectiveAccessOf, requireActive } from '$lib/server/auth/guard';
-import { parseTokenBits, scopeDenial, tokenScopeOptions } from '$lib/server/auth/permissions';
-import { writeAudit } from '$lib/server/audit';
+import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { tokenScopeOptions } from '$lib/server/auth/permissions';
 import type { PageServerLoad, Actions } from './$types';
 
 function parsePort(raw: string | null): number | null {
@@ -13,7 +12,6 @@ function parsePort(raw: string | null): number | null {
 
 export const load: PageServerLoad = async ({ url, locals, platform }) => {
 	if (!locals.user) throw error(401, 'Not signed in');
-	requireActive(locals);
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
@@ -28,7 +26,9 @@ export const load: PageServerLoad = async ({ url, locals, platform }) => {
 		state,
 		label: url.searchParams.get('label') ?? 'attic CLI',
 		hostname: url.searchParams.get('hostname') ?? '',
-		scopeOptions: tokenScopeOptions(await effectiveAccessOf(locals, db), await listCacheNames(db)),
+		scopeOptions: tokenScopeOptions(
+			...(await Promise.all([effectiveAccessOf(locals, db), listCacheNames(db)]))
+		),
 		user: { email: locals.user.email, name: locals.user.name }
 	};
 };
@@ -36,7 +36,6 @@ export const load: PageServerLoad = async ({ url, locals, platform }) => {
 export const actions: Actions = {
 	authorize: async ({ request, locals, platform }) => {
 		if (!locals.user) throw error(401, 'Not signed in');
-		requireActive(locals);
 		const env = platform?.env;
 		if (!env?.ATTIC_DB) throw error(500, 'Database binding unavailable');
 		if (!env.JWT_HS256_SECRET_BASE64) {
@@ -48,34 +47,17 @@ export const actions: Actions = {
 		const state = String(form.get('state') ?? '');
 		if (port === null || !state) return fail(400, { error: 'Invalid request.' });
 
-		const bits = parseTokenBits(form);
-		if (Object.keys(bits).length === 0) {
-			return fail(400, { error: 'Grant at least one permission.' });
-		}
-		const cacheScope = String(form.get('cache') ?? '*');
-		const denial = scopeDenial(await effectiveAccessOf(locals, env.ATTIC_DB), {
-			pattern: cacheScope,
-			bits
-		});
-		if (denial) return fail(403, { error: denial });
+		const bound = await boundTokenScope(form, locals, env.ATTIC_DB);
+		if (!bound.ok) return fail(403, { error: bound.denial });
 
 		const minted = await mintAndStore(
 			env.ATTIC_DB,
 			env.JWT_HS256_SECRET_BASE64,
 			locals.user.id,
 			String(form.get('label') ?? 'attic CLI').slice(0, 80),
-			{
-				cacheScope,
-				bits,
-				days: Math.max(1, Math.min(3650, Number(form.get('expiry_days') ?? 90)))
-			}
+			bound.scope
 		);
-		await writeAudit(env.ATTIC_DB, {
-			userId: locals.user.id,
-			action: 'token.issue',
-			target: minted.jti,
-			detail: JSON.stringify({ scope: cacheScope, bits, via: 'cli-loopback' })
-		});
+		await auditTokenIssue(env.ATTIC_DB, locals.user.id, minted.jti, bound.scope, 'cli-loopback');
 
 		// Hand the token back to the CLI's loopback listener. The host is fixed to
 		// 127.0.0.1 (only the port is caller-supplied), so there is no open-redirect.

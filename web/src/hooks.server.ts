@@ -1,8 +1,9 @@
 import { building } from '$app/environment';
 import { svelteKitHandler } from 'better-auth/svelte-kit';
-import type { Handle } from '@sveltejs/kit';
+import { redirect, type Handle } from '@sveltejs/kit';
 import { createAuth, type Auth } from '$lib/server/auth/auth';
 import { resolveCfAccessUser } from '$lib/server/auth/cf-access';
+import { isActiveUser } from '$lib/server/auth/guard';
 import type { SessionUser, UserRole, UserStatus } from '$lib/server/auth/types';
 
 // Cache the better-auth instance per D1 binding (stable per isolate).
@@ -47,6 +48,20 @@ export const handle: Handle = async ({ event, resolve }) => {
 	} else {
 		// Otherwise fall back to a per-request Cloudflare Access assertion.
 		event.locals.user = await resolveCfAccessUser(event, env);
+	}
+
+	// Activation wall, enforced centrally so it covers form actions and
+	// +server endpoints, not just page loads. Gated by route group — the app
+	// dashboard and the CLI token flows — so /login, /pending, and the auth
+	// API (sign-in/sign-out) stay reachable by construction, and new public
+	// routes aren't silently walled. loadEffectiveAccess independently
+	// resolves non-active users to no access.
+	const user = event.locals.user;
+	const routeId = event.route.id;
+	const gated = routeId != null && (routeId.startsWith('/(app)') || routeId.startsWith('/cli'));
+	if (gated && user && !isActiveUser(user)) {
+		if (event.request.method === 'GET') redirect(302, '/pending');
+		return new Response('Account pending approval', { status: 403 });
 	}
 
 	return svelteKitHandler({ event, resolve, auth, building });

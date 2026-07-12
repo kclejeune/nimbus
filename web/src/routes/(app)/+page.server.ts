@@ -38,7 +38,8 @@ export const load: PageServerLoad = async ({ platform }) => {
 		orphanNars,
 		orphanChunks,
 		globalLimit,
-		ingest
+		ingest,
+		proxyPublicKey
 	] = await Promise.all([
 		db.prepare('SELECT COUNT(*) AS n FROM cache WHERE deleted_at IS NULL').first<Count>(),
 		db
@@ -73,7 +74,12 @@ export const load: PageServerLoad = async ({ platform }) => {
 		db
 			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
 			.first<{ value: string }>(),
-		ingestStmt.all<{ bucket: string; paths: number; bytes: number }>()
+		ingestStmt.all<{ bucket: string; paths: number; bytes: number }>(),
+		platform?.env
+			? getProxyKeypair(platform.env)
+					.then(extractPublicKey)
+					.catch(() => null)
+			: null
 	]);
 
 	// Zero-fill so the chart doesn't interpolate across idle days.
@@ -99,11 +105,7 @@ export const load: PageServerLoad = async ({ platform }) => {
 		globalMaxBytes: globalLimit ? Number(globalLimit.value) : null,
 		buckets,
 		cacheBaseUrl: platform?.env.CACHE_BASE_URL ?? null,
-		proxyPublicKey: platform?.env
-			? await getProxyKeypair(platform.env)
-					.then(extractPublicKey)
-					.catch(() => null)
-			: null
+		proxyPublicKey
 	};
 };
 
@@ -125,8 +127,7 @@ export const actions: Actions = {
 	},
 
 	saveLimit: async ({ request, locals, platform }) => {
-		if (!locals.user) throw error(401, 'Not signed in');
-		if (locals.user.role !== 'admin') throw error(403, 'Admins only');
+		requireAdmin(locals);
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 		const db = platform.env.ATTIC_DB;
 

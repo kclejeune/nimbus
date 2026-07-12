@@ -16,14 +16,18 @@
 
 	let {
 		user,
+		pendingUsers = 0,
 		...restProps
 	}: {
 		user: {
+			id?: string;
 			name?: string | null;
 			email?: string | null;
 			provider?: string;
 			role?: string;
 		} | null;
+		/** Count of users awaiting activation; badges the Users item for admins. */
+		pendingUsers?: number;
 	} & ComponentProps<typeof Sidebar.Root> = $props();
 
 	const nav = $derived(
@@ -32,7 +36,7 @@
 			{ title: 'Caches', url: '/caches', icon: Boxes },
 			{ title: 'Monitoring', url: '/monitoring', icon: ChartLine },
 			{ title: 'Tokens', url: '/tokens', icon: KeyRound },
-			{ title: 'Users', url: '/users', icon: Users, adminOnly: true },
+			{ title: 'Users', url: '/users', icon: Users, adminOnly: true, badge: pendingUsers },
 			{ title: 'Groups', url: '/groups', icon: UsersRound, adminOnly: true },
 			{ title: 'Settings', url: '/settings', icon: Settings }
 		].filter((item) => !item.adminOnly || user?.role === 'admin')
@@ -72,6 +76,14 @@
 									</a>
 								{/snippet}
 							</Sidebar.MenuButton>
+							{#if item.badge}
+								<Sidebar.MenuBadge
+									class="rounded-full bg-amber-500/15 px-1.5 text-xs font-medium text-amber-600 dark:text-amber-400"
+									title="{item.badge} pending {item.badge === 1 ? 'user' : 'users'}"
+								>
+									{item.badge}
+								</Sidebar.MenuBadge>
+							{/if}
 						</Sidebar.MenuItem>
 					{/each}
 				</Sidebar.Menu>

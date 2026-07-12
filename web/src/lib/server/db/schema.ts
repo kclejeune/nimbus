@@ -113,12 +113,16 @@ export const groupMember = sqliteTable(
 		source: text('source').notNull().default('manual'),
 		createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
 	},
-	(t) => [primaryKey({ columns: [t.groupId, t.userId] })]
+	(t) => [
+		primaryKey({ columns: [t.groupId, t.userId] }),
+		// Effective-access resolution and login group sync both filter by user.
+		index('group_member_user_idx').on(t.userId)
+	]
 );
 
 /** One grant: subject (user|group) × cache-name pattern × attic permission
- *  bits (JSON, plus the global `gc` bit). Effective access is the union. No
- *  cross-type FK on subject_id; the app deletes grants alongside subjects. */
+ *  bits (JSON). Effective access is the union. No cross-type FK on
+ *  subject_id; the app deletes grants alongside subjects. */
 export const permissionGrant = sqliteTable(
 	'permission_grant',
 	{

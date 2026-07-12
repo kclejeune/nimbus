@@ -5,8 +5,8 @@ import { CACHE_NAME_RE } from '$lib/utils';
 import type { Actions } from './$types';
 
 export const actions: Actions = {
-	// Creating a cache is open to any active user (the layout gate ensures
-	// active); the creator receives full control of what they create.
+	// Creating a cache is open to any active user (hooks.server.ts walls off
+	// non-active users); the creator receives full control of what they create.
 	default: async ({ request, locals, platform }) => {
 		if (!locals.user) throw error(401, 'Not signed in');
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');

@@ -159,6 +159,16 @@ async function serveProxyNarInfo(
 	const narinfo = await buildNarInfo(found.object, found.nar, found.chunks, keypair);
 
 	// Same tags as the per-cache entry: GC/upload purges cover both.
+	return narinfoResponse(narinfo, cacheName, storePathHash, cache.is_public === 1);
+}
+
+/** The shared success response for a served narinfo (per-cache and root proxy). */
+function narinfoResponse(
+	narinfo: string,
+	cacheName: string,
+	storePathHash: string,
+	isPublic: boolean
+): Response {
 	return withVisibility(
 		new Response(narinfo, {
 			status: 200,
@@ -168,7 +178,7 @@ async function serveProxyNarInfo(
 				'Cache-Tag': narinfoTags(cacheName, storePathHash)
 			}
 		}),
-		cache.is_public === 1
+		isPublic
 	);
 }
 
@@ -282,17 +292,7 @@ async function serveNarInfo(
 	const narinfo = await buildNarInfo(found.object, found.nar, found.chunks, cache.keypair);
 	prefetchReferences(ctx, request, cacheName, storePathHash, found.object.refs);
 
-	return withVisibility(
-		new Response(narinfo, {
-			status: 200,
-			headers: {
-				'Content-Type': 'text/x-nix-narinfo',
-				'Cache-Control': NARINFO_CACHE_CONTROL,
-				'Cache-Tag': narinfoTags(cacheName, storePathHash)
-			}
-		}),
-		isPublic
-	);
+	return narinfoResponse(narinfo, cacheName, storePathHash, isPublic);
 }
 
 async function serveNar(

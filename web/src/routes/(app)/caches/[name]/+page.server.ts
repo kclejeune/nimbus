@@ -10,11 +10,7 @@ import { pruneClosure } from '$lib/server/cache/gc';
 import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { canOnCache, canSeeCache } from '$lib/server/auth/permissions';
-import {
-	effectiveAccessOf,
-	requireAnyCachePermission,
-	requireCachePermission
-} from '$lib/server/auth/guard';
+import { effectiveAccessOf, requireCachePermission } from '$lib/server/auth/guard';
 import type { PageServerLoad, Actions } from './$types';
 
 interface CacheRow {
@@ -46,28 +42,27 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 	const dir = parseDir(url.searchParams.get('dir'));
 	const q = (url.searchParams.get('q') ?? '').trim();
 
-	const cache = await db
-		.prepare(
-			`SELECT id, name, is_public, priority, compression, retention_period, retention_max_bytes,
-			        store_dir, keypair
-			 FROM cache WHERE name = ?1 AND deleted_at IS NULL`
-		)
-		.bind(params.name)
-		.first<CacheRow>();
+	const [cache, access] = await Promise.all([
+		db
+			.prepare(
+				`SELECT id, name, is_public, priority, compression, retention_period, retention_max_bytes,
+				        store_dir, keypair
+				 FROM cache WHERE name = ?1 AND deleted_at IS NULL`
+			)
+			.bind(params.name)
+			.first<CacheRow>(),
+		effectiveAccessOf(locals, db)
+	]);
 
 	if (!cache) throw error(404, `Cache "${params.name}" not found`);
-
-	const access = await effectiveAccessOf(locals, db);
 	if (!canSeeCache(access, params.name)) {
 		throw error(403, 'Permission denied');
 	}
+	const canRetention = canOnCache(access, 'cr', params.name);
 	const viewer = {
-		canRetention: canOnCache(access, 'cq', params.name) || canOnCache(access, 'cr', params.name),
+		canRetention,
 		canDelete: canOnCache(access, 'd', params.name),
-		canManage:
-			canOnCache(access, 'cr', params.name) ||
-			canOnCache(access, 'cq', params.name) ||
-			canOnCache(access, 'cd', params.name)
+		canManage: canRetention || canOnCache(access, 'cd', params.name)
 	};
 
 	const cacheBase = (platform?.env.CACHE_BASE_URL ?? 'https://cache.kclj.io').replace(/\/$/, '');
@@ -127,13 +122,7 @@ export const actions: Actions = {
 		const db = platform.env.ATTIC_DB;
 
 		// Pinning is a retention decision (same rule as the gc-root API route).
-		await requireAnyCachePermission(
-			locals,
-			db,
-			['cq', 'cr'],
-			params.name,
-			'configure cache retention'
-		);
+		await requireCachePermission(locals, db, 'cr', params.name, 'configure cache retention');
 
 		const hash = String((await request.formData()).get('hash') ?? '');
 		if (!HASH_RE.test(hash)) return fail(400, { actionError: 'Invalid path hash.' });
@@ -153,13 +142,7 @@ export const actions: Actions = {
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 		const db = platform.env.ATTIC_DB;
 
-		await requireAnyCachePermission(
-			locals,
-			db,
-			['cq', 'cr'],
-			params.name,
-			'configure cache retention'
-		);
+		await requireCachePermission(locals, db, 'cr', params.name, 'configure cache retention');
 
 		const hash = String((await request.formData()).get('hash') ?? '');
 		const cacheId = await cacheIdByName(db, params.name);

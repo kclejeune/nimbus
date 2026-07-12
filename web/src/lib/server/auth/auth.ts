@@ -7,14 +7,7 @@ import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { getRequestEvent } from '$app/server';
 import { getDb, schema } from '$lib/server/db';
 import { buildAuthProviders } from './providers';
-import {
-	activateIfPending,
-	decodeJwtClaims,
-	extractGroups,
-	shouldAutoActivate,
-	syncUserGroups
-} from './group-sync';
-import { writeAudit } from '$lib/server/audit';
+import { decodeJwtClaims, syncGroupsAndMaybeActivate } from './group-sync';
 
 type Env = App.Platform['env'];
 
@@ -53,6 +46,15 @@ export function createAuth(env: Env) {
 				status: { type: 'string', defaultValue: 'pending', input: false }
 			}
 		},
+		// Signed cookie cache so getSession() skips the per-request D1 lookup —
+		// the OIDC counterpart of cf-access.ts's session cookie, with the same
+		// tradeoff: role/status changes take up to the TTL (15 min) to bite.
+		session: {
+			cookieCache: {
+				enabled: true,
+				maxAge: 15 * 60
+			}
+		},
 		hooks: {
 			// Group sync + auto-activation must run on EVERY oidc login, not just
 			// sign-up: the callback refreshes account.idToken with the groups claim.
@@ -70,19 +72,10 @@ export function createAuth(env: Env) {
 						.limit(1);
 					const idToken = rows[0]?.idToken;
 					if (!idToken) return;
-					const groups = extractGroups(decodeJwtClaims(idToken), env.OIDC_GROUPS_CLAIM);
-					if (groups === null) return; // claim absent: never wipe
-					await syncUserGroups(env.ATTIC_DB, userId, groups);
-					if (shouldAutoActivate(groups, env.OIDC_ACTIVATION_GROUP)) {
-						if (await activateIfPending(env.ATTIC_DB, userId)) {
-							await writeAudit(env.ATTIC_DB, {
-								userId,
-								action: 'user.activate',
-								target: userId,
-								detail: 'auto:oidc-group'
-							});
-						}
-					}
+					await syncGroupsAndMaybeActivate(env.ATTIC_DB, userId, decodeJwtClaims(idToken), {
+						groupsClaim: env.OIDC_GROUPS_CLAIM,
+						activationGroup: env.OIDC_ACTIVATION_GROUP
+					});
 				} catch (e) {
 					console.warn(`oidc group sync failed: ${e}`);
 				}

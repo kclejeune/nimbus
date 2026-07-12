@@ -19,17 +19,15 @@ describe('unionAccess', () => {
 			['ci-*', { w: 1 }]
 		]);
 		expect(a.caches['ci-*']).toEqual({ r: 1, w: 1 });
-		expect(a.gc).toBe(false);
 	});
 
-	it('keeps distinct patterns distinct and extracts gc', () => {
+	it('keeps distinct patterns distinct and ignores unknown bits', () => {
 		const a = grants([
 			['nixos', { r: 1 }],
 			['*', { gc: 1 }]
 		]);
 		expect(a.caches['nixos']).toEqual({ r: 1 });
 		expect(a.caches['*']).toEqual({});
-		expect(a.gc).toBe(true);
 	});
 
 	it('skips malformed action JSON', () => {
@@ -81,10 +79,9 @@ describe('scopeDenial', () => {
 		const star = grants([['*', { r: 1 }]]);
 		expect(scopeDenial(star, { pattern: 'ci-*', bits: { r: 1 } })).toBeNull();
 	});
-	it('gates gc and empty scopes', () => {
-		expect(scopeDenial(a, { pattern: 'prod', bits: {}, gc: true })).toMatch(/garbage/i);
+	it('rejects empty scopes', () => {
 		expect(scopeDenial(a, { pattern: 'prod', bits: {} })).toMatch(/at least one/i);
-		expect(scopeDenial(ADMIN_ACCESS, { pattern: '*', bits: { d: 1 }, gc: true })).toBeNull();
+		expect(scopeDenial(ADMIN_ACCESS, { pattern: '*', bits: { d: 1 } })).toBeNull();
 	});
 });
 

@@ -5,25 +5,11 @@
 	import { Label } from '$lib/components/ui/label/index.js';
 	import CopyField from '$lib/components/copy-field.svelte';
 	import TokenScopeFields from '$lib/components/token-scope-fields.svelte';
-	import { formatDate } from '$lib/format';
-	import { KeyRound, Trash2, TriangleAlert } from '@lucide/svelte';
+	import TokenTable from '$lib/components/token-table.svelte';
+	import { TriangleAlert } from '@lucide/svelte';
 
 	let { data, form } = $props();
 	let issuing = $state(false);
-
-	function scopeLabel(scopeJson: string): string {
-		try {
-			const s = JSON.parse(scopeJson) as Record<string, { r?: number; w?: number; d?: number }>;
-			return Object.entries(s)
-				.map(([cache, p]) => {
-					const perms = [p.r && 'pull', p.w && 'push', p.d && 'delete'].filter(Boolean).join('+');
-					return `${cache === '*' ? 'all caches' : cache} · ${perms}`;
-				})
-				.join(', ');
-		} catch {
-			return scopeJson;
-		}
-	}
 </script>
 
 <div class="mx-auto max-w-6xl px-8 py-8">
@@ -74,47 +60,5 @@
 	</section>
 
 	<h2 class="mb-3 text-sm font-medium">Your tokens</h2>
-	{#if data.tokens.length === 0}
-		<div class="rounded-lg border border-dashed py-12 text-center">
-			<KeyRound class="mx-auto mb-3 size-6 text-muted-foreground" />
-			<p class="text-sm text-muted-foreground">No tokens yet.</p>
-		</div>
-	{:else}
-		<div class="divide-y rounded-lg border">
-			{#each data.tokens as t (t.id)}
-				<div class="flex items-center gap-4 px-4 py-3">
-					<div class="min-w-0 flex-1">
-						<div class="flex items-center gap-2">
-							<span class="font-medium">{t.name}</span>
-							{#if t.status === 'revoked'}
-								<span class="rounded bg-destructive/10 px-1.5 py-0.5 text-xs text-destructive"
-									>revoked</span
-								>
-							{:else if t.status === 'expired'}
-								<span class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
-									>expired</span
-								>
-							{/if}
-						</div>
-						<div class="mt-0.5 text-xs text-muted-foreground">
-							{scopeLabel(t.scope)} · expires {t.expiresAt ? formatDate(t.expiresAt) : 'never'}
-						</div>
-					</div>
-					{#if t.status === 'active'}
-						<form method="POST" action="?/revoke" use:enhance>
-							<input type="hidden" name="id" value={t.id} />
-							<Button
-								type="submit"
-								variant="ghost"
-								size="sm"
-								class="text-muted-foreground hover:text-destructive"
-							>
-								<Trash2 class="size-4" /> Revoke
-							</Button>
-						</form>
-					{/if}
-				</div>
-			{/each}
-		</div>
-	{/if}
+	<TokenTable tokens={data.tokens} />
 </div>

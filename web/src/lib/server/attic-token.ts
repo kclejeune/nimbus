@@ -4,13 +4,6 @@
 
 const CLAIM_NAMESPACE = 'https://jwt.attic.rs/v1';
 
-/** Nimbus extension claims (server-wide permissions, ignored by attic verifiers). */
-export const NIMBUS_CLAIM_NAMESPACE = 'https://nimbus.kclj.io/v1';
-
-export interface GlobalClaims {
-	/** may trigger garbage collection */ gc?: 1;
-}
-
 /** Per-cache permission flags, using the attic short keys. */
 export interface CachePermission {
 	/** pull */ r?: 1;
@@ -49,8 +42,7 @@ export async function mintAtticToken(
 	sub: string,
 	caches: CacheAccess,
 	ttlSeconds = 300,
-	jti?: string,
-	global?: GlobalClaims
+	jti?: string
 ): Promise<string> {
 	const now = Math.floor(Date.now() / 1000);
 	const header = { alg: 'HS256', typ: 'JWT' };
@@ -61,7 +53,6 @@ export async function mintAtticToken(
 		[CLAIM_NAMESPACE]: { caches }
 	};
 	if (jti) payload.jti = jti;
-	if (global && Object.keys(global).length > 0) payload[NIMBUS_CLAIM_NAMESPACE] = global;
 
 	const signingInput = `${base64urlJson(header)}.${base64urlJson(payload)}`;
 

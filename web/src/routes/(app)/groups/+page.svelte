@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import { toastErrors } from '$lib/enhance';
+	import { confirmFirst, toastErrors } from '$lib/enhance';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
@@ -59,7 +59,15 @@
 							{/if}
 						</p>
 					</div>
-					<form method="POST" action="?/delete" use:enhance={toastErrors()}>
+					<form
+						method="POST"
+						action="?/delete"
+						use:enhance={toastErrors(
+							confirmFirst(
+								`Delete group "${group.name}"? Its grants and memberships are removed with it.`
+							)
+						)}
+					>
 						<input type="hidden" name="id" value={group.id} />
 						<Button type="submit" variant="ghost" size="icon" aria-label="Delete group">
 							<Trash2 class="size-4" />
