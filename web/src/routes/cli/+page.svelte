@@ -33,7 +33,7 @@
 				<Input id="label" name="label" value={data.label} />
 			</div>
 
-			<TokenScopeFields cacheNames={data.cacheNames} defaultPush={true} />
+			<TokenScopeFields scopeOptions={data.scopeOptions} defaultPush={true} />
 
 			{#if form?.error}
 				<p class="text-sm text-destructive">{form.error}</p>

@@ -63,7 +63,7 @@
 				<Input id="name" name="name" placeholder="ci-deploy" />
 			</div>
 
-			<TokenScopeFields cacheNames={data.cacheNames} allowDelete={data.user.role === 'admin'} />
+			<TokenScopeFields scopeOptions={data.scopeOptions} gcAllowed={data.gcAllowed} advanced />
 
 			{#if form?.error}
 				<p class="text-sm text-destructive">{form.error}</p>

@@ -1,27 +1,54 @@
 <script lang="ts">
 	import { Label } from '$lib/components/ui/label/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
+	import type { PermissionBit, ScopeOption } from '$lib/server/auth/permissions';
 
 	let {
-		cacheNames,
+		scopeOptions,
+		gcAllowed = false,
 		defaultPush = false,
-		allowDelete = false
-	}: { cacheNames: string[]; defaultPush?: boolean; allowDelete?: boolean } = $props();
+		advanced = false
+	}: {
+		scopeOptions: ScopeOption[];
+		gcAllowed?: boolean;
+		defaultPush?: boolean;
+		/** Show the cache-management bits (tokens page yes, device flow no). */
+		advanced?: boolean;
+	} = $props();
+
+	// svelte-ignore state_referenced_locally -- initial selection only; options are fixed per load
+	let selected = $state(scopeOptions[0]?.value ?? '*');
+	const bits = $derived(scopeOptions.find((o) => o.value === selected)?.bits ?? {});
+
+	const BASIC: { name: string; bit: PermissionBit; label: string }[] = [
+		{ name: 'pull', bit: 'r', label: 'Pull' },
+		{ name: 'push', bit: 'w', label: 'Push' }
+	];
+	const ADVANCED: { name: string; bit: PermissionBit; label: string }[] = [
+		{ name: 'delete', bit: 'd', label: 'Delete paths' },
+		{ name: 'create_cache', bit: 'cc', label: 'Create cache' },
+		{ name: 'configure_cache', bit: 'cr', label: 'Configure' },
+		{ name: 'configure_retention', bit: 'cq', label: 'Retention' },
+		{ name: 'destroy_cache', bit: 'cd', label: 'Destroy cache' }
+	];
 </script>
 
 <div class="grid grid-cols-2 gap-4">
 	<div class="space-y-2">
-		<Label for="cache">Cache</Label>
+		<Label for="cache">Scope</Label>
 		<select
 			id="cache"
 			name="cache"
+			bind:value={selected}
 			class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
 		>
-			<option value="*">All caches</option>
-			{#each cacheNames as name (name)}
-				<option value={name}>{name}</option>
+			{#each scopeOptions as option (option.value)}
+				<option value={option.value}>{option.value === '*' ? 'All caches' : option.value}</option>
 			{/each}
 		</select>
+		{#if scopeOptions.length === 0}
+			<p class="text-sm text-muted-foreground">You have no cache permissions to delegate.</p>
+		{/if}
 	</div>
 	<div class="space-y-2">
 		<Label for="expiry_days">Expires (days)</Label>
@@ -29,24 +56,36 @@
 	</div>
 </div>
 
-<div class="flex gap-6">
-	<label class="flex items-center gap-2 text-sm">
-		<input name="pull" type="checkbox" checked class="size-4 rounded border-input text-primary" />
-		Pull
-	</label>
-	<label class="flex items-center gap-2 text-sm">
-		<input
-			name="push"
-			type="checkbox"
-			checked={defaultPush}
-			class="size-4 rounded border-input text-primary"
-		/>
-		Push
-	</label>
-	{#if allowDelete}
-		<label class="flex items-center gap-2 text-sm">
-			<input name="delete" type="checkbox" class="size-4 rounded border-input text-primary" />
-			Delete
+<div class="flex flex-wrap gap-6">
+	{#each BASIC as p (p.name)}
+		<label class="flex items-center gap-2 text-sm" class:opacity-50={!bits[p.bit]}>
+			<input
+				name={p.name}
+				type="checkbox"
+				checked={bits[p.bit] === 1 && (p.name === 'pull' || defaultPush)}
+				disabled={!bits[p.bit]}
+				class="size-4 rounded border-input text-primary"
+			/>
+			{p.label}
 		</label>
+	{/each}
+	{#if advanced}
+		{#each ADVANCED as p (p.name)}
+			<label class="flex items-center gap-2 text-sm" class:opacity-50={!bits[p.bit]}>
+				<input
+					name={p.name}
+					type="checkbox"
+					disabled={!bits[p.bit]}
+					class="size-4 rounded border-input text-primary"
+				/>
+				{p.label}
+			</label>
+		{/each}
+		{#if gcAllowed}
+			<label class="flex items-center gap-2 text-sm">
+				<input name="gc" type="checkbox" class="size-4 rounded border-input text-primary" />
+				Trigger GC
+			</label>
+		{/if}
 	{/if}
 </div>
