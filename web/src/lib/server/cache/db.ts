@@ -3,6 +3,7 @@
 // database.
 
 import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types';
+import { isActiveUser } from '../auth/types';
 
 /** D1 caps bound parameters per statement; IN-lists are windowed to this. */
 export const PARAM_BATCH = 99;
@@ -320,15 +321,23 @@ export async function removeGcRoot(
 }
 
 /**
- * Whether an admin-issued token (by jti) has been revoked. Missing rows are
- * not revoked (e.g. bootstrap tokens the admin app never tracked).
+ * Whether an admin-issued token (by jti) is revoked or suspended. Suspension
+ * follows the owner's activation status (isActiveUser): a deactivated user's
+ * tokens stop working immediately and resume if the account is reactivated.
+ * Missing rows are valid (e.g. bootstrap tokens the admin app never tracked).
  */
-export async function isTokenRevoked(db: D1Database, jti: string): Promise<boolean> {
+export async function isTokenDisabled(db: D1Database, jti: string): Promise<boolean> {
 	const row = await db
-		.prepare('SELECT revoked_at FROM api_token WHERE id = ?1')
+		.prepare(
+			`SELECT t.revoked_at, u.status, u.role
+			 FROM api_token t LEFT JOIN user u ON u.id = t.user_id
+			 WHERE t.id = ?1`
+		)
 		.bind(jti)
-		.first<{ revoked_at: string | null }>();
-	return row?.revoked_at != null;
+		.first<{ revoked_at: string | null; status: string | null; role: string | null }>();
+	if (!row) return false;
+	if (row.revoked_at != null) return true;
+	return row.status != null && !isActiveUser({ role: row.role ?? 'member', status: row.status });
 }
 
 // --- Write side (uploads, cache config), mirroring the Rust worker's d1.rs ---

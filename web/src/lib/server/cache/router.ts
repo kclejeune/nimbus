@@ -61,12 +61,13 @@ async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedT
 		}
 	);
 
-	// Admin-issued tokens carry a jti and can be revoked. A failed revocation
-	// lookup is logged and ignored, matching the Rust worker (fail-open on the
-	// revocation check only — the signature already verified).
+	// Admin-issued tokens carry a jti and can be revoked, or suspended while
+	// the owner's account is deactivated. A failed lookup is logged and
+	// ignored, matching the Rust worker (fail-open on the revocation check
+	// only — the signature already verified).
 	if (token.jti) {
 		try {
-			if (await db.isTokenRevoked(env.ATTIC_DB, token.jti)) {
+			if (await db.isTokenDisabled(env.ATTIC_DB, token.jti)) {
 				throw new Error('Token has been revoked');
 			}
 		} catch (e) {
@@ -402,8 +403,9 @@ async function handleGcTrigger(
 		return errorResponse(401, `Authentication failed: ${e}`);
 	}
 	if (!token) return errorResponse(401, 'No token provided');
-	// New tokens carry the nimbus gc claim; the legacy probe (delete on a
-	// cache named "gc") keeps existing wildcard-delete tokens working.
+	// The app no longer mints the nimbus gc claim (GC is admin-only from the
+	// dashboard); accepting it here keeps previously minted gc tokens working
+	// until they expire, alongside the wildcard-delete probe.
 	if (!token.gc && !permissionForCache(token, 'gc').delete) {
 		return errorResponse(403, 'Permission denied: garbage collection');
 	}

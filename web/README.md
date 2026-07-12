@@ -32,6 +32,8 @@ nimbus-only global `gc`) at two layers:
 - **Tokens**: stateless attic JWTs minted from the dashboard/CLI flows,
   bounded at mint time by the issuer's effective access, revocable by `jti`.
   Verification is unchanged attic semantics, so attic-minted tokens work.
+  Tracked tokens are suspended while their owner is deactivated and resume on
+  reactivation; revocation is permanent.
 
 New accounts start `pending` and see a wall page until an admin activates
 them, or automatically when their groups claim contains
