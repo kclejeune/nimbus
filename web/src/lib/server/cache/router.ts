@@ -21,6 +21,8 @@ import {
 	parseUpstreams
 } from './missing-paths';
 import { type ExecutionContext } from './platform';
+import { getProxyKeypair, pickWinner, readableCacheSet } from './proxy';
+import { extractPublicKey } from '../attic/signing';
 import { cacheTag, keyedNarinfoUrl, PREFETCH_DEPTH_HEADER, serveStore } from './store';
 import {
 	NO_PERMISSION,
@@ -236,6 +238,91 @@ async function handleNar(
 	return withCachePolicy(
 		withVisibility(new Response(response.body, response), auth.cache.is_public === 1),
 		auth.cache.is_public === 1
+	);
+}
+
+// --- root proxy (read-only): resolve across the requester's readable caches --
+
+function handleProxyNixCacheInfo(head: boolean): Response {
+	if (head) return new Response(null, { status: 200 });
+	return new Response('StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n', {
+		status: 200,
+		headers: { 'Content-Type': 'text/x-nix-cache-info' }
+	});
+}
+
+/** Invalid tokens degrade to anonymous, like authorizeCacheRead on public reads. */
+async function proxyToken(request: Request, env: Env): Promise<VerifiedToken | null> {
+	try {
+		return await verifyRequestToken(request, env);
+	} catch {
+		return null;
+	}
+}
+
+async function handleProxyNarInfo(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	filename: string
+): Promise<Response> {
+	const storePathHash = filename.slice(0, -'.narinfo'.length);
+	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
+
+	const token = await proxyToken(request, env);
+	const session = db.readSession(env.ATTIC_DB);
+	const readable = readableCacheSet(token, await db.listLiveCaches(session));
+	const winner = pickWinner(await db.cacheNamesWithStorePathHash(session, storePathHash), readable);
+	// Not-found and not-readable are both 404: the root names no caches, so
+	// there is nothing to enumerate.
+	if (!winner) return errorResponse(404, 'Not found', 'NoSuchObject');
+
+	const keyed = new URL(
+		`${new URL(request.url).origin}/_proxy/${winner.name}/${storePathHash}.narinfo`
+	);
+	try {
+		keyed.searchParams.set('pk', extractPublicKey(await getProxyKeypair(env)));
+	} catch {
+		// keypair unavailable: serve unsigned/stored-sig variant unkeyed
+	}
+	const response = await forwardToStore(new Request(keyed, request), env, ctx);
+	return withCachePolicy(response, winner.is_public === 1);
+}
+
+async function handleProxyNar(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	filename: string,
+	head: boolean
+): Promise<Response> {
+	const narHashRaw = filename.split('.')[0];
+	if (!narHashRaw) return errorResponse(400, 'Invalid NAR path');
+
+	const token = await proxyToken(request, env);
+	const session = db.readSession(env.ATTIC_DB);
+	const readable = readableCacheSet(token, await db.listLiveCaches(session));
+	const winner = pickWinner(
+		await db.cacheNamesWithNarHash(session, [`sha256:${narHashRaw}`, narHashRaw]),
+		readable
+	);
+	if (!winner) return errorResponse(404, 'Not found', 'NoSuchObject');
+
+	// Download-driven retention, attributed to the winning cache (see handleNar).
+	if (!head) {
+		const touch = db.touchObjectsForNarHash(env.ATTIC_DB, winner.name, narHashRaw).catch(() => {});
+		ctx?.waitUntil(touch);
+	}
+
+	// Same shared content-addressed edge entry as the per-cache route. No
+	// upstream fallback at the root: only locally-stored objects resolve.
+	const shared = new URL(request.url);
+	shared.pathname = `/_nar/${filename}`;
+	const response = await forwardToStore(new Request(shared, request), env, ctx);
+	if (response.status === 404) return response;
+	return withCachePolicy(
+		withVisibility(new Response(response.body, response), winner.is_public === 1),
+		winner.is_public === 1
 	);
 }
 
@@ -586,6 +673,17 @@ export async function handleCacheApi(
 			return Response.redirect(env.APP_URL ?? 'https://app.cache.kclj.io', 302);
 		}
 		return new Response('nimbus is running', { status: 200 });
+	}
+
+	// Root proxy: nix-cache-info / narinfo at depth 1, NARs under /nar/.
+	if ((method === 'GET' || method === 'HEAD') && segments.length === 1) {
+		if (segments[0] === 'nix-cache-info') return handleProxyNixCacheInfo(method === 'HEAD');
+		if (segments[0].endsWith('.narinfo')) {
+			return handleProxyNarInfo(request, env, ctx, segments[0]);
+		}
+	}
+	if ((method === 'GET' || method === 'HEAD') && segments.length === 2 && segments[0] === 'nar') {
+		return handleProxyNar(request, env, ctx, segments[1], method === 'HEAD');
 	}
 
 	if (segments[0] === '_api') {

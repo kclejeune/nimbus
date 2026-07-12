@@ -10,6 +10,9 @@ type Env = App.Platform['env'];
 
 const CACHE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,49}$/;
 
+// Names that collide with root-proxy routes on the cache host.
+const RESERVED_CACHE_NAMES = new Set(['nar', 'nix-cache-info']);
+
 export class CacheConfigError extends Error {
 	constructor(
 		public status: number,
@@ -33,7 +36,9 @@ export async function createCache(
 	name: string,
 	options: CreateCacheOptions
 ): Promise<{ public_key: string }> {
-	if (!CACHE_NAME_RE.test(name)) throw new CacheConfigError(400, `Invalid cache name: ${name}`);
+	if (!CACHE_NAME_RE.test(name) || RESERVED_CACHE_NAMES.has(name)) {
+		throw new CacheConfigError(400, `Invalid cache name: ${name}`);
+	}
 
 	const existing = await db.findCache(env.ATTIC_DB, name);
 	if (existing) throw new CacheConfigError(409, `A cache named "${name}" already exists`);
@@ -126,7 +131,7 @@ export async function destroyCache(env: Env, name: string): Promise<void> {
 
 /** Rename, keeping the keypair so existing signatures stay valid. */
 export async function renameCache(env: Env, oldName: string, newName: string): Promise<void> {
-	if (!CACHE_NAME_RE.test(newName)) {
+	if (!CACHE_NAME_RE.test(newName) || RESERVED_CACHE_NAMES.has(newName)) {
 		throw new CacheConfigError(400, `Invalid cache name: ${newName}`);
 	}
 	if (oldName === newName) {

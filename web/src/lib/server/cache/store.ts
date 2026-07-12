@@ -13,6 +13,7 @@ import { buildNarInfo } from '../attic/narinfo';
 import { extractPublicKey } from '../attic/signing';
 import * as db from './db';
 import { fetchUpstreamNarInfo, parseUpstreams } from './missing-paths';
+import { getProxyKeypair } from './proxy';
 import type { ExecutionContext } from './platform';
 
 type Env = App.Platform['env'];
@@ -116,6 +117,11 @@ export async function serveStore(
 	if (segments.length === 2 && segments[1].endsWith('.narinfo')) {
 		return serveNarInfo(request, env, ctx, segments[0], segments[1].slice(0, -'.narinfo'.length));
 	}
+	// Root-proxy narinfo: same object, re-signed with the proxy keypair, cached
+	// under a distinct internal path so per-cache entries never collide.
+	if (segments.length === 3 && segments[0] === '_proxy' && segments[2].endsWith('.narinfo')) {
+		return serveProxyNarInfo(env, segments[1], segments[2].slice(0, -'.narinfo'.length));
+	}
 	// NARs are content-addressed and shared across caches, so their route
 	// carries no cache name: every cache referencing a NAR hits the same edge
 	// entry, and R2 is read once instead of per cache. The gateway authorizes
@@ -124,6 +130,43 @@ export async function serveStore(
 		return serveNar(env, ctx, segments[1]);
 	}
 	return errorResponse(404, 'Not found');
+}
+
+async function serveProxyNarInfo(
+	env: Env,
+	cacheName: string,
+	storePathHash: string
+): Promise<Response> {
+	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
+
+	const session = db.readSession(env.ATTIC_DB);
+	const [cache, found] = await Promise.all([
+		db.findCache(session, cacheName),
+		db.findObjectWithChunks(session, cacheName, storePathHash)
+	]);
+	if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
+	// The gateway resolved this object before forwarding, so a miss here is a
+	// deletion race — no upstream fallback at the root, no negative caching.
+	if (!found) return errorResponse(404, 'Not found', 'NoSuchObject');
+
+	const keypair = await getProxyKeypair(env).catch((e) => {
+		console.warn(`proxy keypair unavailable, serving stored sigs: ${e}`);
+		return null;
+	});
+	const narinfo = await buildNarInfo(found.object, found.nar, found.chunks, keypair);
+
+	// Same tags as the per-cache entry: GC/upload purges cover both.
+	return withVisibility(
+		new Response(narinfo, {
+			status: 200,
+			headers: {
+				'Content-Type': 'text/x-nix-narinfo',
+				'Cache-Control': NARINFO_CACHE_CONTROL,
+				'Cache-Tag': narinfoTags(cacheName, storePathHash)
+			}
+		}),
+		cache.is_public === 1
+	);
 }
 
 // Predictive reference prefetch: a narinfo served here missed the edge cache,
