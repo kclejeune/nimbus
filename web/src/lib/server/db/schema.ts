@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, primaryKey, index } from 'drizzle-orm/sqlite-core';
 
 // --- better-auth managed tables ---------------------------------------------
 // Column names match better-auth's default field names (camelCase) so no
@@ -84,3 +84,48 @@ export const auditLog = sqliteTable('audit_log', {
 	detail: text('detail'),
 	createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
 });
+
+// --- fine-grained permissions ------------------------------------------------
+
+/** Local permission groups. `oidcGroup` maps an IdP group-claim value to this
+ *  group; membership rows with source='sso' are synced from it at login. */
+export const group = sqliteTable('groups', {
+	id: text('id').primaryKey(),
+	name: text('name').notNull().unique(),
+	description: text('description'),
+	oidcGroup: text('oidc_group'),
+	createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
+});
+
+export const groupMember = sqliteTable(
+	'group_member',
+	{
+		groupId: text('group_id')
+			.notNull()
+			.references(() => group.id, { onDelete: 'cascade' }),
+		userId: text('user_id')
+			.notNull()
+			.references(() => user.id, { onDelete: 'cascade' }),
+		/** 'manual' rows are admin-managed; 'sso' rows are owned by group sync. */
+		source: text('source').notNull().default('manual'),
+		createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
+	},
+	(t) => [primaryKey({ columns: [t.groupId, t.userId] })]
+);
+
+/** One grant: subject (user|group) × cache-name pattern × attic permission
+ *  bits (JSON, plus the global `gc` bit). Effective access is the union. No
+ *  cross-type FK on subject_id; the app deletes grants alongside subjects. */
+export const permissionGrant = sqliteTable(
+	'permission_grant',
+	{
+		id: text('id').primaryKey(),
+		subjectType: text('subject_type').notNull(),
+		subjectId: text('subject_id').notNull(),
+		pattern: text('pattern').notNull(),
+		actions: text('actions').notNull(),
+		createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+		createdBy: text('created_by')
+	},
+	(t) => [index('permission_grant_subject_idx').on(t.subjectType, t.subjectId)]
+);

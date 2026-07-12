@@ -15,6 +15,13 @@
       "when": 1783204680962,
       "tag": "0001_owner_flag",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1783876462234,
+      "tag": "0002_permissions",
+      "breakpoints": true
     }
   ]
 }
