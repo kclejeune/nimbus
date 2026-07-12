@@ -59,13 +59,12 @@ export function canOnCache(
 	return false;
 }
 
-/** UI visibility: public caches always; private need any bit. */
-export function canSeeCache(
-	access: EffectiveAccess,
-	cacheName: string,
-	isPublic: boolean
-): boolean {
-	if (isPublic) return true;
+/**
+ * Dashboard visibility: any granted bit on the cache. Public visibility on
+ * the *protocol* (anonymous pulls) deliberately does not imply dashboard
+ * visibility — the cache table only shows caches the user was granted.
+ */
+export function canSeeCache(access: EffectiveAccess, cacheName: string): boolean {
 	return PERMISSION_BITS.some((bit) => canOnCache(access, bit, cacheName));
 }
 

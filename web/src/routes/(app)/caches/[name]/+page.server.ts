@@ -9,7 +9,7 @@ import {
 import { pruneClosure } from '$lib/server/cache/gc';
 import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
-import { canSeeCache } from '$lib/server/auth/permissions';
+import { canOnCache, canSeeCache } from '$lib/server/auth/permissions';
 import {
 	effectiveAccessOf,
 	requireAnyCachePermission,
@@ -58,9 +58,17 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 	if (!cache) throw error(404, `Cache "${params.name}" not found`);
 
 	const access = await effectiveAccessOf(locals, db);
-	if (!canSeeCache(access, params.name, cache.is_public !== 0)) {
+	if (!canSeeCache(access, params.name)) {
 		throw error(403, 'Permission denied');
 	}
+	const viewer = {
+		canRetention: canOnCache(access, 'cq', params.name) || canOnCache(access, 'cr', params.name),
+		canDelete: canOnCache(access, 'd', params.name),
+		canManage:
+			canOnCache(access, 'cr', params.name) ||
+			canOnCache(access, 'cq', params.name) ||
+			canOnCache(access, 'cd', params.name)
+	};
 
 	const cacheBase = (platform?.env.CACHE_BASE_URL ?? 'https://cache.kclj.io').replace(/\/$/, '');
 	const publicKey = derivePublicKey(cache.keypair);
@@ -90,6 +98,7 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 			publicKey
 		},
 		proxy: proxyPublicKey ? { url: cacheBase, publicKey: proxyPublicKey } : null,
+		viewer,
 		pinnedHashes: pinned.results.map((r) => r.store_path_hash),
 		paths,
 		hasMore,

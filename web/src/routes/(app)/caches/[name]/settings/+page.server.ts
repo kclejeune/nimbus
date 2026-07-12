@@ -82,14 +82,8 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	const canConfigure = canOnCache(access, 'cr', params.name);
 	const canRetention = canConfigure || canOnCache(access, 'cq', params.name);
 	const canDestroy = canOnCache(access, 'cd', params.name);
-	if (
-		!canRetention &&
-		!canDestroy &&
-		cache.is_public === 0 &&
-		!canOnCache(access, 'r', params.name)
-	) {
-		throw error(403, 'Permission denied');
-	}
+	// Settings is a management surface: pull-only users have nothing to do here.
+	if (!canRetention && !canDestroy) throw error(403, 'Permission denied');
 
 	const isAdmin = locals.user!.role === 'admin';
 	const [roots, grantRows, userRows, groupRows] = await Promise.all([
@@ -108,7 +102,10 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		}>()
 	]);
 
-	const userLabel = new Map(userRows.results.map((u) => [u.id, `${u.name} (${u.email})`]));
+	// Emails are admin-only PII; non-admin viewers see display names.
+	const userLabel = new Map(
+		userRows.results.map((u) => [u.id, isAdmin ? `${u.name} (${u.email})` : u.name])
+	);
 	const groupLabel = new Map(groupRows.results.map((g) => [g.id, g.name]));
 	const subjectLabel = (g: CacheGrantRow) =>
 		(g.subject_type === 'user' ? userLabel.get(g.subject_id) : groupLabel.get(g.subject_id)) ??

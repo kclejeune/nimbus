@@ -54,10 +54,10 @@ describe('canOnCache', () => {
 
 describe('canSeeCache', () => {
 	const a = grants([['ci-*', { w: 1 }]]);
-	it('public caches are always visible; private need any bit', () => {
-		expect(canSeeCache(a, 'anything', true)).toBe(true);
-		expect(canSeeCache(a, 'ci-build', false)).toBe(true);
-		expect(canSeeCache(a, 'prod', false)).toBe(false);
+	it('requires a granted bit regardless of protocol visibility', () => {
+		expect(canSeeCache(a, 'ci-build')).toBe(true);
+		expect(canSeeCache(a, 'prod')).toBe(false);
+		expect(canSeeCache(ADMIN_ACCESS, 'prod')).toBe(true);
 	});
 });
 

@@ -10,12 +10,12 @@ export const GET: RequestHandler = async ({ platform, params, url, locals }) => 
 	if (!db) throw error(500, 'Database binding unavailable');
 
 	const cache = await db
-		.prepare('SELECT is_public FROM cache WHERE name = ?1 AND deleted_at IS NULL')
+		.prepare('SELECT 1 AS x FROM cache WHERE name = ?1 AND deleted_at IS NULL')
 		.bind(params.name)
-		.first<{ is_public: number }>();
+		.first();
 	if (!cache) throw error(404, `Cache "${params.name}" not found`);
 	const access = await effectiveAccessOf(locals, db);
-	if (!canSeeCache(access, params.name, cache.is_public !== 0)) {
+	if (!canSeeCache(access, params.name)) {
 		throw error(403, 'Permission denied');
 	}
 

@@ -18,18 +18,25 @@
 		user,
 		...restProps
 	}: {
-		user: { name?: string | null; email?: string | null; provider?: string } | null;
+		user: {
+			name?: string | null;
+			email?: string | null;
+			provider?: string;
+			role?: string;
+		} | null;
 	} & ComponentProps<typeof Sidebar.Root> = $props();
 
-	const nav = [
-		{ title: 'Overview', url: '/', icon: LayoutDashboard },
-		{ title: 'Caches', url: '/caches', icon: Boxes },
-		{ title: 'Monitoring', url: '/monitoring', icon: ChartLine },
-		{ title: 'Tokens', url: '/tokens', icon: KeyRound },
-		{ title: 'Users', url: '/users', icon: Users },
-		{ title: 'Groups', url: '/groups', icon: UsersRound },
-		{ title: 'Settings', url: '/settings', icon: Settings }
-	];
+	const nav = $derived(
+		[
+			{ title: 'Overview', url: '/', icon: LayoutDashboard },
+			{ title: 'Caches', url: '/caches', icon: Boxes },
+			{ title: 'Monitoring', url: '/monitoring', icon: ChartLine },
+			{ title: 'Tokens', url: '/tokens', icon: KeyRound },
+			{ title: 'Users', url: '/users', icon: Users, adminOnly: true },
+			{ title: 'Groups', url: '/groups', icon: UsersRound, adminOnly: true },
+			{ title: 'Settings', url: '/settings', icon: Settings }
+		].filter((item) => !item.adminOnly || user?.role === 'admin')
+	);
 
 	function isActive(url: string): boolean {
 		return url === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(url);

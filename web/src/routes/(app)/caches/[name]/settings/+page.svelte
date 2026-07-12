@@ -9,6 +9,8 @@
 
 	let { data, form } = $props();
 	const c = $derived(data.cache);
+	// cq-only viewers may edit retention but not visibility/priority/compression.
+	const canConfigure = $derived(data.permissions.canConfigure);
 	let submitting = $state(false);
 	let renaming = $state(false);
 	let deleting = $state(false);
@@ -73,6 +75,7 @@
 				name="is_public"
 				type="checkbox"
 				checked={c.isPublic}
+				disabled={!canConfigure}
 				class="size-4 rounded border-input text-primary focus:ring-ring"
 			/>
 			<Label for="is_public" class="font-normal">Public — anyone can pull without a token</Label>
@@ -81,7 +84,13 @@
 		<div class="grid grid-cols-2 gap-4">
 			<div class="space-y-2">
 				<Label for="priority">Priority</Label>
-				<Input id="priority" name="priority" type="number" value={c.priority} />
+				<Input
+					id="priority"
+					name="priority"
+					type="number"
+					value={c.priority}
+					disabled={!canConfigure}
+				/>
 			</div>
 			<div class="space-y-2">
 				<Label for="compression">Compression</Label>
@@ -89,6 +98,7 @@
 					id="compression"
 					name="compression"
 					value={c.compression}
+					disabled={!canConfigure}
 					class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
 				>
 					<option value="zstd">zstd</option>
@@ -138,6 +148,7 @@
 				id="upstream_caches"
 				name="upstream_caches"
 				rows="2"
+				disabled={!canConfigure}
 				placeholder="https://cache.nixos.org"
 				class="flex w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-xs focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
 				>{c.upstreams.join('\n')}</textarea
@@ -346,68 +357,72 @@
 
 	<hr class="my-10 border-border" />
 
-	<section class="space-y-4">
-		<div>
-			<h2 class="text-sm font-medium">Rename cache</h2>
-			<p class="mt-1 text-sm text-muted-foreground">
-				The signing key is preserved, so already-pushed paths stay trusted. The pull URL changes to
-				the new name.
-			</p>
-		</div>
-		<form
-			method="POST"
-			action="?/rename"
-			use:enhance={() => {
-				renaming = true;
-				return async ({ update }) => {
-					await update({ reset: false });
-					renaming = false;
-				};
-			}}
-			class="flex flex-wrap items-end gap-3"
-		>
-			<div class="min-w-56 flex-1 space-y-2">
-				<Label for="new_name">New name</Label>
-				<Input id="new_name" name="new_name" value={c.name} autocomplete="off" />
+	{#if canConfigure}
+		<section class="space-y-4">
+			<div>
+				<h2 class="text-sm font-medium">Rename cache</h2>
+				<p class="mt-1 text-sm text-muted-foreground">
+					The signing key is preserved, so already-pushed paths stay trusted. The pull URL changes
+					to the new name.
+				</p>
 			</div>
-			<Button type="submit" variant="outline" disabled={renaming}>
-				{renaming ? 'Renaming…' : 'Rename'}
-			</Button>
-		</form>
-		{#if form?.renameError}
-			<p class="text-sm text-destructive">{form.renameError}</p>
-		{/if}
-	</section>
+			<form
+				method="POST"
+				action="?/rename"
+				use:enhance={() => {
+					renaming = true;
+					return async ({ update }) => {
+						await update({ reset: false });
+						renaming = false;
+					};
+				}}
+				class="flex flex-wrap items-end gap-3"
+			>
+				<div class="min-w-56 flex-1 space-y-2">
+					<Label for="new_name">New name</Label>
+					<Input id="new_name" name="new_name" value={c.name} autocomplete="off" />
+				</div>
+				<Button type="submit" variant="outline" disabled={renaming}>
+					{renaming ? 'Renaming…' : 'Rename'}
+				</Button>
+			</form>
+			{#if form?.renameError}
+				<p class="text-sm text-destructive">{form.renameError}</p>
+			{/if}
+		</section>
+	{/if}
 
-	<div class="mt-10 rounded-lg border border-destructive/40 p-5">
-		<h2 class="text-sm font-medium text-destructive">Danger zone</h2>
-		<p class="mt-1 text-sm text-muted-foreground">
-			Deleting removes the cache and hides its paths. Stored data is retained but the cache is no
-			longer reachable.
-		</p>
-		<form
-			method="POST"
-			action="?/delete"
-			class="mt-4"
-			use:enhance={({ cancel }) => {
-				if (!confirm(`Delete cache "${c.name}"? Clients can no longer pull from it.`)) {
-					cancel();
-					return;
-				}
-				deleting = true;
-				return async ({ update }) => {
-					await update();
-					deleting = false;
-				};
-			}}
-		>
-			<Button type="submit" variant="destructive" disabled={deleting}>
-				<Trash2 class="size-4" />
-				{deleting ? 'Deleting…' : 'Delete cache'}
-			</Button>
-		</form>
-		{#if form?.deleteError}
-			<p class="mt-3 text-sm text-destructive">{form.deleteError}</p>
-		{/if}
-	</div>
+	{#if data.permissions.canDestroy}
+		<div class="mt-10 rounded-lg border border-destructive/40 p-5">
+			<h2 class="text-sm font-medium text-destructive">Danger zone</h2>
+			<p class="mt-1 text-sm text-muted-foreground">
+				Deleting removes the cache and hides its paths. Stored data is retained but the cache is no
+				longer reachable.
+			</p>
+			<form
+				method="POST"
+				action="?/delete"
+				class="mt-4"
+				use:enhance={({ cancel }) => {
+					if (!confirm(`Delete cache "${c.name}"? Clients can no longer pull from it.`)) {
+						cancel();
+						return;
+					}
+					deleting = true;
+					return async ({ update }) => {
+						await update();
+						deleting = false;
+					};
+				}}
+			>
+				<Button type="submit" variant="destructive" disabled={deleting}>
+					<Trash2 class="size-4" />
+					{deleting ? 'Deleting…' : 'Delete cache'}
+				</Button>
+			</form>
+			{#if form?.deleteError}
+				<p class="mt-3 text-sm text-destructive">{form.deleteError}</p>
+			{/if}
+		</div>
+	{/if}
 </div>
