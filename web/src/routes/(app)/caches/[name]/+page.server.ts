@@ -7,6 +7,7 @@ import {
 	countStorePaths
 } from '$lib/server/store-paths';
 import { pruneClosure } from '$lib/server/cache/gc';
+import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { canSeeCache } from '$lib/server/auth/permissions';
 import {
@@ -64,13 +65,16 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 	const cacheBase = (platform?.env.CACHE_BASE_URL ?? 'https://cache.kclj.io').replace(/\/$/, '');
 	const publicKey = derivePublicKey(cache.keypair);
 
-	const [{ paths, hasMore }, total, pinned] = await Promise.all([
+	const [{ paths, hasMore }, total, pinned, proxyPublicKey] = await Promise.all([
 		queryStorePaths(db, params.name, { sort, dir, q, limit: PATHS_PAGE_SIZE, offset: 0 }),
 		countStorePaths(db, params.name, q),
 		db
 			.prepare('SELECT store_path_hash FROM gc_root WHERE cache_id = ?1')
 			.bind(cache.id)
-			.all<{ store_path_hash: string }>()
+			.all<{ store_path_hash: string }>(),
+		getProxyKeypair(platform.env)
+			.then(extractPublicKey)
+			.catch(() => null)
 	]);
 
 	return {
@@ -85,6 +89,7 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 			url: `${cacheBase}/${cache.name}`,
 			publicKey
 		},
+		proxy: proxyPublicKey ? { url: cacheBase, publicKey: proxyPublicKey } : null,
 		pinnedHashes: pinned.results.map((r) => r.store_path_hash),
 		paths,
 		hasMore,

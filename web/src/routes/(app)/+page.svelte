@@ -2,6 +2,7 @@
 	import { enhance } from '$app/forms';
 	import { formatBytes, formatCount } from '$lib/format';
 	import IngestChart from '$lib/components/ingest-chart.svelte';
+	import UnifiedEndpointCard from '$lib/components/unified-endpoint-card.svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Card from '$lib/components/ui/card/index.js';
@@ -96,6 +97,12 @@
 			</Card.Root>
 		{/each}
 	</div>
+
+	{#if data.proxyPublicKey && data.cacheBaseUrl}
+		<div class="px-4 lg:px-6">
+			<UnifiedEndpointCard url={data.cacheBaseUrl} publicKey={data.proxyPublicKey} />
+		</div>
+	{/if}
 
 	<div class="px-4 lg:px-6">
 		<IngestChart buckets={data.buckets} />
@@ -219,21 +226,4 @@
 			</Card.Content>
 		</Card.Root>
 	</div>
-
-	{#if data.proxyPublicKey}
-		<Card.Root class="mt-4">
-			<Card.Header>
-				<Card.Title>Unified cache endpoint</Card.Title>
-				<Card.Description>
-					One substituter for every cache you can read — private caches need a token in netrc.
-				</Card.Description>
-			</Card.Header>
-			<Card.Content>
-				<pre
-					class="overflow-x-auto rounded bg-muted p-3 text-xs">substituters = {data.cacheBaseUrl ??
-						'https://cache.example.com'}
-trusted-public-keys = {data.proxyPublicKey}</pre>
-			</Card.Content>
-		</Card.Root>
-	{/if}
 </div>
