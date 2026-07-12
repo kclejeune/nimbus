@@ -1,10 +1,12 @@
 import { betterAuth } from 'better-auth';
+import { createAuthMiddleware } from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { genericOAuth } from 'better-auth/plugins';
 import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { getRequestEvent } from '$app/server';
 import { getDb, schema } from '$lib/server/db';
 import { buildAuthProviders } from './providers';
+import { decodeJwtClaims, extractGroups, syncUserGroups } from './group-sync';
 
 type Env = App.Platform['env'];
 
@@ -40,6 +42,30 @@ export function createAuth(env: Env) {
 				// Populated out-of-band by an admin; never client-settable.
 				role: { type: 'string', defaultValue: 'member', input: false }
 			}
+		},
+		hooks: {
+			// Group sync must run on EVERY oidc login, not just sign-up: the
+			// callback refreshes account.idToken, which carries the groups claim.
+			after: createAuthMiddleware(async (ctx) => {
+				if (!env.OIDC_GROUPS_CLAIM) return;
+				if (!ctx.path.startsWith('/oauth2/callback/oidc')) return;
+				const userId = ctx.context.newSession?.user.id;
+				if (!userId) return;
+				try {
+					const row = await env.ATTIC_DB.prepare(
+						`SELECT idToken FROM account WHERE userId = ?1 AND providerId = 'oidc'
+						 ORDER BY updatedAt DESC LIMIT 1`
+					)
+						.bind(userId)
+						.first<{ idToken: string | null }>();
+					if (!row?.idToken) return;
+					const groups = extractGroups(decodeJwtClaims(row.idToken), env.OIDC_GROUPS_CLAIM);
+					if (groups === null) return; // claim absent: never wipe
+					await syncUserGroups(env.ATTIC_DB, userId, groups);
+				} catch (e) {
+					console.warn(`oidc group sync failed: ${e}`);
+				}
+			})
 		},
 		plugins: [
 			...(oauth.length > 0 ? [genericOAuth({ config: oauth })] : []),

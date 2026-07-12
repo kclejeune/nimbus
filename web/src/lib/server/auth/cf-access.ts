@@ -2,6 +2,7 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { eq, sql } from 'drizzle-orm';
 import type { RequestEvent } from '@sveltejs/kit';
 import { getDb, schema } from '$lib/server/db';
+import { extractGroups, syncUserGroups } from './group-sync';
 import type { SessionUser, UserRole } from './types';
 
 type Env = App.Platform['env'];
@@ -150,6 +151,17 @@ export async function resolveCfAccessUser(
 
 	// Full D1 resolution (first visit or expired/invalid cookie).
 	const user = await upsertAccessUser(env, { sub, email, name: payload.name ?? email });
+
+	// Access can forward IdP groups as a custom claim; sync only when the
+	// claim is present so an Access JWT without it never wipes memberships.
+	if (env.OIDC_GROUPS_CLAIM) {
+		const groups = extractGroups(payload as Record<string, unknown>, env.OIDC_GROUPS_CLAIM);
+		if (groups !== null) {
+			await syncUserGroups(env.ATTIC_DB, user.id, groups).catch((e) =>
+				console.warn(`cf-access group sync failed: ${e}`)
+			);
+		}
+	}
 
 	// Mint a fresh session cookie to skip D1 on subsequent requests.
 	if (sessionSecret) {

@@ -43,7 +43,7 @@ export function buildAuthProviders(env: Env): {
 			discoveryUrl: `${env.OIDC_ISSUER.replace(/\/$/, '')}/.well-known/openid-configuration`,
 			clientId: env.OIDC_CLIENT_ID,
 			clientSecret: env.OIDC_CLIENT_SECRET,
-			scopes: ['openid', 'email', 'profile'],
+			scopes: ['openid', 'email', 'profile', ...(env.OIDC_GROUPS_CLAIM ? ['groups'] : [])],
 			pkce: true
 		});
 	}

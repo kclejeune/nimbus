@@ -48,7 +48,9 @@
 		"OIDC_ISSUER": "https://auth.kclj.io",
 		"OIDC_CLIENT_ID": "nimbus",
 		"CF_ACCESS_TEAM_DOMAIN": "https://kclejeune.cloudflareaccess.com",
-		"CF_ACCESS_AUD": "623b56c404ad5907aad2ee0e6255d7c88f6e9aecf64ee2aca77090153c115217"
+		"CF_ACCESS_AUD": "623b56c404ad5907aad2ee0e6255d7c88f6e9aecf64ee2aca77090153c115217",
+		// OIDC ID-token claim carrying group names; enables group→permission sync.
+		"OIDC_GROUPS_CLAIM": "groups"
 	},
 
 	// NAR/chunk storage, shared with the attic API worker — needed by the
