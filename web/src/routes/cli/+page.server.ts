@@ -1,7 +1,7 @@
 import { error, fail, redirect } from '@sveltejs/kit';
 import { mintAndStore } from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
-import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { effectiveAccessOf, requireActive } from '$lib/server/auth/guard';
 import { parseTokenBits, scopeDenial, tokenScopeOptions } from '$lib/server/auth/permissions';
 import { writeAudit } from '$lib/server/audit';
 import type { PageServerLoad, Actions } from './$types';
@@ -13,6 +13,7 @@ function parsePort(raw: string | null): number | null {
 
 export const load: PageServerLoad = async ({ url, locals, platform }) => {
 	if (!locals.user) throw error(401, 'Not signed in');
+	requireActive(locals);
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
@@ -35,6 +36,7 @@ export const load: PageServerLoad = async ({ url, locals, platform }) => {
 export const actions: Actions = {
 	authorize: async ({ request, locals, platform }) => {
 		if (!locals.user) throw error(401, 'Not signed in');
+		requireActive(locals);
 		const env = platform?.env;
 		if (!env?.ATTIC_DB) throw error(500, 'Database binding unavailable');
 		if (!env.JWT_HS256_SECRET_BASE64) {
