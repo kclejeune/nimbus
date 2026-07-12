@@ -27,6 +27,8 @@
 		post('setRole', { userId, role }, 'Failed to update role.');
 	const setOwner = (userId: string, owner: boolean) =>
 		post('setOwner', { userId, owner: String(owner) }, 'Failed to update owner.');
+	const setStatus = (userId: string, status: 'active' | 'pending') =>
+		post('setStatus', { userId, status }, 'Failed to update status.');
 
 	function protectedReason(u: (typeof data.users)[number]): string | null {
 		if (u.id === data.currentUserId) return 'You cannot delete your own account';
@@ -115,6 +117,13 @@
 										owner
 									</span>
 								{/if}
+								{#if u.status === 'pending'}
+									<span
+										class="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400"
+									>
+										pending
+									</span>
+								{/if}
 							</div>
 							<div class="font-mono text-xs text-muted-foreground">{u.email}</div>
 						</td>
@@ -161,6 +170,19 @@
 										{:else}
 											<DropdownMenu.Item onSelect={() => setOwner(u.id, true)}>
 												Make owner
+											</DropdownMenu.Item>
+										{/if}
+										<DropdownMenu.Separator />
+										{#if u.status === 'pending'}
+											<DropdownMenu.Item onSelect={() => setStatus(u.id, 'active')}>
+												Activate
+											</DropdownMenu.Item>
+										{:else}
+											<DropdownMenu.Item
+												disabled={u.id === data.currentUserId || u.isOwner}
+												onSelect={() => setStatus(u.id, 'pending')}
+											>
+												Deactivate
 											</DropdownMenu.Item>
 										{/if}
 									</DropdownMenu.Content>
