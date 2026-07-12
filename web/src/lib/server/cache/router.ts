@@ -21,7 +21,7 @@ import {
 	parseUpstreams
 } from './missing-paths';
 import { type ExecutionContext } from './platform';
-import { getProxyKeypair, pickReadableWinner } from './proxy';
+import { getProxyKeypair, isKnownAbsent, pickReadableWinner, recordAbsent } from './proxy';
 import { extractPublicKey } from '../attic/signing';
 import { cacheTag, keyedNarinfoUrl, PREFETCH_DEPTH_HEADER, serveStore } from './store';
 import {
@@ -269,12 +269,15 @@ async function handleProxyNarInfo(
 	const storePathHash = filename.slice(0, -'.narinfo'.length);
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
+	// Known-absent paths short-circuit before any token or D1 work: absence is
+	// token-independent, and mass queries re-ask for every miss.
+	if (isKnownAbsent(storePathHash)) return errorResponse(404, 'Not found', 'NoSuchObject');
+
 	const token = await proxyToken(request, env);
 	const session = db.readSession(env.ATTIC_DB);
-	const winner = pickReadableWinner(
-		token,
-		await db.cachesWithStorePathHash(session, storePathHash)
-	);
+	const candidates = await db.cachesWithStorePathHash(session, storePathHash);
+	if (candidates.length === 0) recordAbsent(storePathHash);
+	const winner = pickReadableWinner(token, candidates);
 	// Not-found and not-readable are both 404: the root names no caches, so
 	// there is nothing to enumerate.
 	if (!winner) return errorResponse(404, 'Not found', 'NoSuchObject');

@@ -13,7 +13,7 @@ import { buildNarInfo } from '../attic/narinfo';
 import { extractPublicKey } from '../attic/signing';
 import * as db from './db';
 import { fetchUpstreamNarInfo, parseUpstreams } from './missing-paths';
-import { getProxyKeypair } from './proxy';
+import { clearAbsent, getProxyKeypair } from './proxy';
 import type { ExecutionContext } from './platform';
 
 type Env = App.Platform['env'];
@@ -90,6 +90,9 @@ export async function warmNarinfoAfterUpload(
 	cache: { name: string; keypair: string | null },
 	storePathHash: string
 ): Promise<void> {
+	// The root proxy's negative memo is per-isolate; this clears it where the
+	// upload landed, and the TTL bounds the others.
+	clearAbsent(storePathHash);
 	const store = ctx?.exports?.CachedStore;
 	if (!store) return;
 	try {

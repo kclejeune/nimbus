@@ -109,6 +109,8 @@ CREATE INDEX IF NOT EXISTS idx_object_nar ON object(nar_id);
 -- Store-path browsing: order/filter by date or name within a cache.
 CREATE INDEX IF NOT EXISTS idx_object_cache_created ON object(cache_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_object_cache_path ON object(cache_id, store_path);
+-- Root-proxy resolution: lookup by hash without a cache name.
+CREATE INDEX IF NOT EXISTS idx_object_hash ON object(store_path_hash);
 
 -- Chunk table (deduplicated storage units)
 CREATE TABLE IF NOT EXISTS chunk (

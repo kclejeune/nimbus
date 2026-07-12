@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { pickReadableWinner, proxyKeyName } from './proxy';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+	clearAbsent,
+	isKnownAbsent,
+	pickReadableWinner,
+	proxyKeyName,
+	recordAbsent
+} from './proxy';
 import type { VerifiedToken, Permission } from '../attic/token';
 import { NO_PERMISSION } from '../attic/token';
 
@@ -34,6 +40,28 @@ describe('pickReadableWinner', () => {
 		const all = tokenWith({ '*': { pull: true } });
 		expect(pickReadableWinner(all, rows)?.name).toBe('private-b');
 		expect(pickReadableWinner(all, [rows[0], rows[2]])?.name).toBe('private-c');
+	});
+});
+
+describe('absent-path memo', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+		clearAbsent('h1');
+	});
+
+	it('remembers absence until the TTL elapses', () => {
+		vi.useFakeTimers();
+		expect(isKnownAbsent('h1')).toBe(false);
+		recordAbsent('h1');
+		expect(isKnownAbsent('h1')).toBe(true);
+		vi.advanceTimersByTime(61_000);
+		expect(isKnownAbsent('h1')).toBe(false);
+	});
+
+	it('is cleared when an upload lands the path', () => {
+		recordAbsent('h1');
+		clearAbsent('h1');
+		expect(isKnownAbsent('h1')).toBe(false);
 	});
 });
 

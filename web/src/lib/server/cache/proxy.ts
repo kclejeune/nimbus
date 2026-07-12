@@ -23,6 +23,37 @@ export function pickReadableWinner(
 	return readable[0] ?? null;
 }
 
+// Negative memo for root-narinfo misses. The root advertises WantMassQuery,
+// so closure walks re-ask for every absent path; without this each ask is a
+// D1 query (per-cache 404s are negative-cached at the edge instead, but root
+// readability is token-dependent, so only token-independent absence — an
+// empty candidate set — is safe to remember). Per-isolate and TTL-bounded:
+// uploads can't purge it, so a just-pushed path may 404 at the root for up
+// to ABSENT_TTL_MS. Size-capped as a mass-query backstop.
+const ABSENT_TTL_MS = 60_000;
+const ABSENT_MAX_ENTRIES = 20_000;
+const absentStorePaths = new Map<string, number>();
+
+export function isKnownAbsent(storePathHash: string): boolean {
+	const until = absentStorePaths.get(storePathHash);
+	if (until === undefined) return false;
+	if (Date.now() > until) {
+		absentStorePaths.delete(storePathHash);
+		return false;
+	}
+	return true;
+}
+
+export function recordAbsent(storePathHash: string): void {
+	if (absentStorePaths.size >= ABSENT_MAX_ENTRIES) absentStorePaths.clear();
+	absentStorePaths.set(storePathHash, Date.now() + ABSENT_TTL_MS);
+}
+
+/** Called after an upload lands the path, so this isolate stops 404ing it. */
+export function clearAbsent(storePathHash: string): void {
+	absentStorePaths.delete(storePathHash);
+}
+
 export function proxyKeyName(env: Env): string {
 	try {
 		if (env.CACHE_BASE_URL) return `${new URL(env.CACHE_BASE_URL).hostname}-1`;
