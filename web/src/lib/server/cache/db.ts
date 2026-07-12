@@ -761,6 +761,55 @@ export async function deleteDeviceAuth(db: D1Database, deviceCode: string): Prom
 	await db.prepare('DELETE FROM device_auth WHERE device_code = ?1').bind(deviceCode).run();
 }
 
+// --- root proxy resolution ---------------------------------------------------
+
+export interface LiveCacheRow {
+	name: string;
+	priority: number;
+	is_public: number;
+}
+
+export async function listLiveCaches(db: D1Database): Promise<LiveCacheRow[]> {
+	const { results } = await db
+		.prepare('SELECT name, priority, is_public FROM cache WHERE deleted_at IS NULL')
+		.all<LiveCacheRow>();
+	return results;
+}
+
+/** Names of live caches holding an object with this store-path hash. */
+export async function cacheNamesWithStorePathHash(
+	db: D1Database,
+	storePathHash: string
+): Promise<string[]> {
+	const { results } = await db
+		.prepare(
+			`SELECT c.name FROM object o
+			 JOIN cache c ON c.id = o.cache_id
+			 WHERE o.store_path_hash = ?1 AND c.deleted_at IS NULL`
+		)
+		.bind(storePathHash)
+		.all<{ name: string }>();
+	return results.map((r) => r.name);
+}
+
+/** Names of live caches referencing a NAR by hash (raw or sha256:-prefixed). */
+export async function cacheNamesWithNarHash(
+	db: D1Database,
+	narHashes: string[]
+): Promise<string[]> {
+	const placeholders = narHashes.map((_, i) => `?${i + 1}`).join(', ');
+	const { results } = await db
+		.prepare(
+			`SELECT DISTINCT c.name FROM nar n
+			 JOIN object o ON o.nar_id = n.id
+			 JOIN cache c ON c.id = o.cache_id
+			 WHERE n.nar_hash IN (${placeholders}) AND c.deleted_at IS NULL`
+		)
+		.bind(...narHashes)
+		.all<{ name: string }>();
+	return results.map((r) => r.name);
+}
+
 function nowRfc3339(): string {
 	return new Date().toISOString();
 }
