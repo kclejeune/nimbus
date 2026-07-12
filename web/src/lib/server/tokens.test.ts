@@ -18,5 +18,18 @@ describe('mintScopedToken', () => {
 		expect(perm.destroyCache).toBe(true);
 		expect(perm.delete).toBe(false);
 		expect(verified.jti).toBe(minted.jti);
+		expect(verified.gc).toBe(false);
+	});
+
+	it('carries the gc claim for a gc-only token', async () => {
+		const minted = await mintScopedToken(SECRET, 'u1', {
+			cacheScope: '*',
+			bits: {},
+			gc: true,
+			days: 1
+		});
+		const verified = await verifyAtticToken(minted.token, { hs256SecretBase64: SECRET });
+		expect(verified.gc).toBe(true);
+		expect(verified.caches.get('*')?.delete).toBe(false);
 	});
 });

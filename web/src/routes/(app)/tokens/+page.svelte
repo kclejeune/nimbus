@@ -49,7 +49,11 @@
 				<Input id="name" name="name" placeholder="ci-deploy" />
 			</div>
 
-			<TokenScopeFields scopeOptions={data.scopeOptions} advanced />
+			<TokenScopeFields
+				scopeOptions={data.scopeOptions}
+				advanced
+				allowGc={data.user.role === 'admin'}
+			/>
 
 			{#if form?.error}
 				<p class="text-sm text-destructive">{form.error}</p>

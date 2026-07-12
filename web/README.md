@@ -33,7 +33,9 @@ nimbus-only global `gc`) at two layers:
   bounded at mint time by the issuer's effective access, revocable by `jti`.
   Verification is unchanged attic semantics, so attic-minted tokens work.
   Tracked tokens are suspended while their owner is deactivated and resume on
-  reactivation; revocation is permanent.
+  reactivation; revocation is permanent. Admins can additionally mint a
+  storage-wide garbage-collection token (the nimbus `gc` claim; deliberately
+  a token scope, never a per-cache grant) for triggering GC from CI or cron.
 
 New accounts start `pending` and see a wall page until an admin activates
 them, or automatically when their groups claim contains

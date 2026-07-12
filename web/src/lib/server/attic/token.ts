@@ -2,8 +2,9 @@
 // (which mints). Claims live under the `https://jwt.attic.rs/v1` namespace as
 // `{ caches: { "<name-or-pattern>": { r/w/d/cc/cr/cq/cd: 1 } } }`.
 
+import { NIMBUS_CLAIM_NAMESPACE } from '$lib/server/attic-token';
+
 const CLAIM_NAMESPACE = 'https://jwt.attic.rs/v1';
-const NIMBUS_CLAIM_NAMESPACE = 'https://nimbus.kclj.io/v1';
 const CLOCK_LEEWAY_SECONDS = 60;
 
 export interface Permission {

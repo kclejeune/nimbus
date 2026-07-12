@@ -7,12 +7,15 @@
 	let {
 		scopeOptions,
 		defaultPush = false,
-		advanced = false
+		advanced = false,
+		allowGc = false
 	}: {
 		scopeOptions: ScopeOption[];
 		defaultPush?: boolean;
 		/** Show the cache-management bits (tokens page yes, device flow no). */
 		advanced?: boolean;
+		/** Offer the storage-wide GC claim (admins on the tokens page only). */
+		allowGc?: boolean;
 	} = $props();
 
 	// svelte-ignore state_referenced_locally -- initial selection only; options are fixed per load
@@ -71,5 +74,14 @@
 				{p.label}
 			</label>
 		{/each}
+	{/if}
+	{#if allowGc}
+		<label
+			class="flex items-center gap-2 text-sm"
+			title="Storage-wide: lets the token trigger garbage collection via the API, independent of the cache scope"
+		>
+			<input name="gc" type="checkbox" class="size-4 rounded border-input text-primary" />
+			Garbage collection
+		</label>
 	{/if}
 </div>

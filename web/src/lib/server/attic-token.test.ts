@@ -12,7 +12,13 @@ describe('mintAtticToken', () => {
 		expect(verified.caches.get('*')?.pull).toBe(true);
 	});
 
-	it('never mints the legacy nimbus gc claim', async () => {
+	it('roundtrips the nimbus gc claim', async () => {
+		const jwt = await mintAtticToken(SECRET, 'user-1', { '*': {} }, 300, 'jti-2', { gc: 1 });
+		const verified = await verifyAtticToken(jwt, { hs256SecretBase64: SECRET });
+		expect(verified.gc).toBe(true);
+	});
+
+	it('omits the nimbus namespace when no global claims are given', async () => {
 		const jwt = await mintAtticToken(SECRET, 'user-1', { foo: { w: 1 } });
 		const verified = await verifyAtticToken(jwt, { hs256SecretBase64: SECRET });
 		expect(verified.gc).toBe(false);

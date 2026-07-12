@@ -403,9 +403,9 @@ async function handleGcTrigger(
 		return errorResponse(401, `Authentication failed: ${e}`);
 	}
 	if (!token) return errorResponse(401, 'No token provided');
-	// The app no longer mints the nimbus gc claim (GC is admin-only from the
-	// dashboard); accepting it here keeps previously minted gc tokens working
-	// until they expire, alongside the wildcard-delete probe.
+	// The nimbus gc claim is minted admin-only from the tokens page (it is
+	// storage-wide, so it is never a per-cache grant); the wildcard-delete
+	// probe keeps attic-native tokens working.
 	if (!token.gc && !permissionForCache(token, 'gc').delete) {
 		return errorResponse(403, 'Permission denied: garbage collection');
 	}
