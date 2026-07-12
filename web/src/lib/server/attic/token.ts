@@ -3,6 +3,7 @@
 // `{ caches: { "<name-or-pattern>": { r/w/d/cc/cr/cq/cd: 1 } } }`.
 
 const CLAIM_NAMESPACE = 'https://jwt.attic.rs/v1';
+const NIMBUS_CLAIM_NAMESPACE = 'https://nimbus.kclj.io/v1';
 const CLOCK_LEEWAY_SECONDS = 60;
 
 export interface Permission {
@@ -30,6 +31,8 @@ export interface VerifiedToken {
 	jti?: string;
 	/** cache name pattern -> permission */
 	caches: Map<string, Permission>;
+	/** nimbus extension: may trigger garbage collection */
+	gc: boolean;
 }
 
 interface RawClaims {
@@ -40,6 +43,7 @@ interface RawClaims {
 	iss?: string;
 	aud?: string | string[];
 	[CLAIM_NAMESPACE]?: { caches?: Record<string, Record<string, unknown>> };
+	[NIMBUS_CLAIM_NAMESPACE]?: { gc?: unknown };
 }
 
 function base64urlDecode(s: string): Uint8Array {
@@ -151,7 +155,7 @@ export async function verifyAtticToken(
 		});
 	}
 
-	return { sub: claims.sub, jti: claims.jti, caches };
+	return { sub: claims.sub, jti: claims.jti, caches, gc: flag(claims[NIMBUS_CLAIM_NAMESPACE]?.gc) };
 }
 
 /** Glob match with `*` (any run) and `?` (single char), like attic's wildmatch. */
