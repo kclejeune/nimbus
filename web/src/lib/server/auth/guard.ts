@@ -10,10 +10,22 @@ import {
 	type EffectiveAccess,
 	type PermissionBit
 } from './permissions';
+import type { SessionUser } from './types';
 
 export function requireAdmin(locals: App.Locals) {
 	if (!locals.user) throw error(401, 'Not signed in');
 	if (locals.user.role !== 'admin') throw error(403, 'Admins only');
+}
+
+/** Admins are never locked out by activation status. */
+export function isActiveUser(user: Pick<SessionUser, 'role' | 'status'>): boolean {
+	return user.role === 'admin' || user.status === 'active';
+}
+
+/** For routes outside the (app) layout gate (CLI token flows). */
+export function requireActive(locals: App.Locals): void {
+	if (!locals.user) throw error(401, 'Not signed in');
+	if (!isActiveUser(locals.user)) throw error(403, 'Account pending approval');
 }
 
 /** Load (once per request) the signed-in user's effective access. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decodeJwtClaims, diffGroupSync, extractGroups } from './group-sync';
+import { decodeJwtClaims, diffGroupSync, extractGroups, shouldAutoActivate } from './group-sync';
 
 function fakeJwt(payload: object): string {
 	const b64 = btoa(JSON.stringify(payload))
@@ -49,5 +49,16 @@ describe('diffGroupSync', () => {
 	});
 	it('ignores unmapped claim values', () => {
 		expect(diffGroupSync(mapped, ['strangers'], [])).toEqual({ add: [], remove: [] });
+	});
+});
+
+describe('shouldAutoActivate', () => {
+	it('requires both a configured group and a present claim', () => {
+		expect(shouldAutoActivate(['nimbus_user'], 'nimbus_user')).toBe(true);
+		expect(shouldAutoActivate(['other'], 'nimbus_user')).toBe(false);
+		expect(shouldAutoActivate([], 'nimbus_user')).toBe(false);
+		expect(shouldAutoActivate(null, 'nimbus_user')).toBe(false);
+		expect(shouldAutoActivate(['nimbus_user'], undefined)).toBe(false);
+		expect(shouldAutoActivate(['nimbus_user'], '')).toBe(false);
 	});
 });

@@ -35,6 +35,23 @@ export function extractGroups(
 	return null;
 }
 
+/** Auto-activation rule: the raw claim value (not local groups) names the user. */
+export function shouldAutoActivate(
+	claimValues: string[] | null,
+	activationGroup: string | undefined
+): boolean {
+	return Boolean(activationGroup) && claimValues !== null && claimValues.includes(activationGroup!);
+}
+
+/** One-way pending → active; returns true when this call flipped it. */
+export async function activateIfPending(db: D1Database, userId: string): Promise<boolean> {
+	const res = await db
+		.prepare("UPDATE user SET status = 'active' WHERE id = ?1 AND status = 'pending'")
+		.bind(userId)
+		.run();
+	return (res.meta.changes ?? 0) > 0;
+}
+
 export interface MappedGroup {
 	id: string;
 	oidcGroup: string;
