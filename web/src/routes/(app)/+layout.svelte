@@ -9,7 +9,7 @@
 <Sidebar.Provider
 	style="--sidebar-width: calc(var(--spacing) * 72); --header-height: calc(var(--spacing) * 12);"
 >
-	<AppSidebar variant="inset" user={data.user} accessConfigured={data.accessConfigured} />
+	<AppSidebar variant="inset" user={data.user} />
 	<Sidebar.Inset>
 		<SiteHeader />
 		<!-- Plain block (not flex): flex items default to min-width auto, which

@@ -8,13 +8,13 @@
 	let { data } = $props();
 
 	async function signOut() {
-		// Mirrors nav-user.svelte: clear the better-auth session, then let
-		// Cloudflare Access end its own session when it fronts this domain.
-		if (data.user.provider !== 'cf-access') await authClient.signOut();
-		if (data.accessConfigured) {
+		// Mirrors nav-user.svelte: only an Access session needs the Access
+		// logout hop; OIDC sessions clear the cookie and return to the login page.
+		if (data.user.provider === 'cf-access') {
 			window.location.href = '/cdn-cgi/access/logout';
 			return;
 		}
+		await authClient.signOut();
 		await goto('/login');
 	}
 </script>
