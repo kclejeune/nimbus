@@ -109,7 +109,7 @@
 					<tr class="transition-colors hover:bg-muted/30">
 						<td class="px-4 py-3">
 							<div class="flex items-center gap-2">
-								<span class="font-medium">{u.name}</span>
+								<a href="/users/{u.id}" class="font-medium hover:underline">{u.name}</a>
 								{#if u.isOwner}
 									<span class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
 										owner
