@@ -1,6 +1,10 @@
 import { error, fail } from '@sveltejs/kit';
 import { mintScopedToken, insertApiToken } from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
+import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { scopeDenial, tokenScopeOptions } from '$lib/server/auth/permissions';
+import { writeAudit } from '$lib/server/audit';
+import type { CachePermission } from '$lib/server/attic-token';
 import type { PageServerLoad, Actions } from './$types';
 
 interface GrantRow {
@@ -35,7 +39,7 @@ export const load: PageServerLoad = async ({ url, locals, platform }) => {
 		code,
 		grant,
 		notFound: Boolean(code) && grant === null,
-		cacheNames: await listCacheNames(db),
+		scopeOptions: tokenScopeOptions(await effectiveAccessOf(locals, db), await listCacheNames(db)),
 		user: { email: locals.user.email, name: locals.user.name }
 	};
 };
@@ -67,10 +71,19 @@ export const actions: Actions = {
 		}
 		if (!canPull && !canPush) return fail(400, { error: 'Grant at least one permission.' });
 
+		const bits: CachePermission = {};
+		if (canPull) bits.r = 1;
+		if (canPush) bits.w = 1;
+		const cacheScope = String(form.get('cache') ?? '*');
+		const denial = scopeDenial(await effectiveAccessOf(locals, env.ATTIC_DB), {
+			pattern: cacheScope,
+			bits
+		});
+		if (denial) return fail(403, { error: denial });
+
 		const minted = await mintScopedToken(env.JWT_HS256_SECRET_BASE64, locals.user.id, {
-			cacheScope: String(form.get('cache') ?? '*'),
-			canPull,
-			canPush,
+			cacheScope,
+			bits,
 			days: Math.max(1, Math.min(3650, Number(form.get('expiry_days') ?? 90)))
 		});
 
@@ -82,6 +95,13 @@ export const actions: Actions = {
 				 WHERE user_code = ?4 AND status = 'pending'`
 			).bind(JSON.stringify(minted.caches), locals.user.id, minted.token, userCode)
 		]);
+
+		await writeAudit(env.ATTIC_DB, {
+			userId: locals.user.id,
+			action: 'token.issue',
+			target: minted.jti,
+			detail: JSON.stringify({ scope: cacheScope, bits, via: 'device-flow' })
+		});
 
 		return { approved: true };
 	}

@@ -1,6 +1,10 @@
 import { error, fail } from '@sveltejs/kit';
 import { mintAndStore } from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
+import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { scopeDenial, tokenScopeOptions } from '$lib/server/auth/permissions';
+import { writeAudit } from '$lib/server/audit';
+import type { CachePermission } from '$lib/server/attic-token';
 import type { PageServerLoad, Actions } from './$types';
 
 interface TokenRow {
@@ -17,7 +21,7 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
-	const [{ results: tokens }, cacheNames] = await Promise.all([
+	const [{ results: tokens }, cacheNames, access] = await Promise.all([
 		db
 			.prepare(
 				`SELECT id, name, permissions, expires_at, revoked_at, created_at
@@ -25,12 +29,14 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 			)
 			.bind(locals.user.id)
 			.all<TokenRow>(),
-		listCacheNames(db)
+		listCacheNames(db),
+		effectiveAccessOf(locals, db)
 	]);
 
 	const now = Math.floor(Date.now() / 1000);
 	return {
-		cacheNames,
+		scopeOptions: tokenScopeOptions(access, cacheNames),
+		gcAllowed: access.gc,
 		tokens: tokens.map((t) => ({
 			id: t.id,
 			name: t.name,
@@ -57,17 +63,23 @@ export const actions: Actions = {
 
 		const form = await request.formData();
 		const name = String(form.get('name') ?? '').trim();
-		const canPull = form.get('pull') === 'on';
-		const canPush = form.get('push') === 'on';
-		const canDelete = form.get('delete') === 'on';
-
 		if (!name) return fail(400, { error: 'Give the token a name.' });
-		if (!canPull && !canPush && !canDelete) {
-			return fail(400, { error: 'Grant at least one permission.' });
-		}
-		if (canDelete && locals.user.role !== 'admin') {
-			return fail(403, { error: 'Only admins can grant delete.' });
-		}
+
+		const bits: CachePermission = {};
+		if (form.get('pull') === 'on') bits.r = 1;
+		if (form.get('push') === 'on') bits.w = 1;
+		if (form.get('delete') === 'on') bits.d = 1;
+		if (form.get('create_cache') === 'on') bits.cc = 1;
+		if (form.get('configure_cache') === 'on') bits.cr = 1;
+		if (form.get('configure_retention') === 'on') bits.cq = 1;
+		if (form.get('destroy_cache') === 'on') bits.cd = 1;
+		const gc = form.get('gc') === 'on';
+		const cacheScope = String(form.get('cache') ?? '*');
+
+		// Mint-time bounding: a token may only carry what its creator holds.
+		const access = await effectiveAccessOf(locals, env.ATTIC_DB);
+		const denial = scopeDenial(access, { pattern: cacheScope, bits, gc });
+		if (denial) return fail(403, { error: denial });
 
 		// The plaintext token is returned exactly once; only its hash is stored.
 		const minted = await mintAndStore(
@@ -76,13 +88,18 @@ export const actions: Actions = {
 			locals.user.id,
 			name,
 			{
-				cacheScope: String(form.get('cache') ?? '*'),
-				canPull,
-				canPush,
-				canDelete,
+				cacheScope,
+				bits,
+				gc,
 				days: Math.max(1, Math.min(3650, Number(form.get('expiry_days') ?? 90)))
 			}
 		);
+		await writeAudit(env.ATTIC_DB, {
+			userId: locals.user.id,
+			action: 'token.issue',
+			target: minted.jti,
+			detail: JSON.stringify({ scope: cacheScope, bits, gc })
+		});
 		return { issued: { name, token: minted.token } };
 	},
 
@@ -96,6 +113,7 @@ export const actions: Actions = {
 			.prepare('UPDATE api_token SET revoked_at = ?1 WHERE id = ?2 AND user_id = ?3')
 			.bind(Math.floor(Date.now() / 1000), id, locals.user.id)
 			.run();
+		await writeAudit(db, { userId: locals.user.id, action: 'token.revoke', target: id });
 
 		return { revoked: true };
 	}
