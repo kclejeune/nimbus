@@ -60,7 +60,13 @@ export function createAuth(env: Env) {
 			// sign-up: the callback refreshes account.idToken with the groups claim.
 			after: createAuthMiddleware(async (ctx) => {
 				if (!env.OIDC_GROUPS_CLAIM) return;
-				if (!ctx.path.startsWith('/oauth2/callback/oidc')) return;
+				// ctx.path is the route TEMPLATE ("/oauth2/callback/:providerId"),
+				// never the concrete URL — the provider id rides in ctx.params.
+				// When params are unavailable, fall through: the account query
+				// below is already scoped to providerId 'oidc'.
+				if (!ctx.path.startsWith('/oauth2/callback')) return;
+				const providerId = (ctx.params as Record<string, string> | undefined)?.providerId;
+				if (providerId && providerId !== 'oidc') return;
 				const userId = ctx.context.newSession?.user.id;
 				if (!userId) return;
 				try {
