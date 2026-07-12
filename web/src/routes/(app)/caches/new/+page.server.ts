@@ -1,5 +1,7 @@
 import { fail, redirect, error } from '@sveltejs/kit';
 import { CacheConfigError, createCache } from '$lib/server/cache/cache-config';
+import { requireCachePermission } from '$lib/server/auth/guard';
+import { writeAudit } from '$lib/server/audit';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { Actions } from './$types';
 
@@ -23,6 +25,8 @@ export const actions: Actions = {
 			});
 		}
 
+		await requireCachePermission(locals, platform.env.ATTIC_DB, 'cc', name, 'create cache');
+
 		try {
 			await createCache(platform.env, name, {
 				is_public: isPublic,
@@ -40,6 +44,12 @@ export const actions: Actions = {
 				values: { name, isPublic, priority, compression, retentionRaw }
 			});
 		}
+
+		await writeAudit(platform.env.ATTIC_DB, {
+			userId: locals.user.id,
+			action: 'cache.create',
+			target: name
+		});
 
 		redirect(303, `/caches/${name}`);
 	}

@@ -1,5 +1,7 @@
 import { error, fail } from '@sveltejs/kit';
 import { runGc } from '$lib/server/cache/gc';
+import { requireGc } from '$lib/server/auth/guard';
+import { writeAudit } from '$lib/server/audit';
 import type { PageServerLoad, Actions } from './$types';
 
 type Count = { n: number };
@@ -100,12 +102,15 @@ export const load: PageServerLoad = async ({ platform }) => {
 export const actions: Actions = {
 	gc: async ({ request, locals, platform }) => {
 		if (!locals.user) throw error(401, 'Not signed in');
-		if (locals.user.role !== 'admin') throw error(403, 'Admins only');
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
+		await requireGc(locals, platform.env.ATTIC_DB);
 
 		const dryRun = (await request.formData()).get('dry_run') === '1';
 		try {
 			const gcStats = (await runGc(platform.env, { dryRun })) as Record<string, number>;
+			if (!dryRun) {
+				await writeAudit(platform.env.ATTIC_DB, { userId: locals.user.id, action: 'gc.trigger' });
+			}
 			return { gcStats, dryRun };
 		} catch (e) {
 			return fail(502, { gcError: `Garbage collection failed: ${e}` });

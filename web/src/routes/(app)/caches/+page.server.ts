@@ -1,4 +1,6 @@
 import { error } from '@sveltejs/kit';
+import { canSeeCache } from '$lib/server/auth/permissions';
+import { effectiveAccessOf } from '$lib/server/auth/guard';
 import type { PageServerLoad } from './$types';
 
 interface CacheRow {
@@ -11,7 +13,7 @@ interface CacheRow {
 	storage_bytes: number;
 }
 
-export const load: PageServerLoad = async ({ platform }) => {
+export const load: PageServerLoad = async ({ platform, locals }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
@@ -31,8 +33,11 @@ export const load: PageServerLoad = async ({ platform }) => {
 		)
 		.all<CacheRow>();
 
+	const access = await effectiveAccessOf(locals, db);
+	const visible = results.filter((c) => canSeeCache(access, c.name, c.is_public !== 0));
+
 	return {
-		caches: results.map((c) => ({
+		caches: visible.map((c) => ({
 			name: c.name,
 			isPublic: c.is_public !== 0,
 			priority: c.priority,

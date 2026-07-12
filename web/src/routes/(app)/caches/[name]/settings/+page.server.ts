@@ -6,6 +6,9 @@ import {
 	renameCache
 } from '$lib/server/cache/cache-config';
 import { listGcRoots } from '$lib/server/cache/gc';
+import { canOnCache } from '$lib/server/auth/permissions';
+import { effectiveAccessOf, requireCachePermission } from '$lib/server/auth/guard';
+import { writeAudit } from '$lib/server/audit';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { PageServerLoad, Actions } from './$types';
 
@@ -58,11 +61,25 @@ async function getCache(db: App.Platform['env']['ATTIC_DB'], name: string): Prom
 	return cache;
 }
 
-export const load: PageServerLoad = async ({ platform, params }) => {
+export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	const env = platform?.env;
 	if (!env) throw error(500, 'Platform bindings unavailable');
 
 	const cache = await getCache(env.ATTIC_DB, params.name);
+
+	const access = await effectiveAccessOf(locals, env.ATTIC_DB);
+	const canConfigure = canOnCache(access, 'cr', params.name);
+	const canRetention = canConfigure || canOnCache(access, 'cq', params.name);
+	const canDestroy = canOnCache(access, 'cd', params.name);
+	if (
+		!canRetention &&
+		!canDestroy &&
+		cache.is_public === 0 &&
+		!canOnCache(access, 'r', params.name)
+	) {
+		throw error(403, 'Permission denied');
+	}
+
 	const roots = await listGcRoots(env, cache.id);
 
 	let upstreams: string[] = [];
@@ -83,7 +100,8 @@ export const load: PageServerLoad = async ({ platform, params }) => {
 			retentionMaxBytes: cache.retention_max_bytes,
 			upstreams
 		},
-		roots
+		roots,
+		permissions: { canConfigure, canRetention, canDestroy }
 	};
 };
 
@@ -91,6 +109,12 @@ export const actions: Actions = {
 	save: async ({ request, locals, platform, params }) => {
 		if (!locals.user) throw error(401, 'Not signed in');
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
+
+		const access = await effectiveAccessOf(locals, platform.env.ATTIC_DB);
+		const canConfigure = canOnCache(access, 'cr', params.name);
+		if (!canConfigure && !canOnCache(access, 'cq', params.name)) {
+			throw error(403, 'Permission denied: configure cache');
+		}
 
 		const form = await request.formData();
 		const isPublic = form.get('is_public') === 'on';
@@ -111,26 +135,43 @@ export const actions: Actions = {
 		}
 
 		try {
-			await configureCache(platform.env, params.name, {
-				is_public: isPublic,
-				priority,
-				compression,
-				retention_period: retention
-			});
+			// Retention-only permission (cq without cr) applies only the retention
+			// fields; the visibility/priority/compression/upstream inputs are ignored.
+			await configureCache(
+				platform.env,
+				params.name,
+				canConfigure
+					? { is_public: isPublic, priority, compression, retention_period: retention }
+					: { retention_period: retention }
+			);
 		} catch (e) {
 			const status = e instanceof CacheConfigError ? e.status : 502;
 			return fail(status, { error: `Failed to save: ${e instanceof Error ? e.message : e}` });
 		}
 
-		await platform.env.ATTIC_DB.prepare(
-			'UPDATE cache SET retention_max_bytes = ?1, upstream_caches = ?2 WHERE name = ?3'
-		)
-			.bind(
-				maxGib === null ? null : Math.round(maxGib * 2 ** 30),
-				JSON.stringify(upstreams),
-				params.name
+		if (canConfigure) {
+			await platform.env.ATTIC_DB.prepare(
+				'UPDATE cache SET retention_max_bytes = ?1, upstream_caches = ?2 WHERE name = ?3'
 			)
-			.run();
+				.bind(
+					maxGib === null ? null : Math.round(maxGib * 2 ** 30),
+					JSON.stringify(upstreams),
+					params.name
+				)
+				.run();
+		} else {
+			await platform.env.ATTIC_DB.prepare(
+				'UPDATE cache SET retention_max_bytes = ?1 WHERE name = ?2'
+			)
+				.bind(maxGib === null ? null : Math.round(maxGib * 2 ** 30), params.name)
+				.run();
+		}
+
+		await writeAudit(platform.env.ATTIC_DB, {
+			userId: locals.user.id,
+			action: 'cache.configure',
+			target: params.name
+		});
 
 		return { saved: true };
 	},
@@ -139,6 +180,11 @@ export const actions: Actions = {
 		if (!locals.user) throw error(401, 'Not signed in');
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 		const db = platform.env.ATTIC_DB;
+
+		const access = await effectiveAccessOf(locals, db);
+		if (!canOnCache(access, 'cq', params.name) && !canOnCache(access, 'cr', params.name)) {
+			throw error(403, 'Permission denied: configure cache retention');
+		}
 
 		const form = await request.formData();
 		const hash = parseStorePathHash(String(form.get('path') ?? ''));
@@ -170,6 +216,11 @@ export const actions: Actions = {
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 		const db = platform.env.ATTIC_DB;
 
+		const access = await effectiveAccessOf(locals, db);
+		if (!canOnCache(access, 'cq', params.name) && !canOnCache(access, 'cr', params.name)) {
+			throw error(403, 'Permission denied: configure cache retention');
+		}
+
 		const hash = String((await request.formData()).get('hash') ?? '');
 		const cache = await getCache(db, params.name);
 		await db
@@ -194,6 +245,22 @@ export const actions: Actions = {
 			return fail(400, { renameError: 'That is already the cache name.' });
 		}
 
+		// Renaming is a configure on the source and a create on the target.
+		await requireCachePermission(
+			locals,
+			platform.env.ATTIC_DB,
+			'cr',
+			params.name,
+			'configure cache'
+		);
+		await requireCachePermission(
+			locals,
+			platform.env.ATTIC_DB,
+			'cc',
+			newName,
+			'create cache (target name)'
+		);
+
 		try {
 			await renameCache(platform.env, params.name, newName);
 		} catch (e) {
@@ -206,6 +273,13 @@ export const actions: Actions = {
 			});
 		}
 
+		await writeAudit(platform.env.ATTIC_DB, {
+			userId: locals.user.id,
+			action: 'cache.rename',
+			target: params.name,
+			detail: newName
+		});
+
 		redirect(303, `/caches/${newName}/settings`);
 	},
 
@@ -213,11 +287,19 @@ export const actions: Actions = {
 		if (!locals.user) throw error(401, 'Not signed in');
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 
+		await requireCachePermission(locals, platform.env.ATTIC_DB, 'cd', params.name, 'destroy cache');
+
 		try {
 			await destroyCache(platform.env, params.name);
 		} catch (e) {
 			return fail(502, { deleteError: `Failed to delete: ${e instanceof Error ? e.message : e}` });
 		}
+
+		await writeAudit(platform.env.ATTIC_DB, {
+			userId: locals.user.id,
+			action: 'cache.destroy',
+			target: params.name
+		});
 
 		redirect(303, '/caches');
 	}

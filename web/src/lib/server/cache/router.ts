@@ -311,8 +311,10 @@ async function handleGcTrigger(
 		return errorResponse(401, `Authentication failed: ${e}`);
 	}
 	if (!token) return errorResponse(401, 'No token provided');
-	if (!permissionForCache(token, 'gc').delete) {
-		return errorResponse(403, 'Permission denied: delete');
+	// New tokens carry the nimbus gc claim; the legacy probe (delete on a
+	// cache named "gc") keeps existing wildcard-delete tokens working.
+	if (!token.gc && !permissionForCache(token, 'gc').delete) {
+		return errorResponse(403, 'Permission denied: garbage collection');
 	}
 
 	const dryRun = url.searchParams.get('dry_run') === '1';
