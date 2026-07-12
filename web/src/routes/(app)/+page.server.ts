@@ -1,5 +1,7 @@
 import { error, fail } from '@sveltejs/kit';
 import { runGc } from '$lib/server/cache/gc';
+import { getProxyKeypair } from '$lib/server/cache/proxy';
+import { extractPublicKey } from '$lib/server/attic/signing';
 import { requireGc } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
 import type { PageServerLoad, Actions } from './$types';
@@ -95,7 +97,13 @@ export const load: PageServerLoad = async ({ platform }) => {
 			orphanChunks: orphanChunks?.n ?? 0
 		},
 		globalMaxBytes: globalLimit ? Number(globalLimit.value) : null,
-		buckets
+		buckets,
+		cacheBaseUrl: platform?.env.CACHE_BASE_URL ?? null,
+		proxyPublicKey: platform?.env
+			? await getProxyKeypair(platform.env)
+					.then(extractPublicKey)
+					.catch(() => null)
+			: null
 	};
 };
 

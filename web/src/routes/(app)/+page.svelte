@@ -219,4 +219,21 @@
 			</Card.Content>
 		</Card.Root>
 	</div>
+
+	{#if data.proxyPublicKey}
+		<Card.Root class="mt-4">
+			<Card.Header>
+				<Card.Title>Unified cache endpoint</Card.Title>
+				<Card.Description>
+					One substituter for every cache you can read — private caches need a token in netrc.
+				</Card.Description>
+			</Card.Header>
+			<Card.Content>
+				<pre
+					class="overflow-x-auto rounded bg-muted p-3 text-xs">substituters = {data.cacheBaseUrl ??
+						'https://cache.example.com'}
+trusted-public-keys = {data.proxyPublicKey}</pre>
+			</Card.Content>
+		</Card.Root>
+	{/if}
 </div>
