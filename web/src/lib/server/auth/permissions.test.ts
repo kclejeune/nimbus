@@ -3,6 +3,7 @@ import {
 	ADMIN_ACCESS,
 	canOnCache,
 	canSeeCache,
+	partitionCacheGrants,
 	scopeDenial,
 	tokenScopeOptions,
 	unionAccess
@@ -84,6 +85,24 @@ describe('scopeDenial', () => {
 		expect(scopeDenial(a, { pattern: 'prod', bits: {}, gc: true })).toMatch(/garbage/i);
 		expect(scopeDenial(a, { pattern: 'prod', bits: {} })).toMatch(/at least one/i);
 		expect(scopeDenial(ADMIN_ACCESS, { pattern: '*', bits: { d: 1 }, gc: true })).toBeNull();
+	});
+});
+
+describe('partitionCacheGrants', () => {
+	const row = (id: string, pattern: string) => ({
+		id,
+		subject_type: 'user',
+		subject_id: 'u1',
+		pattern,
+		actions: '{"r":1}'
+	});
+	it('splits exact-name rows from matching globs and drops non-matches', () => {
+		const { direct, viaPatterns } = partitionCacheGrants(
+			[row('a', 'henry'), row('b', 'hen*'), row('c', 'riley'), row('d', '*')],
+			'henry'
+		);
+		expect(direct.map((g) => g.id)).toEqual(['a']);
+		expect(viaPatterns.map((g) => g.id)).toEqual(['b', 'd']);
 	});
 });
 

@@ -6,9 +6,16 @@ import {
 	renameCache
 } from '$lib/server/cache/cache-config';
 import { listGcRoots } from '$lib/server/cache/gc';
-import { canOnCache } from '$lib/server/auth/permissions';
+import {
+	canOnCache,
+	parseGrantActions,
+	partitionCacheGrants,
+	type CacheGrantRow
+} from '$lib/server/auth/permissions';
+import { insertGrant, removeGrantRow } from '$lib/server/auth/grants';
 import {
 	effectiveAccessOf,
+	requireAdmin,
 	requireAnyCachePermission,
 	requireCachePermission
 } from '$lib/server/auth/guard';
@@ -84,7 +91,37 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		throw error(403, 'Permission denied');
 	}
 
-	const roots = await listGcRoots(env, cache.id);
+	const isAdmin = locals.user!.role === 'admin';
+	const [roots, grantRows, userRows, groupRows] = await Promise.all([
+		listGcRoots(env, cache.id),
+		env.ATTIC_DB.prepare(
+			'SELECT id, subject_type, subject_id, pattern, actions FROM permission_grant'
+		).all<CacheGrantRow>(),
+		env.ATTIC_DB.prepare('SELECT id, name, email FROM user ORDER BY name').all<{
+			id: string;
+			name: string;
+			email: string;
+		}>(),
+		env.ATTIC_DB.prepare('SELECT id, name FROM groups ORDER BY name').all<{
+			id: string;
+			name: string;
+		}>()
+	]);
+
+	const userLabel = new Map(userRows.results.map((u) => [u.id, `${u.name} (${u.email})`]));
+	const groupLabel = new Map(groupRows.results.map((g) => [g.id, g.name]));
+	const subjectLabel = (g: CacheGrantRow) =>
+		(g.subject_type === 'user' ? userLabel.get(g.subject_id) : groupLabel.get(g.subject_id)) ??
+		g.subject_id;
+	const { direct, viaPatterns } = partitionCacheGrants(grantRows.results, params.name);
+	const describe = (g: CacheGrantRow) => ({
+		id: g.id,
+		subjectType: g.subject_type,
+		subjectId: g.subject_id,
+		subjectLabel: subjectLabel(g),
+		pattern: g.pattern,
+		actions: g.actions
+	});
 
 	let upstreams: string[] = [];
 	try {
@@ -105,7 +142,18 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 			upstreams
 		},
 		roots,
-		permissions: { canConfigure, canRetention, canDestroy }
+		permissions: { canConfigure, canRetention, canDestroy },
+		isAdmin,
+		access: { direct: direct.map(describe), viaPatterns: viaPatterns.map(describe) },
+		subjects: isAdmin
+			? [
+					...userRows.results.map((u) => ({
+						value: `user:${u.id}`,
+						label: `${u.name} (${u.email})`
+					})),
+					...groupRows.results.map((g) => ({ value: `group:${g.id}`, label: `${g.name} (group)` }))
+				]
+			: []
 	};
 };
 
@@ -311,5 +359,46 @@ export const actions: Actions = {
 		});
 
 		redirect(303, '/caches');
+	},
+
+	accessAdd: async ({ request, locals, platform, params }) => {
+		requireAdmin(locals);
+		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
+		const db = platform.env.ATTIC_DB;
+
+		const form = await request.formData();
+		const subject = String(form.get('subject') ?? '');
+		const [subjectType, subjectId] = subject.split(':', 2) as [string, string | undefined];
+		if ((subjectType !== 'user' && subjectType !== 'group') || !subjectId) {
+			return fail(400, { accessError: 'Pick a user or group.' });
+		}
+		const actions = parseGrantActions(form);
+		if (Object.keys(actions).length === 0) {
+			return fail(400, { accessError: 'Pick at least one permission.' });
+		}
+		await insertGrant(db, {
+			subjectType,
+			subjectId,
+			pattern: params.name,
+			actions,
+			actorId: locals.user!.id
+		});
+		return { accessSaved: true };
+	},
+
+	accessRemove: async ({ request, locals, platform, params }) => {
+		requireAdmin(locals);
+		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
+		const db = platform.env.ATTIC_DB;
+
+		const form = await request.formData();
+		const id = String(form.get('id') ?? '');
+		const subjectType = String(form.get('subject_type') ?? '');
+		const subjectId = String(form.get('subject_id') ?? '');
+		if (subjectType !== 'user' && subjectType !== 'group') {
+			return fail(400, { accessError: 'Invalid subject.' });
+		}
+		await removeGrantRow(db, id, subjectType, subjectId, locals.user!.id);
+		return { accessSaved: true };
 	}
 };

@@ -4,6 +4,7 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
+	import { PERMISSION_BIT_FIELDS, GC_LABEL } from '$lib/permission-bits';
 	import { ArrowLeft, Check, Pin, Trash2, X } from '@lucide/svelte';
 
 	let { data, form } = $props();
@@ -12,6 +13,24 @@
 	let renaming = $state(false);
 	let deleting = $state(false);
 	let addingRoot = $state(false);
+
+	const ACCESS_BITS = [
+		...PERMISSION_BIT_FIELDS.map(({ bit, label }) => ({ name: bit as string, label })),
+		{ name: 'gc', label: GC_LABEL }
+	];
+	const FULL_CONTROL_BITS = ['r', 'w', 'd', 'cr', 'cq', 'cd'];
+	let accessChecked = $state<Record<string, boolean>>({});
+
+	function grantLabel(actions: string): string {
+		try {
+			const parsed = JSON.parse(actions);
+			return ACCESS_BITS.filter((b) => parsed[b.name] === 1)
+				.map((b) => b.label)
+				.join(', ');
+		} catch {
+			return actions;
+		}
+	}
 
 	const maxGib = $derived(
 		c.retentionMaxBytes != null
@@ -223,6 +242,105 @@
 		</form>
 		{#if form?.rootError}
 			<p class="text-sm text-destructive">{form.rootError}</p>
+		{/if}
+	</section>
+
+	<hr class="my-10 border-border" />
+
+	<section class="space-y-4">
+		<div>
+			<h2 class="text-sm font-medium">Access</h2>
+			<p class="mt-1 text-sm text-muted-foreground">
+				Who can use this cache beyond {c.isPublic ? 'anonymous public pulls' : 'admins'}. Tokens are
+				permission snapshots — changes here don't alter already-minted tokens (revoke instead).
+			</p>
+		</div>
+
+		<ul class="divide-y rounded-lg border">
+			{#each data.access.direct as grant (grant.id)}
+				<li class="flex items-center justify-between gap-3 px-4 py-2.5">
+					<span class="text-sm">
+						<a
+							href="/{grant.subjectType === 'group' ? 'groups' : 'users'}/{grant.subjectId}"
+							class="font-medium hover:underline">{grant.subjectLabel}</a
+						>
+						<span class="text-muted-foreground">· {grantLabel(grant.actions)}</span>
+					</span>
+					{#if data.isAdmin}
+						<form method="POST" action="?/accessRemove" use:enhance>
+							<input type="hidden" name="id" value={grant.id} />
+							<input type="hidden" name="subject_type" value={grant.subjectType} />
+							<input type="hidden" name="subject_id" value={grant.subjectId} />
+							<Button type="submit" variant="ghost" size="icon" aria-label="Remove access">
+								<Trash2 class="size-4" />
+							</Button>
+						</form>
+					{/if}
+				</li>
+			{:else}
+				<li class="px-4 py-3 text-sm text-muted-foreground">No direct grants on this cache.</li>
+			{/each}
+			{#each data.access.viaPatterns as grant (grant.id)}
+				<li class="flex items-center justify-between gap-3 px-4 py-2.5">
+					<span class="text-sm">
+						<a
+							href="/{grant.subjectType === 'group' ? 'groups' : 'users'}/{grant.subjectId}"
+							class="font-medium hover:underline">{grant.subjectLabel}</a
+						>
+						<span class="text-muted-foreground">· {grantLabel(grant.actions)}</span>
+					</span>
+					<code
+						class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+						title="Granted by this pattern — edit it from the subject's page">{grant.pattern}</code
+					>
+				</li>
+			{/each}
+		</ul>
+
+		{#if data.isAdmin}
+			<form method="POST" action="?/accessAdd" use:enhance class="space-y-3">
+				<div class="flex flex-wrap items-end gap-3">
+					<div class="min-w-56 flex-1 space-y-2">
+						<Label for="subject">Add access for</Label>
+						<select
+							id="subject"
+							name="subject"
+							class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+						>
+							{#each data.subjects as subject (subject.value)}
+								<option value={subject.value}>{subject.label}</option>
+							{/each}
+						</select>
+					</div>
+					<Button
+						type="button"
+						variant="ghost"
+						size="sm"
+						onclick={() => {
+							for (const bit of FULL_CONTROL_BITS) accessChecked[bit] = true;
+						}}
+					>
+						Full control
+					</Button>
+					<Button type="submit" variant="secondary">Add</Button>
+				</div>
+				<div class="flex flex-wrap gap-4">
+					{#each ACCESS_BITS as bit (bit.name)}
+						<label class="flex items-center gap-2 text-sm">
+							<input
+								name={bit.name}
+								type="checkbox"
+								bind:checked={accessChecked[bit.name]}
+								class="size-4 rounded border-input text-primary"
+							/>
+							{bit.label}
+						</label>
+					{/each}
+				</div>
+				{#if form?.accessError}
+					<p class="text-sm text-destructive">{form.accessError}</p>
+				{/if}
+			</form>
 		{/if}
 	</section>
 

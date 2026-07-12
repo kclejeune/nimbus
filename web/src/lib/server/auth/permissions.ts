@@ -137,6 +137,32 @@ export function tokenScopeOptions(access: EffectiveAccess, cacheNames: string[])
 		.sort((a, b) => a.value.localeCompare(b.value));
 }
 
+export interface CacheGrantRow {
+	id: string;
+	subject_type: string;
+	subject_id: string;
+	pattern: string;
+	actions: string;
+}
+
+/**
+ * Split a cache's applicable grants: exact-name rows (editable from the cache
+ * page) vs glob rows that happen to match (shown read-only — editing them
+ * would affect other caches). Non-matching rows are dropped.
+ */
+export function partitionCacheGrants(
+	grants: CacheGrantRow[],
+	cacheName: string
+): { direct: CacheGrantRow[]; viaPatterns: CacheGrantRow[] } {
+	const direct: CacheGrantRow[] = [];
+	const viaPatterns: CacheGrantRow[] = [];
+	for (const grant of grants) {
+		if (grant.pattern === cacheName) direct.push(grant);
+		else if (patternMatches(grant.pattern, cacheName)) viaPatterns.push(grant);
+	}
+	return { direct, viaPatterns };
+}
+
 /** Union of the user's direct grants and their groups' grants. Admins bypass. */
 export async function loadEffectiveAccess(
 	db: D1Database,
