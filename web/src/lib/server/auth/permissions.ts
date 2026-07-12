@@ -6,11 +6,20 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import type { CacheAccess, CachePermission } from '$lib/server/attic-token';
 import { patternMatches } from '$lib/server/attic/token';
-import { PERMISSION_BIT_FIELDS, type PermissionBit } from '$lib/permission-bits';
+import {
+	ALL_PERMISSION_BITS,
+	PERMISSION_BIT_FIELDS,
+	type PermissionBit
+} from '$lib/permission-bits';
 
 export type { PermissionBit };
-export const PERMISSION_BITS: PermissionBit[] = PERMISSION_BIT_FIELDS.map((f) => f.bit);
+/** Every recognized bit, for union/parse (grants/tokens may carry attic bits
+ *  the UI no longer offers, e.g. cc/cq). */
+export const PERMISSION_BITS: PermissionBit[] = ALL_PERMISSION_BITS;
 export const ALL_BITS: CachePermission = { r: 1, w: 1, d: 1, cc: 1, cr: 1, cq: 1, cd: 1 };
+/** Bits that make a user "see" a cache in the dashboard — a relationship with
+ *  this existing cache. Excludes cc (create-anywhere is not per-cache). */
+const VISIBILITY_BITS: PermissionBit[] = ['r', 'w', 'd', 'cr', 'cq', 'cd'];
 
 /** Stored grant actions: the attic bits plus the global gc bit. */
 export type GrantActions = CachePermission & { gc?: 1 };
@@ -65,7 +74,7 @@ export function canOnCache(
  * visibility — the cache table only shows caches the user was granted.
  */
 export function canSeeCache(access: EffectiveAccess, cacheName: string): boolean {
-	return PERMISSION_BITS.some((bit) => canOnCache(access, bit, cacheName));
+	return VISIBILITY_BITS.some((bit) => canOnCache(access, bit, cacheName));
 }
 
 export interface RequestedScope {
@@ -180,11 +189,11 @@ export async function loadEffectiveAccess(
 	return unionAccess(results);
 }
 
-/** Grant-editor form checkboxes -> GrantActions (shared by group/user pages). */
+/** Grant-editor form checkboxes -> GrantActions (shared by group/user pages).
+ *  Only per-cache bits are grantable; gc is admin-only and never granted. */
 export function parseGrantActions(form: FormData): GrantActions {
 	const actions: GrantActions = {};
 	for (const bit of PERMISSION_BITS) if (form.get(bit) === 'on') actions[bit] = 1;
-	if (form.get('gc') === 'on') actions.gc = 1;
 	return actions;
 }
 

@@ -37,8 +37,6 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 	const visible = results.filter((c) => canSeeCache(access, c.name));
 
 	return {
-		// Any cc grant (on any pattern) makes the New-cache flow reachable.
-		canCreate: Object.values(access.caches).some((p) => p.cc === 1),
 		caches: visible.map((c) => ({
 			name: c.name,
 			isPublic: c.is_public !== 0,

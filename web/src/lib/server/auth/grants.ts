@@ -12,9 +12,10 @@ import { writeAudit } from '$lib/server/audit';
 /** CACHE_NAME_RE widened with the attic glob characters. */
 const GRANT_PATTERN_RE = /^[a-z0-9*?][a-z0-9*?-]{0,49}$/;
 
-/** Everything an owner needs on an existing cache. Excludes cc (creation is
- *  pattern-scoped and controls the name's afterlife) and gc (storage-wide). */
-export const FULL_CONTROL: GrantActions = { r: 1, w: 1, d: 1, cr: 1, cq: 1, cd: 1 };
+/** Everything an owner needs on an existing cache. `cr` (Configure) already
+ *  covers retention server-side, so cq is unnecessary; cc (create-anywhere)
+ *  and gc (storage-wide) are not per-cache and excluded. */
+export const FULL_CONTROL: GrantActions = { r: 1, w: 1, d: 1, cr: 1, cd: 1 };
 
 export interface NewGrant {
 	subjectType: 'user' | 'group';

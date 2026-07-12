@@ -14,12 +14,10 @@
 				Each cache is an isolated view into the shared content-addressed store.
 			</p>
 		</div>
-		{#if data.canCreate}
-			<Button href="/caches/new">
-				<Plus class="size-4" />
-				New cache
-			</Button>
-		{/if}
+		<Button href="/caches/new">
+			<Plus class="size-4" />
+			New cache
+		</Button>
 	</header>
 
 	{#if data.caches.length === 0}

@@ -1,11 +1,12 @@
 import { fail, redirect, error } from '@sveltejs/kit';
 import { CacheConfigError, createCache } from '$lib/server/cache/cache-config';
-import { requireCachePermission } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { Actions } from './$types';
 
 export const actions: Actions = {
+	// Creating a cache is open to any active user (the layout gate ensures
+	// active); the creator receives full control of what they create.
 	default: async ({ request, locals, platform }) => {
 		if (!locals.user) throw error(401, 'Not signed in');
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
@@ -24,8 +25,6 @@ export const actions: Actions = {
 				values: { name, isPublic, priority, compression, retentionRaw }
 			});
 		}
-
-		await requireCachePermission(locals, platform.env.ATTIC_DB, 'cc', name, 'create cache');
 
 		try {
 			await createCache(

@@ -1,17 +1,15 @@
 <script lang="ts">
 	import { Label } from '$lib/components/ui/label/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
-	import { PERMISSION_BIT_FIELDS, GC_LABEL } from '$lib/permission-bits';
+	import { PERMISSION_BIT_FIELDS } from '$lib/permission-bits';
 	import type { ScopeOption } from '$lib/server/auth/permissions';
 
 	let {
 		scopeOptions,
-		gcAllowed = false,
 		defaultPush = false,
 		advanced = false
 	}: {
 		scopeOptions: ScopeOption[];
-		gcAllowed?: boolean;
 		defaultPush?: boolean;
 		/** Show the cache-management bits (tokens page yes, device flow no). */
 		advanced?: boolean;
@@ -73,11 +71,5 @@
 				{p.label}
 			</label>
 		{/each}
-		{#if gcAllowed}
-			<label class="flex items-center gap-2 text-sm">
-				<input name="gc" type="checkbox" class="size-4 rounded border-input text-primary" />
-				{GC_LABEL}
-			</label>
-		{/if}
 	{/if}
 </div>

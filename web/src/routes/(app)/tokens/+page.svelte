@@ -63,7 +63,7 @@
 				<Input id="name" name="name" placeholder="ci-deploy" />
 			</div>
 
-			<TokenScopeFields scopeOptions={data.scopeOptions} gcAllowed={data.gcAllowed} advanced />
+			<TokenScopeFields scopeOptions={data.scopeOptions} advanced />
 
 			{#if form?.error}
 				<p class="text-sm text-destructive">{form.error}</p>

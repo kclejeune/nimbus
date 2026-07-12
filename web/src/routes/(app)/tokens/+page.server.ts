@@ -35,7 +35,6 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 	const now = Math.floor(Date.now() / 1000);
 	return {
 		scopeOptions: tokenScopeOptions(access, cacheNames),
-		gcAllowed: access.gc,
 		tokens: tokens.map((t) => ({
 			id: t.id,
 			name: t.name,
@@ -65,12 +64,11 @@ export const actions: Actions = {
 		if (!name) return fail(400, { error: 'Give the token a name.' });
 
 		const bits = parseTokenBits(form);
-		const gc = form.get('gc') === 'on';
 		const cacheScope = String(form.get('cache') ?? '*');
 
 		// Mint-time bounding: a token may only carry what its creator holds.
 		const access = await effectiveAccessOf(locals, env.ATTIC_DB);
-		const denial = scopeDenial(access, { pattern: cacheScope, bits, gc });
+		const denial = scopeDenial(access, { pattern: cacheScope, bits });
 		if (denial) return fail(403, { error: denial });
 
 		// The plaintext token is returned exactly once; only its hash is stored.
@@ -82,7 +80,6 @@ export const actions: Actions = {
 			{
 				cacheScope,
 				bits,
-				gc,
 				days: Math.max(1, Math.min(3650, Number(form.get('expiry_days') ?? 90)))
 			}
 		);
@@ -90,7 +87,7 @@ export const actions: Actions = {
 			userId: locals.user.id,
 			action: 'token.issue',
 			target: minted.jti,
-			detail: JSON.stringify({ scope: cacheScope, bits, gc })
+			detail: JSON.stringify({ scope: cacheScope, bits })
 		});
 		return { issued: { name, token: minted.token } };
 	},

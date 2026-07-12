@@ -5,23 +5,23 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
-	import { PERMISSION_BIT_FIELDS, GC_LABEL } from '$lib/permission-bits';
+	import { PERMISSION_BIT_FIELDS } from '$lib/permission-bits';
 	import { ArrowLeft, Check, Pin, Trash2, X } from '@lucide/svelte';
 
 	let { data, form } = $props();
 	const c = $derived(data.cache);
-	// cq-only viewers may edit retention but not visibility/priority/compression.
+	// Retention-only (cq) holders may edit retention but not the full config.
 	const canConfigure = $derived(data.permissions.canConfigure);
 	let submitting = $state(false);
 	let renaming = $state(false);
 	let deleting = $state(false);
 	let addingRoot = $state(false);
 
-	const ACCESS_BITS = [
-		...PERMISSION_BIT_FIELDS.map(({ bit, label }) => ({ name: bit as string, label })),
-		{ name: 'gc', label: GC_LABEL }
-	];
-	const FULL_CONTROL_BITS = ['r', 'w', 'd', 'cr', 'cq', 'cd'];
+	const ACCESS_BITS = PERMISSION_BIT_FIELDS.map(({ bit, label }) => ({
+		name: bit as string,
+		label
+	}));
+	const FULL_CONTROL_BITS = PERMISSION_BIT_FIELDS.map((f) => f.bit);
 	let accessChecked = $state<Record<string, boolean>>({});
 
 	function grantLabel(actions: string): string {

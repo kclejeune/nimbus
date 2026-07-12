@@ -4,16 +4,13 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
-	import { PERMISSION_BIT_FIELDS, GC_LABEL } from '$lib/permission-bits';
+	import { PERMISSION_BIT_FIELDS } from '$lib/permission-bits';
 	import { Trash2 } from '@lucide/svelte';
 
 	let { grants }: { grants: { id: string; pattern: string; actions: string }[] } = $props();
 
 	// Grant forms post the bit itself as the field name (see parseGrantActions).
-	const BITS = [
-		...PERMISSION_BIT_FIELDS.map(({ bit, label }) => ({ name: bit as string, label })),
-		{ name: 'gc', label: GC_LABEL }
-	];
+	const BITS = PERMISSION_BIT_FIELDS.map(({ bit, label }) => ({ name: bit as string, label }));
 
 	function grantLabel(actions: string): string {
 		try {

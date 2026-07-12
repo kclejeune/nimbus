@@ -64,8 +64,3 @@ export async function requireAnyCachePermission(
 	}
 	return access;
 }
-
-export async function requireGc(locals: App.Locals, db: D1Database): Promise<void> {
-	const access = await effectiveAccessOf(locals, db);
-	if (!access.gc) throw error(403, 'Permission denied: garbage collection');
-}
