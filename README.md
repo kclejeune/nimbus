@@ -57,6 +57,18 @@ underneath for one that fits inside a Worker's constraints.
 - **Multi-tenant caches, global dedup** — public or private caches share one
   content-addressed store; NARs dedup whole and, for uploads ≥ 8 MiB, by
   FastCDC content-defined chunks that dedup individually across caches.
+- **Fine-grained access control** — per-user and per-group permission grants
+  using attic's bit vocabulary over cache-name patterns (`ci-*`), managed from
+  the dashboard (per subject or per cache), with OIDC group-claim sync into
+  local groups. Cache creators automatically get full control of what they
+  create, grants follow renames, and token minting is bounded by the issuer's
+  own effective permissions. New accounts start pending until an admin — or a
+  configured OIDC group (`OIDC_ACTIVATION_GROUP`) — activates them.
+- **Unified cache endpoint** — the cache-host root doubles as a substituter
+  for everything the requester may read: `/<hash>.narinfo` and `/nar/<file>`
+  resolve across all public caches (plus private ones the bearer token can
+  pull) in priority order, re-signed with a single proxy key. One
+  `substituters` line and one `trusted-public-keys` entry cover every cache.
 - **Server-side compression** — per-cache zstd (WASM), gzip, or none;
   brotli/xz NARs from older imports remain readable.
 - **Upstream awareness** — `get-missing-paths` filters against upstream
@@ -66,11 +78,13 @@ underneath for one that fits inside a Worker's constraints.
   pinned roots (never a broken closure), with per-cache size budgets, a global
   storage ceiling, pin/unpin with notes, size-triggered eviction after pushes,
   abandoned-upload reaping, and a nightly cron.
-- **Admin UI** — cache management, store-path browsing/search, pin/prune,
-  scoped token issuance with revocation, users/roles, and ingest monitoring.
-- **Flexible auth** — OIDC or Cloudflare Access for the dashboard; HS256/RS256
-  attic JWTs for the protocol; browser-loopback and RFC 8628 device-code
-  flows for CLI login.
+- **Admin UI** — cache management with per-cache access lists, store-path
+  browsing/search, pin/prune, scoped token issuance with revocation,
+  users/groups/grants, user activation, ingest monitoring, and an audit log
+  of privileged actions.
+- **Flexible auth** — OIDC or Cloudflare Access for the dashboard (with OIDC
+  group sync and pending-user approval); HS256/RS256 attic JWTs for the
+  protocol; browser-loopback and RFC 8628 device-code flows for CLI login.
 - **Go CLI** — `login`, `use`, `push` (parallel, closure-aware, `--stdin`),
   `watch-store`, `watch-exec`, `gc`, and full cache administration.
 
@@ -91,7 +105,9 @@ underneath for one that fits inside a Worker's constraints.
 | Deduplication | whole-NAR + FastCDC chunks | whole-NAR + FastCDC chunks (≥ 8 MiB uploads; larger 2/8/16 MiB boundaries) |
 | Compression | server-wide zstd/brotli/xz | per-cache zstd/gzip/none |
 | Garbage collection | per-object LRU (can orphan closure members) | closure-aware retention, pins, per-cache budgets, global ceiling |
-| Tokens | static JWTs via `atticadm make-token` | dashboard-issued, scoped, revocable (`jti` + hashed storage) |
+| Tokens | static JWTs via `atticadm make-token` | dashboard-issued, scoped, revocable (`jti` + hashed storage), bounded by the issuer's grants |
+| Access control | per-token JWT permission bits | user/group grants (same bit vocabulary) + OIDC group sync, enforced in the UI and API; per-token bits on the wire |
+| Substituter config | one URL + key per cache | per-cache, or one unified endpoint + proxy key for all readable caches |
 | CLI auth | paste a token | browser loopback, device code, or paste a token |
 | Admin interface | CLI only | web dashboard + CLI |
 | NAR downloads | can 307 to presigned S3 URLs | always proxied through the Worker |
@@ -165,13 +181,15 @@ Web:
 cd web
 npm install
 npm run check                            # svelte-check
+npm test                                 # vitest (pure server logic)
 npm run build                            # vite build + Cloudflare adapter
 npx wrangler dev --host localhost:8788   # --host defeats the custom-domain Host rewrite
 ```
 
 Local secrets live in `web/.dev.vars` (gitignored). The attic-table schema and
-its migrations are in `web/schema/`; apply with
-`wrangler d1 execute <db> --file=schema/schema.sql`.
+its migrations are in `web/schema/`; the admin-table (users, groups, grants,
+tokens) migrations are drizzle-generated in `web/drizzle/`. Apply both with
+`wrangler d1 execute <db> --file=...`.
 
 ## Deploy
 
