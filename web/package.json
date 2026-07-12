@@ -40,13 +40,20 @@
 		"typescript": "^6.0.3",
 		"vite": "^8.0.16",
 		"vitest": "^4.1.10",
-		"wrangler": "^4.0.0"
+		"wrangler": "^4.110.0"
+	},
+	"overrides": {
+		"@sveltejs/kit": {
+			"cookie": "^0.7.2"
+		},
+		"@esbuild-kit/core-utils": {
+			"esbuild": "^0.25.0"
+		}
 	},
 	"allowScripts": {
 		"esbuild@0.28.1": true,
 		"sharp@0.34.5": true,
-		"workerd@1.20260701.1": true,
-		"esbuild@0.18.20": true,
+		"workerd@1.20260708.1": true,
 		"esbuild@0.25.12": true,
 		"fsevents@2.3.3": true
 	},
