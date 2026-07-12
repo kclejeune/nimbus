@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { toastErrors } from '$lib/enhance';
 	import { formatBytes, formatCount } from '$lib/format';
 	import IngestChart from '$lib/components/ingest-chart.svelte';
 	import UnifiedEndpointCard from '$lib/components/unified-endpoint-card.svelte';
@@ -121,13 +122,13 @@
 						method="POST"
 						action="?/gc"
 						class="flex items-center gap-2"
-						use:enhance={() => {
+						use:enhance={toastErrors(() => {
 							running = true;
 							return async ({ update }) => {
 								await update();
 								running = false;
 							};
-						}}
+						})}
 					>
 						<Button type="submit" name="dry_run" value="1" variant="ghost" disabled={running}>
 							Preview
@@ -144,13 +145,13 @@
 					method="POST"
 					action="?/saveLimit"
 					class="flex flex-wrap items-end gap-3 border-t pt-4"
-					use:enhance={() => {
+					use:enhance={toastErrors(() => {
 						savingLimit = true;
 						return async ({ update }) => {
 							await update({ reset: false });
 							savingLimit = false;
 						};
-					}}
+					})}
 				>
 					<div class="space-y-1">
 						<Label for="global_max_gib" class="text-xs text-muted-foreground">

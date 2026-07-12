@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { toastErrors } from '$lib/enhance';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
@@ -32,7 +33,12 @@
 			When set, membership syncs from this IdP group-claim value at every login. Manually added
 			members are never removed by sync.
 		</p>
-		<form method="POST" action="?/setMapping" use:enhance class="flex items-end gap-4">
+		<form
+			method="POST"
+			action="?/setMapping"
+			use:enhance={toastErrors()}
+			class="flex items-end gap-4"
+		>
 			<div class="space-y-2">
 				<Label for="oidc_group">Claim value</Label>
 				<Input
@@ -58,7 +64,7 @@
 							<Badge variant="secondary">sso</Badge>
 						{/if}
 					</span>
-					<form method="POST" action="?/removeMember" use:enhance>
+					<form method="POST" action="?/removeMember" use:enhance={toastErrors()}>
 						<input type="hidden" name="user_id" value={member.id} />
 						<Button type="submit" variant="ghost" size="icon" aria-label="Remove member">
 							<Trash2 class="size-4" />
@@ -69,7 +75,12 @@
 				<li class="py-2 text-sm text-muted-foreground">No members.</li>
 			{/each}
 		</ul>
-		<form method="POST" action="?/addMember" use:enhance class="flex items-end gap-4">
+		<form
+			method="POST"
+			action="?/addMember"
+			use:enhance={toastErrors()}
+			class="flex items-end gap-4"
+		>
 			<div class="space-y-2">
 				<Label for="user_id">Add member</Label>
 				<select

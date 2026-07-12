@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { toastErrors } from '$lib/enhance';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
@@ -35,7 +36,7 @@
 					<code class="rounded bg-muted px-1.5 py-0.5">{grant.pattern}</code>
 					· {grantLabel(grant.actions)}
 				</span>
-				<form method="POST" action="?/removeGrant" use:enhance>
+				<form method="POST" action="?/removeGrant" use:enhance={toastErrors()}>
 					<input type="hidden" name="id" value={grant.id} />
 					<Button type="submit" variant="ghost" size="icon" aria-label="Remove grant">
 						<Trash2 class="size-4" />
@@ -46,7 +47,7 @@
 			<li class="py-2 text-sm text-muted-foreground">No grants.</li>
 		{/each}
 	</ul>
-	<form method="POST" action="?/addGrant" use:enhance class="space-y-4">
+	<form method="POST" action="?/addGrant" use:enhance={toastErrors()} class="space-y-4">
 		<div class="space-y-2">
 			<Label for="pattern">Cache pattern</Label>
 			<Input id="pattern" name="pattern" required placeholder="ci-* or nixos or *" class="w-64" />

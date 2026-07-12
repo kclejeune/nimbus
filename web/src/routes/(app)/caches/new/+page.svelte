@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { toastErrors } from '$lib/enhance';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
@@ -27,13 +28,13 @@
 
 	<form
 		method="POST"
-		use:enhance={() => {
+		use:enhance={toastErrors(() => {
 			submitting = true;
 			return async ({ update }) => {
 				await update();
 				submitting = false;
 			};
-		}}
+		})}
 		class="space-y-6"
 	>
 		<div class="space-y-2">

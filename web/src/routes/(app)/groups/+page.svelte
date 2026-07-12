@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { toastErrors } from '$lib/enhance';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
@@ -23,7 +24,12 @@
 
 	<section class="mb-8 rounded-lg border bg-card p-5">
 		<h2 class="mb-4 text-sm font-medium">Create a group</h2>
-		<form method="POST" action="?/create" use:enhance class="flex flex-wrap items-end gap-4">
+		<form
+			method="POST"
+			action="?/create"
+			use:enhance={toastErrors()}
+			class="flex flex-wrap items-end gap-4"
+		>
 			<div class="space-y-2">
 				<Label for="name">Name</Label>
 				<Input id="name" name="name" required placeholder="developers" />
@@ -53,7 +59,7 @@
 							{/if}
 						</p>
 					</div>
-					<form method="POST" action="?/delete" use:enhance>
+					<form method="POST" action="?/delete" use:enhance={toastErrors()}>
 						<input type="hidden" name="id" value={group.id} />
 						<Button type="submit" variant="ghost" size="icon" aria-label="Delete group">
 							<Trash2 class="size-4" />

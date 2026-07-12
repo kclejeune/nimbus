@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { toastErrors } from '$lib/enhance';
 	import { formatBytes, formatCount } from '$lib/format';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
@@ -60,13 +61,13 @@
 	<form
 		method="POST"
 		action="?/save"
-		use:enhance={() => {
+		use:enhance={toastErrors(() => {
 			submitting = true;
 			return async ({ update }) => {
 				await update({ reset: false });
 				submitting = false;
 			};
-		}}
+		})}
 		class="space-y-6"
 	>
 		<div class="flex items-center gap-3">
@@ -204,7 +205,7 @@
 								{/if}
 							</div>
 						</div>
-						<form method="POST" action="?/removeRoot" use:enhance>
+						<form method="POST" action="?/removeRoot" use:enhance={toastErrors()}>
 							<input type="hidden" name="hash" value={root.hash} />
 							<button
 								type="submit"
@@ -224,13 +225,13 @@
 		<form
 			method="POST"
 			action="?/addRoot"
-			use:enhance={() => {
+			use:enhance={toastErrors(() => {
 				addingRoot = true;
 				return async ({ update }) => {
 					await update();
 					addingRoot = false;
 				};
-			}}
+			})}
 			class="flex flex-wrap items-end gap-3"
 		>
 			<div class="min-w-56 flex-1 space-y-2">
@@ -278,7 +279,7 @@
 						<span class="text-muted-foreground">· {grantLabel(grant.actions)}</span>
 					</span>
 					{#if data.isAdmin}
-						<form method="POST" action="?/accessRemove" use:enhance>
+						<form method="POST" action="?/accessRemove" use:enhance={toastErrors()}>
 							<input type="hidden" name="id" value={grant.id} />
 							<input type="hidden" name="subject_type" value={grant.subjectType} />
 							<input type="hidden" name="subject_id" value={grant.subjectId} />
@@ -309,7 +310,7 @@
 		</ul>
 
 		{#if data.isAdmin}
-			<form method="POST" action="?/accessAdd" use:enhance class="space-y-3">
+			<form method="POST" action="?/accessAdd" use:enhance={toastErrors()} class="space-y-3">
 				<div class="flex flex-wrap items-end gap-3">
 					<div class="min-w-56 flex-1 space-y-2">
 						<Label for="subject">Add access for</Label>
@@ -369,13 +370,13 @@
 			<form
 				method="POST"
 				action="?/rename"
-				use:enhance={() => {
+				use:enhance={toastErrors(() => {
 					renaming = true;
 					return async ({ update }) => {
 						await update({ reset: false });
 						renaming = false;
 					};
-				}}
+				})}
 				class="flex flex-wrap items-end gap-3"
 			>
 				<div class="min-w-56 flex-1 space-y-2">
@@ -403,7 +404,7 @@
 				method="POST"
 				action="?/delete"
 				class="mt-4"
-				use:enhance={({ cancel }) => {
+				use:enhance={toastErrors(({ cancel }) => {
 					if (!confirm(`Delete cache "${c.name}"? Clients can no longer pull from it.`)) {
 						cancel();
 						return;
@@ -413,7 +414,7 @@
 						await update();
 						deleting = false;
 					};
-				}}
+				})}
 			>
 				<Button type="submit" variant="destructive" disabled={deleting}>
 					<Trash2 class="size-4" />
