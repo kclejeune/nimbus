@@ -1,6 +1,14 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { Boxes, ChartLine, KeyRound, LayoutDashboard, Settings, Users } from '@lucide/svelte';
+	import {
+		Boxes,
+		ChartLine,
+		KeyRound,
+		LayoutDashboard,
+		Settings,
+		Users,
+		UsersRound
+	} from '@lucide/svelte';
 	import Logo from './logo.svelte';
 	import NavUser from './nav-user.svelte';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
@@ -21,6 +29,7 @@
 		{ title: 'Monitoring', url: '/monitoring', icon: ChartLine },
 		{ title: 'Tokens', url: '/tokens', icon: KeyRound },
 		{ title: 'Users', url: '/users', icon: Users },
+		{ title: 'Groups', url: '/groups', icon: UsersRound },
 		{ title: 'Settings', url: '/settings', icon: Settings }
 	];
 
