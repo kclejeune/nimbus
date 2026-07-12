@@ -589,7 +589,8 @@ async function handleV1(
 				const { public_key } = await createCache(
 					env,
 					cacheName,
-					(body ?? {}) as import('./cache-config').CreateCacheOptions
+					(body ?? {}) as import('./cache-config').CreateCacheOptions,
+					token.sub
 				);
 				return jsonResponse({ name: cacheName, created: true, public_key });
 			}

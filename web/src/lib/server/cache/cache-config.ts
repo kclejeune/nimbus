@@ -5,6 +5,7 @@
 import { validateCompressionConfig } from './compression/config';
 import * as db from './db';
 import { extractPublicKey, generateKeypair } from '../attic/signing';
+import { FULL_CONTROL, insertGrant } from '$lib/server/auth/grants';
 
 type Env = App.Platform['env'];
 
@@ -30,11 +31,19 @@ export interface CreateCacheOptions {
 	retention_period?: number | null;
 }
 
-/** Create a cache with a fresh keypair; returns the public key. */
+/**
+ * Create a cache with a fresh keypair; returns the public key.
+ *
+ * `grantFullControlTo` (a user id — the UI passes the session user, the API
+ * the token's sub) receives an exact-name full-control grant so creators can
+ * always manage what they created. Skipped silently when the id matches no
+ * user row (e.g. atticadm-minted token subjects).
+ */
 export async function createCache(
 	env: Env,
 	name: string,
-	options: CreateCacheOptions
+	options: CreateCacheOptions,
+	grantFullControlTo?: string
 ): Promise<{ public_key: string }> {
 	if (!CACHE_NAME_RE.test(name) || RESERVED_CACHE_NAMES.has(name)) {
 		throw new CacheConfigError(400, `Invalid cache name: ${name}`);
@@ -60,6 +69,22 @@ export async function createCache(
 		compression,
 		retention_period: options.retention_period ?? null
 	});
+
+	if (grantFullControlTo) {
+		const user = await env.ATTIC_DB.prepare('SELECT 1 AS x FROM user WHERE id = ?1')
+			.bind(grantFullControlTo)
+			.first();
+		if (user) {
+			await insertGrant(env.ATTIC_DB, {
+				subjectType: 'user',
+				subjectId: grantFullControlTo,
+				pattern: name,
+				actions: FULL_CONTROL,
+				actorId: grantFullControlTo,
+				detail: 'auto:creator'
+			});
+		}
+	}
 
 	return { public_key: extractPublicKey(keypair) };
 }
@@ -127,6 +152,10 @@ export async function configureCache(
 export async function destroyCache(env: Env, name: string): Promise<void> {
 	const deleted = await db.softDeleteCache(env.ATTIC_DB, name);
 	if (!deleted) throw new CacheConfigError(404, `Cache not found: ${name}`);
+	// Admin-table side effect (deliberate boundary exception, like the creator
+	// grant above): exact-name grants die with the cache, so re-creating the
+	// name never inherits the old access list.
+	await env.ATTIC_DB.prepare('DELETE FROM permission_grant WHERE pattern = ?1').bind(name).run();
 }
 
 /** Rename, keeping the keypair so existing signatures stay valid. */
@@ -143,6 +172,11 @@ export async function renameCache(env: Env, oldName: string, newName: string): P
 	if (outcome === 'conflict') {
 		throw new CacheConfigError(409, `A cache named "${newName}" already exists`);
 	}
+	// Exact-name grants follow the cache (glob grants are untouched). Minted
+	// tokens are snapshots and do not follow — existing rule.
+	await env.ATTIC_DB.prepare('UPDATE permission_grant SET pattern = ?2 WHERE pattern = ?1')
+		.bind(oldName, newName)
+		.run();
 }
 
 /** The public discovery document (attic-cache-info / GET cache-config). */

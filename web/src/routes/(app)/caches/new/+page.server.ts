@@ -28,12 +28,17 @@ export const actions: Actions = {
 		await requireCachePermission(locals, platform.env.ATTIC_DB, 'cc', name, 'create cache');
 
 		try {
-			await createCache(platform.env, name, {
-				is_public: isPublic,
-				priority,
-				compression,
-				retention_period: retention
-			});
+			await createCache(
+				platform.env,
+				name,
+				{
+					is_public: isPublic,
+					priority,
+					compression,
+					retention_period: retention
+				},
+				locals.user.id
+			);
 		} catch (e) {
 			const status = e instanceof CacheConfigError ? e.status : 502;
 			return fail(status, {
