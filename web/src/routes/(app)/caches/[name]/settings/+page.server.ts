@@ -368,7 +368,11 @@ export const actions: Actions = {
 
 		const form = await request.formData();
 		const subject = String(form.get('subject') ?? '');
-		const [subjectType, subjectId] = subject.split(':', 2) as [string, string | undefined];
+		// Split on the FIRST colon only — subject ids may contain colons
+		// (cfaccess:<sub>), and JS split's limit discards the remainder.
+		const sep = subject.indexOf(':');
+		const subjectType = sep === -1 ? '' : subject.slice(0, sep);
+		const subjectId = sep === -1 ? '' : subject.slice(sep + 1);
 		if ((subjectType !== 'user' && subjectType !== 'group') || !subjectId) {
 			return fail(400, { accessError: 'Pick a user or group.' });
 		}
@@ -386,7 +390,7 @@ export const actions: Actions = {
 		return { accessSaved: true };
 	},
 
-	accessRemove: async ({ request, locals, platform, params }) => {
+	accessRemove: async ({ request, locals, platform }) => {
 		requireAdmin(locals);
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 		const db = platform.env.ATTIC_DB;
