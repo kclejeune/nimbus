@@ -15,7 +15,7 @@ import * as db from './db';
 import {
 	allLiveUpstreams,
 	fetchUpstreamNarInfo,
-	parseUpstreams,
+	upstreamsForCache,
 	upstreamTtlSecs,
 	type Upstream
 } from './missing-paths';
@@ -111,6 +111,16 @@ export const ROOT_UPSTREAM_TAG_NS = '~upstream';
  * narinfo). */
 export function cacheTag(cacheName: string): string {
 	return `cache:${cacheName}`;
+}
+
+/**
+ * Extra tag on upstream passthrough narinfos only: upstream config changes
+ * (registry edits, subscription mode changes) purge this instead of the whole
+ * cacheTag, so locally-stored narinfos — whose bytes didn't change — stay
+ * warm at the edge instead of cold-starting a mass-query stampede into D1.
+ */
+export function upstreamPassthroughTag(cacheName: string): string {
+	return `upstream-pt:${cacheName}`;
 }
 
 function narinfoTags(cacheName: string, storePathHash: string): string {
@@ -254,7 +264,9 @@ async function serveRootUpstreamNarInfo(env: Env, storePathHash: string): Promis
 
 	const session = db.readSession(env.ATTIC_DB);
 	const upstreams = await allLiveUpstreams(session);
-	const tag = narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash);
+	// The cache-wide ~upstream tag lets registry changes purge every root
+	// passthrough in one call, like cacheTag() does for a real cache.
+	const tag = `${narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash)},${cacheTag(ROOT_UPSTREAM_TAG_NS)}`;
 
 	const hit =
 		upstreams.length > 0 ? await fetchUpstreamNarInfo(session, upstreams, storePathHash) : null;
@@ -376,14 +388,16 @@ async function serveNarInfo(
 	if (!found) {
 		// Paths available upstream are filtered out of pushes, so a complete
 		// closure needs the upstream's narinfo served through this cache. A
-		// persist-mode entry resolves into this cache.
-		const upstreams = parseUpstreams(cache.upstream_caches).map((u) =>
-			u.mode === 'persist' ? { ...u, persistInto: cacheName } : u
-		);
+		// persist-mode subscription resolves into this cache (upstreamsForCache
+		// sets persistInto).
+		const upstreams = await upstreamsForCache(session, cache);
 		const hit = await fetchUpstreamNarInfo(session, upstreams, storePathHash);
 		if (hit) {
 			return withVisibility(
-				upstreamNarinfoResponse(hit, narinfoTags(cacheName, storePathHash)),
+				upstreamNarinfoResponse(
+					hit,
+					`${narinfoTags(cacheName, storePathHash)},${upstreamPassthroughTag(cacheName)}`
+				),
 				isPublic
 			);
 		}

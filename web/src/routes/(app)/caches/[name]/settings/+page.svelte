@@ -7,22 +7,37 @@
 	import { Label } from '$lib/components/ui/label/index.js';
 	import GrantBitsPicker from '$lib/components/grant-bits-picker.svelte';
 	import { formatGrantActions } from '$lib/permission-bits';
-	import { ArrowLeft, Check, Pin, Plus, Trash2, X } from '@lucide/svelte';
+	import { ArrowLeft, Check, Pin, Trash2, X } from '@lucide/svelte';
 
 	let { data, form } = $props();
 	const c = $derived(data.cache);
 	// Destroy-only (cd) holders can view but not save configuration.
 	const canConfigure = $derived(data.permissions.canConfigure);
-	// Editable copy of the saved upstream list (initial value on purpose —
-	// edits must not be clobbered by reactivity); rows submit as one JSON
-	// field (see the hidden `upstreams` input).
-	// svelte-ignore state_referenced_locally
-	let upstreams = $state(data.cache.upstreams.map((u) => ({ ...u })));
-	const newUpstream = () => ({ url: '', key: '', ttlHours: '', mode: 'redirect' as const });
 	let submitting = $state(false);
 	let renaming = $state(false);
 	let deleting = $state(false);
 	let addingRoot = $state(false);
+
+	type Root = (typeof data.roots)[number];
+	// Named pins group their revision rows (newest first, per the load order);
+	// anonymous quick pins render flat below them.
+	const namedPins = $derived.by(() => {
+		const groups = new Map<
+			string,
+			{ name: string; keepRevisions: number | null; revisions: Root[] }
+		>();
+		for (const root of data.roots) {
+			if (!root.pinName) continue;
+			let group = groups.get(root.pinName);
+			if (!group) {
+				group = { name: root.pinName, keepRevisions: root.keepRevisions, revisions: [] };
+				groups.set(root.pinName, group);
+			}
+			group.revisions.push(root);
+		}
+		return [...groups.values()];
+	});
+	const anonRoots = $derived(data.roots.filter((r) => !r.pinName));
 
 	const maxGib = $derived(
 		c.retentionMaxBytes != null
@@ -65,10 +80,19 @@
 				name="is_public"
 				type="checkbox"
 				checked={c.isPublic}
-				disabled={!canConfigure}
+				disabled={!canConfigure || !data.isAdmin}
 				class="size-4 rounded border-input text-primary focus:ring-ring"
 			/>
-			<Label for="is_public" class="font-normal">Public — anyone can pull without a token</Label>
+			<Label for="is_public" class="font-normal">
+				Public — anyone can pull without a token
+				{#if !data.isAdmin}
+					<span class="text-xs text-muted-foreground">(admins only)</span>
+				{/if}
+			</Label>
+			{#if !data.isAdmin}
+				<!-- Disabled checkboxes don't submit; preserve the current value. -->
+				{#if c.isPublic}<input type="hidden" name="is_public" value="on" />{/if}
+			{/if}
 		</div>
 
 		<div class="grid grid-cols-2 gap-4">
@@ -136,92 +160,47 @@
 
 		<div class="space-y-2">
 			<Label>Upstream caches</Label>
-			<div class="space-y-2">
-				{#each upstreams as upstream, i (upstream)}
-					<div class="space-y-2 rounded-md border p-3">
-						<div class="flex items-start gap-2">
-							<Input
-								type="url"
-								bind:value={upstream.url}
-								disabled={!canConfigure}
-								placeholder="https://cache.nixos.org"
-								autocomplete="off"
-								class="flex-1 font-mono text-xs"
-								aria-label="Upstream URL"
-							/>
-							<Input
-								bind:value={upstream.key}
-								disabled={!canConfigure}
-								placeholder="public key (name:base64…), optional"
-								autocomplete="off"
-								class="flex-1 font-mono text-xs"
-								aria-label="Upstream public key"
-							/>
-							{#if canConfigure}
-								<Button
-									type="button"
-									variant="ghost"
-									size="icon"
-									aria-label="Remove upstream"
-									onclick={() => upstreams.splice(i, 1)}
-								>
-									<X class="size-4" />
-								</Button>
-							{/if}
-						</div>
-						<div class="flex flex-wrap items-end gap-3">
-							<div class="w-28 space-y-1">
-								<Label class="text-xs text-muted-foreground">TTL (hours)</Label>
-								<Input
-									type="number"
-									min="1"
-									max="8760"
-									placeholder="168"
-									bind:value={upstream.ttlHours}
-									disabled={!canConfigure}
-									class="h-8 text-xs"
-									aria-label="Upstream TTL in hours"
-								/>
+			{#if c.upstreams.length > 0}
+				<ul class="divide-y rounded-lg border">
+					{#each c.upstreams as upstream (upstream.id)}
+						<li class="flex flex-wrap items-center gap-3 px-4 py-2.5">
+							<div class="min-w-0 flex-1">
+								<div class="truncate font-mono text-xs">{upstream.url}</div>
+								<div class="mt-0.5 text-xs text-muted-foreground">
+									{upstream.keyName ? `signed by ${upstream.keyName}` : 'no signature check'}
+									· TTL {upstream.ttlHours}h
+									{#if upstream.enforced}
+										· <span class="text-amber-600 dark:text-amber-400">enforced</span>
+									{/if}
+								</div>
 							</div>
-							<div class="w-40 space-y-1">
-								<Label class="text-xs text-muted-foreground">On hit</Label>
-								<select
-									bind:value={upstream.mode}
-									disabled={!canConfigure}
-									class="flex h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
-									aria-label="Upstream mode"
-								>
-									<option value="redirect">Redirect to upstream</option>
-									<option value="persist">Persist into this cache</option>
-								</select>
-							</div>
-						</div>
-					</div>
-				{/each}
-			</div>
-			<input type="hidden" name="upstreams" value={JSON.stringify(upstreams)} />
-			{#if canConfigure}
-				<Button
-					type="button"
-					variant="outline"
-					size="sm"
-					onclick={() => upstreams.push(newUpstream())}
-				>
-					<Plus class="size-4" />
-					Add upstream
-				</Button>
+							<select
+								name="upstream_mode_{upstream.id}"
+								value={upstream.mode}
+								disabled={!canConfigure}
+								class="flex h-8 w-44 rounded-md border border-input bg-transparent px-2 text-xs focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+								aria-label="Mode for {upstream.url}"
+							>
+								<option value="inherit">Default ({upstream.defaultMode})</option>
+								<option value="off" disabled={upstream.enforced}>Off</option>
+								<option value="redirect">Redirect</option>
+								<option value="persist" disabled={!data.isAdmin}>
+									Persist into this cache{data.isAdmin ? '' : ' (admins only)'}
+								</option>
+							</select>
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="text-sm text-muted-foreground">No upstreams are registered on this server.</p>
 			{/if}
 			<p class="text-xs text-muted-foreground">
-				Paths already available from an upstream are skipped at push time and served through this
-				cache on pull. TTL bounds how long a hit is served before the upstream is re-checked
-				(default 168h) and doubles as the query order: longer-lived upstreams are tried first, so
-				give stable archives like cache.nixos.org a long TTL and caches that garbage-collect a short
-				one. With a public key set, an entry is only trusted when its narinfo carries a valid
-				signature from that key. “Persist” copies each hit path into this cache in the background —
-				it is then re-signed, served locally, and survives upstream garbage collection. Copies go
-				through the normal upload pipeline (chunked, recompressed, verified against the signed NAR
-				hash); paths that cannot (NAR over ~64 MiB, or upstream compression other than zstd) keep
-				redirecting to the upstream.
+				Upstream trust (URL, public key, TTL) is server-wide{#if data.isAdmin}
+					— manage it on the <a href="/upstreams" class="underline">Upstreams</a> page{/if}. Here
+				you pick how this cache uses each one: paths already available from an enabled upstream are
+				skipped at push time and served through this cache on pull. “Persist” copies each hit path
+				into this cache in the background — re-signed, served locally, immune to upstream garbage
+				collection. Enforced upstreams cannot be turned off.
 			</p>
 		</div>
 
@@ -344,9 +323,55 @@
 			</p>
 		</div>
 
-		{#if data.roots.length > 0}
+		{#if namedPins.length > 0}
 			<ul class="divide-y rounded-lg border">
-				{#each data.roots as root (root.hash)}
+				{#each namedPins as pin (pin.name)}
+					<li class="px-4 py-2.5">
+						<div class="flex items-center gap-3">
+							<div class="min-w-0 flex-1">
+								<span class="text-sm font-medium">{pin.name}</span>
+								<span class="text-xs text-muted-foreground">
+									· {pin.revisions.length}
+									{pin.revisions.length === 1 ? 'revision' : 'revisions'}{pin.keepRevisions
+										? ` (keeps last ${pin.keepRevisions})`
+										: ''}
+								</span>
+							</div>
+							<form method="POST" action="?/removeRoot" use:enhance={toastErrors()}>
+								<input type="hidden" name="pin" value={pin.name} />
+								<button
+									type="submit"
+									title="Remove pin and all revisions"
+									class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+								>
+									<X class="size-4" />
+								</button>
+							</form>
+						</div>
+						<ul class="mt-1 space-y-0.5">
+							{#each pin.revisions as root, i (root.hash)}
+								<li class="text-xs">
+									<span class="font-mono">{root.hash}</span>
+									<span class="text-muted-foreground">
+										{#if i === 0}· current{/if}
+										{#if root.inCache}
+											· {formatCount(root.closureObjects)} paths ({formatBytes(root.closureBytes)})
+										{:else}
+											· not in this cache
+										{/if}
+										{root.note ? `· ${root.note}` : ''}
+									</span>
+								</li>
+							{/each}
+						</ul>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+
+		{#if anonRoots.length > 0}
+			<ul class="divide-y rounded-lg border">
+				{#each anonRoots as root (root.hash)}
 					<li class="flex items-center gap-3 px-4 py-2.5">
 						<div class="min-w-0 flex-1">
 							<div class="truncate font-mono text-xs">{root.hash}</div>
@@ -373,7 +398,8 @@
 					</li>
 				{/each}
 			</ul>
-		{:else}
+		{/if}
+		{#if data.roots.length === 0}
 			<p class="text-sm text-muted-foreground">Nothing pinned.</p>
 		{/if}
 
@@ -398,6 +424,26 @@
 					autocomplete="off"
 				/>
 			</div>
+			<div class="w-36 space-y-2">
+				<Label for="pin_name">Name</Label>
+				<Input
+					id="pin_name"
+					name="pin_name"
+					placeholder="e.g. v1.7 (optional)"
+					autocomplete="off"
+				/>
+			</div>
+			<div class="w-28 space-y-2">
+				<Label for="keep_revisions">Keep last</Label>
+				<Input
+					id="keep_revisions"
+					name="keep_revisions"
+					type="number"
+					min="1"
+					placeholder="all"
+					autocomplete="off"
+				/>
+			</div>
 			<div class="w-40 space-y-2">
 				<Label for="root_note">Note</Label>
 				<Input id="root_note" name="note" placeholder="optional" autocomplete="off" />
@@ -407,6 +453,10 @@
 				{addingRoot ? 'Pinning…' : 'Pin'}
 			</Button>
 		</form>
+		<p class="text-xs text-muted-foreground">
+			Naming a pin gives it a revision history: re-pinning the same name keeps the old revisions
+			protected too (bounded by “keep last”). Unnamed pins protect a single path's closure.
+		</p>
 		{#if form?.rootError}
 			<p class="text-sm text-destructive">{form.rootError}</p>
 		{/if}

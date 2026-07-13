@@ -83,5 +83,12 @@
 			<input name="gc" type="checkbox" class="size-4 rounded border-input text-primary" />
 			Garbage collection
 		</label>
+		<label
+			class="flex items-center gap-2 text-sm"
+			title="Trust admin: lets the token change trust-affecting cache settings via the API (signing keypair, visibility)"
+		>
+			<input name="ct" type="checkbox" class="size-4 rounded border-input text-primary" />
+			Trust admin
+		</label>
 	{/if}
 </div>

@@ -12,21 +12,20 @@ import {
 } from './cache-config';
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import * as db from './db';
-import { maybeSizeTriggeredGc, runGc } from './gc';
+import { listPins, maybeSizeTriggeredGc, runGc } from './gc';
 import { errorResponse, jsonResponse, withCachePolicy, withVisibility } from '../attic/http';
 import {
 	allLiveUpstreams,
 	filterUpstreamPaths,
 	findExistingPaths,
 	findUpstreamNar,
-	parseUpstreams
+	upstreamsForCache
 } from './missing-paths';
 import { type ExecutionContext } from './platform';
 import { getProxyKeypair, isKnownAbsent, pickReadableWinner, recordAbsent } from './proxy';
 import { persistUpstreamPath } from './pullthrough';
 import { extractPublicKey } from '../attic/signing';
 import {
-	cacheTag,
 	keyedNarinfoUrl,
 	PERSIST_CACHE_HEADER,
 	PERSIST_UPSTREAM_HEADER,
@@ -257,7 +256,7 @@ async function handleNar(
 	if (response.status === 404) {
 		const upstreamUrl = await findUpstreamNar(
 			env.ATTIC_DB,
-			parseUpstreams(auth.cache.upstream_caches),
+			await upstreamsForCache(env.ATTIC_DB, auth.cache),
 			`nar/${filename}`
 		);
 		if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
@@ -427,7 +426,9 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	const existing = await findExistingPaths(session, body.cache, hashes);
 	const missing = hashes.filter((h) => !existing.has(h));
 
-	const upstreams = body.ignore_upstream_cache_filter ? [] : parseUpstreams(cache.upstream_caches);
+	const upstreams = body.ignore_upstream_cache_filter
+		? []
+		: await upstreamsForCache(session, cache);
 	const missingPaths =
 		upstreams.length > 0 && missing.length > 0
 			? await filterUpstreamPaths(session, upstreams, missing)
@@ -564,19 +565,22 @@ async function handleV1(
 	if (route === 'upload-path') {
 		// The CDC endpoints are stateless, so authorization rides along on each
 		// request: the manifest body carries the cache for POSTs, and chunk PUTs
-		// carry it as a query param.
+		// carry it as a query param. Provenance is stamped server-side —
+		// client-supplied source/created_by fields are overwritten.
 		const parseManifest = async (): Promise<CdcManifest | Response> => {
 			const body = await (request.json() as Promise<CdcManifest>).catch(() => null);
 			if (!body?.nar_info?.cache || typeof body.nar_size !== 'number') {
 				return errorResponse(400, 'Invalid request body');
 			}
 			if (!canPush(body.nar_info.cache)) return errorResponse(403, 'Permission denied: push');
+			body.nar_info.source = 'push';
+			body.nar_info.created_by = token.sub ?? null;
 			return body;
 		};
 
 		let response: Response;
 		if (method === 'PUT' && segments.length === 3) {
-			response = await handleUploadPath(request, env, ctx, canPush);
+			response = await handleUploadPath(request, env, ctx, canPush, token.sub ?? null);
 		} else if (method === 'POST' && segments[3] === 'chunks' && segments.length === 4) {
 			const manifest = await parseManifest();
 			if (manifest instanceof Response) return manifest;
@@ -635,6 +639,54 @@ async function handleV1(
 		return errorResponse(404, 'Not found');
 	}
 
+	// nimbus extension: named pins (cachix-style) — a pin name whose gc_root
+	// rows are its revision history. Same permission rule as gc-root above.
+	if (route === 'pin' && (segments.length === 4 || segments.length === 5)) {
+		const cacheName = segments[3];
+		const permission = permissionForCache(token, cacheName);
+		if (!permission.configureCacheRetention && !permission.configureCache) {
+			return errorResponse(403, 'Permission denied: configure cache retention');
+		}
+		const cache = await db.findCache(env.ATTIC_DB, cacheName);
+		if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
+
+		if (method === 'GET' && segments.length === 4) {
+			return jsonResponse({ pins: await listPins(env, cache.id) });
+		}
+		if (method === 'POST' && segments.length === 4) {
+			const body = await (
+				request.json() as Promise<{
+					name?: string;
+					store_path_hash?: string;
+					keep_revisions?: number;
+					keep_days?: number;
+					note?: string;
+				}>
+			).catch(() => null);
+			const name = (body?.name ?? '').trim();
+			const hash = body?.store_path_hash ?? '';
+			if (!db.PIN_NAME_RE.test(name)) {
+				return errorResponse(400, 'Invalid pin name (1-100 chars, no whitespace)');
+			}
+			if (!db.STORE_PATH_HASH_RE.test(hash)) return errorResponse(400, 'Invalid store path hash');
+			const keep = (v: unknown) =>
+				typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
+			await db.upsertPin(env.ATTIC_DB, cache.id, name, hash, {
+				keepRevisions: keep(body?.keep_revisions),
+				keepDays: keep(body?.keep_days),
+				note: body?.note ?? null
+			});
+			return jsonResponse({ pinned: hash, name });
+		}
+		if (method === 'DELETE' && segments.length === 5) {
+			const name = decodeURIComponent(segments[4]);
+			const removed = await db.removePin(env.ATTIC_DB, cache.id, name);
+			if (!removed) return errorResponse(404, `No pin named "${name}"`);
+			return jsonResponse({ unpinned: name });
+		}
+		return errorResponse(404, 'Not found');
+	}
+
 	if (route === 'cache-config' && (segments.length === 4 || segments.length === 5)) {
 		const cacheName = segments[3];
 		const permission = permissionForCache(token, cacheName);
@@ -651,38 +703,29 @@ async function handleV1(
 				return jsonResponse({ name: cacheName, created: true, public_key });
 			}
 			if (method === 'PATCH' && segments.length === 4) {
-				if (!permission.configureCache && !permission.createCache) {
-					return errorResponse(403, 'Permission denied: requires configure or create cache');
+				// Configure only — a create-anywhere (cc) token must not be able to
+				// reconfigure existing caches (it used to be accepted here, which
+				// let it rotate any cache's signing keypair).
+				if (!permission.configureCache) {
+					return errorResponse(403, 'Permission denied: configure cache');
 				}
 				const body = await (request.json() as Promise<Record<string, unknown>>).catch(() => null);
 				if (!body) return errorResponse(400, 'Invalid JSON');
-				// The reference gates retention behind its own permission bit (cq);
-				// configure (cr) is accepted too so existing tokens keep working.
-				if (
-					('retention_period' in body || 'retention_max_bytes' in body) &&
-					!permission.configureCacheRetention &&
-					!permission.configureCache
-				) {
-					return errorResponse(403, 'Permission denied: configure cache retention');
-				}
+				// Trust-affecting fields (keypair, visibility, upstream key hints)
+				// are gated inside configureCache; the admin-only nimbus `ct` claim
+				// is this route's authority for them. Keypair rotations purge the
+				// cache's edge entries in there too.
 				const result = await configureCache(
 					env,
 					cacheName,
-					body as import('./cache-config').ConfigureCacheOptions
+					body as import('./cache-config').ConfigureCacheOptions,
+					{ trustAuthorized: token.ct, ctx }
 				);
-				// A rotated keypair re-signs every narinfo; evict the cache's cached
-				// copies so clients don't fail signature verification until they
-				// expire. Best-effort, like the GC purge.
-				if (result.public_key && ctx?.exports?.CachedStore) {
-					await ctx.exports.CachedStore.purgeTags([cacheTag(cacheName)]).catch((e) =>
-						console.warn(`cache-config: narinfo purge after keypair change failed: ${e}`)
-					);
-				}
 				return jsonResponse({ name: cacheName, updated: true, ...result });
 			}
 			if (method === 'DELETE' && segments.length === 4) {
 				if (!permission.destroyCache) return errorResponse(403, 'Permission denied: destroy cache');
-				await destroyCache(env, cacheName);
+				await destroyCache(env, cacheName, ctx);
 				return jsonResponse({ name: cacheName, deleted: true });
 			}
 			if (method === 'POST' && segments[4] === 'rename') {

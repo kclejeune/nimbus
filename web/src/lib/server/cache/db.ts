@@ -43,7 +43,6 @@ export interface CacheRow {
 	compression: string;
 	retention_period: number | null;
 	retention_max_bytes: number | null;
-	upstream_caches: string;
 }
 
 export interface NarRow {
@@ -91,7 +90,7 @@ export async function findCache(db: D1Database, name: string): Promise<CacheRow 
 		.prepare(
 			'SELECT id, name, keypair, is_public, store_dir, priority, ' +
 				'upstream_cache_key_names, compression, retention_period, ' +
-				'retention_max_bytes, upstream_caches ' +
+				'retention_max_bytes ' +
 				'FROM cache WHERE name = ?1 AND deleted_at IS NULL'
 		)
 		.bind(name)
@@ -307,17 +306,77 @@ export async function addGcRoot(
 		.run();
 }
 
-/** Remove a GC pin; returns false when nothing was pinned. */
+/** Remove an anonymous GC pin; returns false when nothing was pinned. Named
+ * pins are removed by name (removePin) — their revisions are not reachable
+ * from a bare hash. */
 export async function removeGcRoot(
 	db: D1Database,
 	cacheId: number,
 	storePathHash: string
 ): Promise<boolean> {
 	const result = await db
-		.prepare('DELETE FROM gc_root WHERE cache_id = ?1 AND store_path_hash = ?2')
+		.prepare('DELETE FROM gc_root WHERE cache_id = ?1 AND store_path_hash = ?2 AND pin_id IS NULL')
 		.bind(cacheId, storePathHash)
 		.run();
 	return (result.meta.changes ?? 0) > 0;
+}
+
+/** Pin names appear in URLs and forms: printable, no whitespace, bounded.
+ * One spelling shared by the API route and the settings action. */
+export const PIN_NAME_RE = /^\S{1,100}$/;
+
+/** nix-base32 store path hash (32 chars, alphabet excludes e/o/u/t). */
+export const STORE_PATH_HASH_RE = /^[0-9a-df-np-sv-z]{32}$/;
+
+/**
+ * Create or re-point a named pin (cachix-style). Re-pinning the name adds a
+ * revision (a gc_root row owned by the pin); re-pinning an existing revision
+ * refreshes its recency so keep_revisions ordering treats it as newest.
+ * Omitted keep options and notes preserve the pin's current values.
+ */
+export async function upsertPin(
+	db: D1Database,
+	cacheId: number,
+	name: string,
+	storePathHash: string,
+	opts: { keepRevisions?: number; keepDays?: number; note?: string | null } = {}
+): Promise<void> {
+	const now = nowRfc3339();
+	// One transaction: the gc_root insert resolves the pin id created/found
+	// by the statement before it.
+	await db.batch([
+		db
+			.prepare(
+				'INSERT INTO pin (cache_id, name, keep_revisions, keep_days, created_at) ' +
+					'VALUES (?1, ?2, ?3, ?4, ?5) ' +
+					'ON CONFLICT (cache_id, name) DO UPDATE SET ' +
+					'keep_revisions = COALESCE(?3, pin.keep_revisions), ' +
+					'keep_days = COALESCE(?4, pin.keep_days)'
+			)
+			.bind(cacheId, name, opts.keepRevisions ?? null, opts.keepDays ?? null, now),
+		db
+			.prepare(
+				'INSERT INTO gc_root (cache_id, store_path_hash, note, pin_id, created_at) ' +
+					'SELECT ?1, ?2, ?3, id, ?4 FROM pin WHERE cache_id = ?1 AND name = ?5 ' +
+					'ON CONFLICT (pin_id, store_path_hash) WHERE pin_id IS NOT NULL ' +
+					'DO UPDATE SET created_at = excluded.created_at, ' +
+					'note = COALESCE(excluded.note, gc_root.note)'
+			)
+			.bind(cacheId, storePathHash, opts.note ?? null, now, name)
+	]);
+}
+
+/** Remove a named pin and all its revisions; returns false when no pin matched. */
+export async function removePin(db: D1Database, cacheId: number, name: string): Promise<boolean> {
+	const results = await db.batch([
+		db
+			.prepare(
+				'DELETE FROM gc_root WHERE pin_id = (SELECT id FROM pin WHERE cache_id = ?1 AND name = ?2)'
+			)
+			.bind(cacheId, name),
+		db.prepare('DELETE FROM pin WHERE cache_id = ?1 AND name = ?2').bind(cacheId, name)
+	]);
+	return (results[1]?.meta.changes ?? 0) > 0;
 }
 
 /**
@@ -456,15 +515,21 @@ export interface NewObject {
 	deriver: string | null;
 	sigs: string[];
 	ca: string | null;
+	/** Provenance: 'push' or 'pullthrough:<upstream url>'. */
+	source: string | null;
+	/** Pushing token's subject; null for pull-through ingests. */
+	created_by: string | null;
 }
 
 export function insertObjectStmt(db: D1Database, object: NewObject): D1PreparedStatement {
 	return db
 		.prepare(
 			'INSERT INTO object (cache_id, nar_id, store_path_hash, store_path, ' +
-				'refs, system, deriver, sigs, ca, created_at, created_by) ' +
-				'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL) ' +
-				'ON CONFLICT (cache_id, store_path_hash) DO UPDATE SET nar_id = excluded.nar_id'
+				'refs, system, deriver, sigs, ca, created_at, created_by, source) ' +
+				'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) ' +
+				// Re-pushing revives a detached (removed) path.
+				'ON CONFLICT (cache_id, store_path_hash) DO UPDATE SET nar_id = excluded.nar_id, ' +
+				'detached_at = NULL, source = excluded.source, created_by = excluded.created_by'
 		)
 		.bind(
 			object.cache_id,
@@ -476,7 +541,9 @@ export function insertObjectStmt(db: D1Database, object: NewObject): D1PreparedS
 			object.deriver,
 			JSON.stringify(object.sigs),
 			object.ca,
-			nowRfc3339()
+			nowRfc3339(),
+			object.created_by,
+			object.source
 		);
 }
 
@@ -726,6 +793,8 @@ export async function purgeDeletedCache(db: D1Database, name: string): Promise<v
 			'DELETE FROM object_ref WHERE object_id IN (SELECT o.id FROM object o ' +
 				'JOIN cache c ON c.id = o.cache_id WHERE c.name = ?1 AND c.deleted_at IS NOT NULL)',
 			'DELETE FROM gc_root WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
+			'DELETE FROM pin WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
+			'DELETE FROM cache_upstream WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
 			'DELETE FROM object WHERE cache_id IN (SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL)',
 			'DELETE FROM cache WHERE name = ?1 AND deleted_at IS NOT NULL'
 		].map((sql) => db.prepare(sql).bind(name))

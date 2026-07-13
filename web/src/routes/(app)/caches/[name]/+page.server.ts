@@ -6,7 +6,7 @@ import {
 	queryStorePaths,
 	countStorePaths
 } from '$lib/server/store-paths';
-import { pruneClosure } from '$lib/server/cache/gc';
+import { detachClosure } from '$lib/server/cache/gc';
 import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { canOnCache, canSeeCache } from '$lib/server/auth/permissions';
@@ -157,14 +157,17 @@ export const actions: Actions = {
 		if (!locals.user) throw error(401, 'Not signed in');
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
 
-		// Pruning deletes paths from the cache — the delete bit gates it.
+		// Removing paths from the cache — the delete bit gates it.
 		await requireCachePermission(locals, platform.env.ATTIC_DB, 'd', params.name, 'delete');
 
 		const hash = String((await request.formData()).get('hash') ?? '');
 		if (!HASH_RE.test(hash)) return fail(400, { actionError: 'Invalid path hash.' });
 
+		// Detach, not delete: anything still referenced by another path keeps
+		// serving (a removal must never break someone else's closure) and is
+		// reaped by GC once its last referrer goes.
 		const cacheId = await cacheIdByName(platform.env.ATTIC_DB, params.name);
-		const pruned = await pruneClosure(platform.env, cacheId, hash);
-		return { pruned };
+		const { reaped } = await detachClosure(platform.env, platform.ctx, cacheId, params.name, hash);
+		return { pruned: reaped };
 	}
 };

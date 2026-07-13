@@ -34,6 +34,9 @@ export interface VerifiedToken {
 	caches: Map<string, Permission>;
 	/** nimbus extension: may trigger garbage collection */
 	gc: boolean;
+	/** nimbus extension: may modify trust-affecting cache settings
+	 * (keypair, visibility) — minted admin-only */
+	ct: boolean;
 }
 
 interface RawClaims {
@@ -44,7 +47,7 @@ interface RawClaims {
 	iss?: string;
 	aud?: string | string[];
 	[CLAIM_NAMESPACE]?: { caches?: Record<string, Record<string, unknown>> };
-	[NIMBUS_CLAIM_NAMESPACE]?: { gc?: unknown };
+	[NIMBUS_CLAIM_NAMESPACE]?: { gc?: unknown; ct?: unknown };
 }
 
 export function base64urlDecode(s: string): Uint8Array {
@@ -156,7 +159,13 @@ export async function verifyAtticToken(
 		});
 	}
 
-	return { sub: claims.sub, jti: claims.jti, caches, gc: flag(claims[NIMBUS_CLAIM_NAMESPACE]?.gc) };
+	return {
+		sub: claims.sub,
+		jti: claims.jti,
+		caches,
+		gc: flag(claims[NIMBUS_CLAIM_NAMESPACE]?.gc),
+		ct: flag(claims[NIMBUS_CLAIM_NAMESPACE]?.ct)
+	};
 }
 
 // Compiled glob patterns, memoized per isolate: permission checks run this

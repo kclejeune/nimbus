@@ -18,7 +18,7 @@ const rows = [
 function tokenWith(caches: Record<string, Partial<Permission>>): VerifiedToken {
 	const map = new Map<string, Permission>();
 	for (const [k, v] of Object.entries(caches)) map.set(k, { ...NO_PERMISSION, ...v });
-	return { caches: map, gc: false };
+	return { caches: map, gc: false, ct: false };
 }
 
 describe('pickReadableWinner', () => {

@@ -3,6 +3,7 @@
 	import {
 		Boxes,
 		ChartLine,
+		CloudDownload,
 		KeyRound,
 		LayoutDashboard,
 		Settings,
@@ -34,6 +35,7 @@
 		[
 			{ title: 'Overview', url: '/', icon: LayoutDashboard },
 			{ title: 'Caches', url: '/caches', icon: Boxes },
+			{ title: 'Upstreams', url: '/upstreams', icon: CloudDownload, adminOnly: true },
 			{ title: 'Monitoring', url: '/monitoring', icon: ChartLine },
 			{ title: 'Tokens', url: '/tokens', icon: KeyRound },
 			{ title: 'Users', url: '/users', icon: Users, adminOnly: true, badge: pendingUsers },

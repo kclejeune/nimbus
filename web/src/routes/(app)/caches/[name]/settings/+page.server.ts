@@ -15,12 +15,20 @@ import {
 import { decodeSubject, encodeSubject, insertGrant, removeGrantRow } from '$lib/server/auth/grants';
 import { effectiveAccessOf, requireAdmin, requireCachePermission } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
-import { isValidPublicKey } from '$lib/server/attic/signing';
+import { DEFAULT_UPSTREAM_TTL_SECS, type UpstreamMode } from '$lib/server/cache/missing-paths';
 import {
-	clearUpstreamsMemo,
-	parseUpstreams,
-	type StoredUpstream
-} from '$lib/server/cache/missing-paths';
+	cacheUpstreamOverrides,
+	listRegistry,
+	setCacheUpstreamModes
+} from '$lib/server/cache/upstream-registry';
+import {
+	addGcRoot,
+	PIN_NAME_RE,
+	removeGcRoot,
+	removePin,
+	STORE_PATH_HASH_RE,
+	upsertPin
+} from '$lib/server/cache/db';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { PageServerLoad, Actions } from './$types';
 
@@ -32,10 +40,7 @@ interface CacheRow {
 	compression: string;
 	retention_period: number | null;
 	retention_max_bytes: number | null;
-	upstream_caches: string;
 }
-
-const STORE_PATH_HASH_RE = /^[0-9a-df-np-sv-z]{32}$/;
 
 /** Accepts a full store path, `<hash>-name`, or a bare 32-char hash. */
 function parseStorePathHash(raw: string): string | null {
@@ -44,81 +49,11 @@ function parseStorePathHash(raw: string): string | null {
 	return STORE_PATH_HASH_RE.test(hash) ? hash : null;
 }
 
-/**
- * Parse the form's JSON-serialized upstream rows ({url, key, ttlHours, mode},
- * all strings) into the stored shape. Blank rows are dropped; returns an
- * error string on the first invalid entry.
- */
-function parseUpstreamForm(raw: string): { upstreams: StoredUpstream[] } | { error: string } {
-	let rows: unknown;
-	try {
-		rows = JSON.parse(raw);
-	} catch {
-		return { error: 'Invalid upstream form data.' };
-	}
-	if (!Array.isArray(rows)) return { error: 'Invalid upstream form data.' };
-
-	const upstreams: StoredUpstream[] = [];
-	for (const row of rows) {
-		const fields = (row ?? {}) as Record<string, unknown>;
-		const url = String(fields.url ?? '')
-			.trim()
-			.replace(/\/+$/, '');
-		const key = String(fields.key ?? '').trim();
-		if (!url && !key) continue;
-		if (!url) return { error: 'Each upstream needs a URL.' };
-		try {
-			const parsed = new URL(url);
-			if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-				return { error: `Upstream URL must be http(s): ${url}` };
-			}
-		} catch {
-			return { error: `Invalid upstream URL: ${url}` };
-		}
-		if (key && !isValidPublicKey(key)) {
-			return { error: `Invalid public key (expected name:base64…): ${key}` };
-		}
-
-		const ttlRaw = String(fields.ttlHours ?? '').trim();
-		const ttlHours = ttlRaw === '' ? null : Number(ttlRaw);
-		if (ttlHours !== null && (!Number.isFinite(ttlHours) || ttlHours <= 0 || ttlHours > 8760)) {
-			return { error: `TTL must be between 1 hour and 1 year (in hours): ${ttlRaw}` };
-		}
-
-		upstreams.push({
-			url,
-			public_key: key || null,
-			ttl: ttlHours === null ? null : Math.round(ttlHours * 3600),
-			mode: fields.mode === 'persist' ? 'persist' : 'redirect'
-		});
-	}
-	return { upstreams };
-}
-
-/**
- * The root proxy merges every cache's upstreams by URL, so two caches
- * declaring the same upstream with different trust keys is always a
- * misconfiguration (the merge would silently pick one). Reject it at save
- * time; differing ttl/mode merge fine (strictest wins) and pass.
- */
-async function findUpstreamKeyConflict(
-	db: App.Platform['env']['ATTIC_DB'],
-	cacheName: string,
-	upstreams: StoredUpstream[]
-): Promise<string | null> {
-	const keyed = upstreams.filter((u) => u.public_key);
-	if (keyed.length === 0) return null;
-	const { results } = await db
-		.prepare('SELECT name, upstream_caches FROM cache WHERE deleted_at IS NULL AND name != ?1')
-		.bind(cacheName)
-		.all<{ name: string; upstream_caches: string }>();
-	for (const row of results) {
-		for (const other of parseUpstreams(row.upstream_caches)) {
-			const mine = keyed.find((u) => u.url === other.url);
-			if (mine && other.publicKey && mine.public_key !== other.publicKey) {
-				return `Upstream ${mine.url} is declared by cache "${row.name}" with a different public key; keys for the same upstream must match.`;
-			}
-		}
+/** The form's per-upstream mode selection: an override or 'inherit'. */
+function parseModeField(raw: FormDataEntryValue | null): UpstreamMode | 'inherit' | null {
+	const value = String(raw ?? 'inherit');
+	if (value === 'inherit' || value === 'off' || value === 'redirect' || value === 'persist') {
+		return value;
 	}
 	return null;
 }
@@ -143,7 +78,7 @@ async function getCache(db: App.Platform['env']['ATTIC_DB'], name: string): Prom
 	const cache = await db
 		.prepare(
 			`SELECT id, name, is_public, priority, compression, retention_period,
-			        retention_max_bytes, upstream_caches
+			        retention_max_bytes
 			 FROM cache WHERE name = ?1 AND deleted_at IS NULL`
 		)
 		.bind(name)
@@ -166,8 +101,10 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	if (!canConfigure && !canDestroy) throw error(403, 'Permission denied');
 
 	const isAdmin = locals.user!.role === 'admin';
-	const [roots, grantRows, adminUsers, adminGroups] = await Promise.all([
+	const [roots, registry, overrides, grantRows, adminUsers, adminGroups] = await Promise.all([
 		listGcRoots(env, cache.id),
+		listRegistry(env.ATTIC_DB),
+		cacheUpstreamOverrides(env.ATTIC_DB, cache.id),
 		// Only this cache's exact-name rows and glob rows can apply here (see
 		// partitionCacheGrants) — other caches' exact grants never match.
 		env.ATTIC_DB.prepare(
@@ -228,12 +165,17 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		actions: g.actions
 	});
 
-	// Form-ready rows (all strings) so the component can edit them directly.
-	const upstreams = parseUpstreams(cache.upstream_caches).map((u) => ({
+	// One row per registry entry: the picker chooses this cache's mode
+	// (inherit/off/redirect/persist); trust fields are read-only here (the
+	// registry is admin-managed on /upstreams).
+	const upstreams = registry.map((u) => ({
+		id: u.id,
 		url: u.url,
-		key: u.publicKey ?? '',
-		ttlHours: u.ttl === null ? '' : String(Math.round(u.ttl / 3600)),
-		mode: u.mode
+		keyName: u.publicKey ? u.publicKey.split(':')[0] : null,
+		ttlHours: Math.round((u.ttl ?? DEFAULT_UPSTREAM_TTL_SECS) / 3600),
+		defaultMode: u.defaultMode,
+		enforced: u.enforced,
+		mode: overrides.get(u.id) ?? ('inherit' as const)
 	}));
 
 	return {
@@ -283,12 +225,21 @@ export const actions: Actions = {
 			'configure cache'
 		);
 
+		const db = platform.env.ATTIC_DB;
+		const cache = await getCache(db, params.name);
+		const isAdmin = locals.user.role === 'admin';
+
 		const form = await request.formData();
 		const isPublic = form.get('is_public') === 'on';
 		const priority = Number(form.get('priority') ?? 40);
 		const compression = String(form.get('compression') ?? 'zstd');
 		const retentionRaw = String(form.get('retention_period') ?? '').trim();
 		const retention = retentionRaw === '' ? null : Number(retentionRaw);
+
+		// Visibility is trust-affecting (it opens anonymous reads): admins only.
+		if (isPublic !== (cache.is_public === 1) && !isAdmin) {
+			return fail(403, { error: 'Only admins can change cache visibility.' });
+		}
 
 		const maxGibRaw = String(form.get('retention_max_gib') ?? '').trim();
 		const maxGib = maxGibRaw === '' ? null : Number(maxGibRaw);
@@ -297,31 +248,63 @@ export const actions: Actions = {
 		}
 		const maxBytes = maxGib === null ? null : Math.round(maxGib * 2 ** 30);
 
-		const parsed = parseUpstreamForm(String(form.get('upstreams') ?? '[]'));
-		if ('error' in parsed) return fail(400, { error: parsed.error });
-		const upstreams = parsed.upstreams;
-		const conflict = await findUpstreamKeyConflict(platform.env.ATTIC_DB, params.name, upstreams);
-		if (conflict) return fail(400, { error: conflict });
+		// Upstream mode picker: one field per registry entry. Enforced entries
+		// cannot be turned off (resolve-time clamping makes 'off' harmless, but
+		// reject it for honest feedback); enabling persist is trust-affecting
+		// and enforced by setCacheUpstreamModes' witness — the 403 here is UX.
+		const [registry, overrides] = await Promise.all([
+			listRegistry(db),
+			cacheUpstreamOverrides(db, cache.id)
+		]);
+		const modeChanges: { upstreamId: number; mode: UpstreamMode | null }[] = [];
+		for (const entry of registry) {
+			const field = form.get(`upstream_mode_${entry.id}`);
+			if (field === null) continue; // not rendered (stale form) — leave as-is
+			const selected = parseModeField(field);
+			if (selected === null) return fail(400, { error: 'Invalid upstream mode.' });
+			const current = overrides.get(entry.id) ?? 'inherit';
+			if (selected === current) continue;
+			if (entry.enforced && selected === 'off') {
+				return fail(400, {
+					error: `${entry.url} is enforced by the server and cannot be disabled.`
+				});
+			}
+			if (selected === 'persist' && !isAdmin) {
+				return fail(403, { error: 'Only admins can enable pull-through persistence.' });
+			}
+			modeChanges.push({
+				upstreamId: entry.id,
+				mode: selected === 'inherit' ? null : selected
+			});
+		}
 
 		try {
-			await configureCache(platform.env, params.name, {
-				is_public: isPublic,
-				priority,
-				compression,
-				retention_period: retention,
-				retention_max_bytes: maxBytes
-			});
+			await configureCache(
+				platform.env,
+				params.name,
+				{
+					// Trust-affecting; only admins send it (configureCache verifies).
+					...(isAdmin ? { is_public: isPublic } : {}),
+					priority,
+					compression,
+					retention_period: retention,
+					retention_max_bytes: maxBytes
+				},
+				{ trustAuthorized: isAdmin, ctx: platform.ctx }
+			);
 		} catch (e) {
 			const status = e instanceof CacheConfigError ? e.status : 502;
 			return fail(status, { error: `Failed to save: ${e instanceof Error ? e.message : e}` });
 		}
 
-		// The one column configureCache doesn't cover.
-		await platform.env.ATTIC_DB.prepare('UPDATE cache SET upstream_caches = ?1 WHERE name = ?2')
-			.bind(JSON.stringify(upstreams), params.name)
-			.run();
-		// Single-isolate coherence; other isolates converge within the memo TTL.
-		clearUpstreamsMemo();
+		if (modeChanges.length > 0) {
+			// Purges the cache's edge-cached upstream passthroughs itself.
+			await setCacheUpstreamModes(db, cache.id, modeChanges, {
+				allowPersist: isAdmin,
+				ctx: platform.ctx,
+				cacheName: params.name
+			});
+		}
 
 		await writeAudit(platform.env.ATTIC_DB, {
 			userId: locals.user.id,
@@ -355,12 +338,21 @@ export const actions: Actions = {
 		}
 
 		const note = String(form.get('note') ?? '').trim() || null;
-		await db
-			.prepare(
-				'INSERT OR IGNORE INTO gc_root (cache_id, store_path_hash, note, created_at) VALUES (?1, ?2, ?3, ?4)'
-			)
-			.bind(cache.id, hash, note, new Date().toISOString())
-			.run();
+		const pinName = String(form.get('pin_name') ?? '').trim();
+		if (pinName) {
+			// Named pin: re-pinning the name adds a revision (cachix-style).
+			if (!PIN_NAME_RE.test(pinName)) {
+				return fail(400, { rootError: 'Pin names must have no whitespace (max 100 chars).' });
+			}
+			const keepRaw = String(form.get('keep_revisions') ?? '').trim();
+			const keep = keepRaw === '' ? undefined : Number(keepRaw);
+			if (keep !== undefined && (!Number.isInteger(keep) || keep <= 0)) {
+				return fail(400, { rootError: 'Keep revisions must be a positive whole number.' });
+			}
+			await upsertPin(db, cache.id, pinName, hash, { keepRevisions: keep, note });
+			return { rootAdded: true };
+		}
+		await addGcRoot(db, cache.id, hash, note);
 		return { rootAdded: true };
 	},
 
@@ -371,12 +363,16 @@ export const actions: Actions = {
 
 		await requireCachePermission(locals, db, 'cr', params.name, 'configure cache retention');
 
-		const hash = String((await request.formData()).get('hash') ?? '');
+		const form = await request.formData();
 		const cache = await getCache(db, params.name);
-		await db
-			.prepare('DELETE FROM gc_root WHERE cache_id = ?1 AND store_path_hash = ?2')
-			.bind(cache.id, hash)
-			.run();
+		const pinName = String(form.get('pin') ?? '').trim();
+		if (pinName) {
+			// Removes the named pin and its whole revision history.
+			await removePin(db, cache.id, pinName);
+			return { rootRemoved: true };
+		}
+		const hash = String(form.get('hash') ?? '');
+		await removeGcRoot(db, cache.id, hash);
 		return { rootRemoved: true };
 	},
 
@@ -435,7 +431,7 @@ export const actions: Actions = {
 		await requireCachePermission(locals, platform.env.ATTIC_DB, 'cd', params.name, 'destroy cache');
 
 		try {
-			await destroyCache(platform.env, params.name);
+			await destroyCache(platform.env, params.name, platform.ctx);
 		} catch (e) {
 			return fail(502, { deleteError: `Failed to delete: ${e instanceof Error ? e.message : e}` });
 		}

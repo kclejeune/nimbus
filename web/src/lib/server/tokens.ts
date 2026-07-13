@@ -11,6 +11,9 @@ export interface TokenScope {
 	bits: CachePermission;
 	/** Include the nimbus gc claim (admin-only; see boundTokenScope). */
 	gc?: boolean;
+	/** Include the nimbus ct (trust-admin) claim (admin-only): required for
+	 * keypair/visibility changes over the API. */
+	ct?: boolean;
 	/** Lifetime in days. */
 	days: number;
 }
@@ -100,15 +103,17 @@ export async function boundTokenScope(
 	const bits = parseTokenBits(form);
 	const cacheScope = String(form.get('cache') ?? '*');
 
-	// Storage-wide GC is deliberately not a per-cache grant bit: it can only
-	// be minted into a token, and only by an admin. A gc-only token (no cache
-	// bits) is the least-privilege shape for an external GC trigger.
+	// The nimbus global claims are deliberately not per-cache grant bits: they
+	// can only be minted into a token, and only by an admin. gc triggers
+	// storage-wide garbage collection; ct unlocks trust-affecting cache
+	// settings (keypair, visibility) over the API.
 	const gc = form.get('gc') === 'on';
-	if (gc && locals.user?.role !== 'admin') {
-		return { ok: false, denial: 'Garbage-collection tokens are admin-only.' };
+	const ct = form.get('ct') === 'on';
+	if ((gc || ct) && locals.user?.role !== 'admin') {
+		return { ok: false, denial: 'gc / trust-admin tokens are admin-only.' };
 	}
 
-	if (!gc || Object.keys(bits).length > 0) {
+	if (!(gc || ct) || Object.keys(bits).length > 0) {
 		const denial = scopeDenial(await effectiveAccessOf(locals, db), { pattern: cacheScope, bits });
 		if (denial) return { ok: false, denial };
 	}
@@ -118,6 +123,7 @@ export async function boundTokenScope(
 			cacheScope,
 			bits,
 			gc,
+			ct,
 			days: Math.max(1, Math.min(3650, Number(form.get('expiry_days') ?? 90)))
 		}
 	};
@@ -139,6 +145,7 @@ export function auditTokenIssue(
 			scope: scope.cacheScope,
 			bits: scope.bits,
 			...(scope.gc && { gc: true }),
+			...(scope.ct && { ct: true }),
 			...(via && { via })
 		})
 	});
@@ -154,13 +161,17 @@ export async function mintScopedToken(
 
 	const jti = crypto.randomUUID();
 	const ttl = scope.days * 24 * 60 * 60;
+	const global = {
+		...(scope.gc && { gc: 1 as const }),
+		...(scope.ct && { ct: 1 as const })
+	};
 	const token = await mintAtticToken(
 		secret,
 		userId,
 		caches,
 		ttl,
 		jti,
-		scope.gc ? { gc: 1 } : undefined
+		Object.keys(global).length > 0 ? global : undefined
 	);
 	const now = Math.floor(Date.now() / 1000);
 

@@ -85,11 +85,22 @@ export async function persistUpstreamPath(
 	recentIngests.set(memoKey, Date.now());
 
 	try {
+		// The persist marker rode an edge-cached response, so re-check the
+		// registry before acting on it: an upstream removed (or re-keyed) since
+		// the entry was cached is revoked trust — do not ingest from it.
+		const registered = await env.ATTIC_DB.prepare('SELECT id FROM upstream WHERE url = ?1')
+			.bind(upstreamUrl)
+			.first<{ id: number }>();
+		if (!registered) {
+			console.warn(`pullthrough: upstream ${upstreamUrl} no longer registered; skipping ingest`);
+			return;
+		}
+
 		// Ground truth for the push filter: an unpersistable entry is recorded
 		// so get-missing-paths stops relying on an ingestion that cannot happen
 		// (this also corrects verdicts probed without ingestibility knowledge).
 		if (!persistIngestible(parsed)) {
-			await recordVerdicts(env.ATTIC_DB, upstreamUrl, [
+			await recordVerdicts(env.ATTIC_DB, registered.id, [
 				{ hash: storePathHash, verdict: VERDICT_UNPERSISTABLE }
 			]).catch(() => {});
 			return;
@@ -120,7 +131,9 @@ export async function persistUpstreamPath(
 			// with the cache keypair and ignores these while a keypair exists.
 			sigs: parsed.sigs,
 			ca: parsed.ca,
-			nar_hash: `sha256:${narHashHex}`
+			nar_hash: `sha256:${narHashHex}`,
+			source: `pullthrough:${upstreamUrl}`,
+			created_by: null
 		};
 
 		// Whole-NAR dedup: an existing valid NAR just gains another object row.

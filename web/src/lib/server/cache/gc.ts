@@ -40,11 +40,16 @@ const MAX_GLOBAL_EVICTION_ROUNDS = 100;
 
 export interface GcStats {
 	abandoned_caches_reaped: number;
+	detached_objects_reaped: number;
 	expired_objects_reaped: number;
 	size_evicted_objects: number;
 	global_evicted_objects: number;
 	orphan_nars_reaped: number;
 	orphan_chunks_reaped: number;
+	pin_revisions_pruned: number;
+	/** Advisory: live objects whose References are neither local nor covered
+	 * by an upstream verdict — closures Nix could fail to substitute. */
+	incomplete_closure_objects: number;
 	refs_synced: number;
 	narinfo_tags_purged: number;
 	[key: string]: number;
@@ -53,11 +58,14 @@ export interface GcStats {
 function emptyStats(): GcStats {
 	return {
 		abandoned_caches_reaped: 0,
+		detached_objects_reaped: 0,
 		expired_objects_reaped: 0,
 		size_evicted_objects: 0,
 		global_evicted_objects: 0,
 		orphan_nars_reaped: 0,
 		orphan_chunks_reaped: 0,
+		pin_revisions_pruned: 0,
+		incomplete_closure_objects: 0,
 		refs_synced: 0,
 		narinfo_tags_purged: 0
 	};
@@ -65,7 +73,7 @@ function emptyStats(): GcStats {
 
 export async function runGc(
 	env: Env,
-	opts: { dryRun?: boolean; ctx?: ExecutionContext } = {}
+	opts: { dryRun?: boolean; ctx?: ExecutionContext; integrityReport?: boolean } = {}
 ): Promise<GcStats> {
 	const stats = emptyStats();
 	const dryRun = opts.dryRun ?? false;
@@ -77,9 +85,18 @@ export async function runGc(
 
 	if (!dryRun) {
 		await reapAbandonedCaches(env.ATTIC_DB, stats);
+		// Expired pin revisions detach-unpin before retention runs, so this
+		// sweep already treats them as ordinary unpinned paths.
+		await prunePinRevisions(env.ATTIC_DB, stats);
 	}
+	await detachedPass(env.ATTIC_DB, stats, dryRun, purgeTags);
 	await retentionPass(env.ATTIC_DB, stats, dryRun, purgeTags);
 	await globalSizePass(env.ATTIC_DB, stats, dryRun, purgeTags);
+	// Advisory only, and the heaviest read of the run — size-triggered GC
+	// (upload hot path via waitUntil) opts out; cron and manual runs report.
+	if (opts.integrityReport ?? true) {
+		await closureIntegrityReport(env.ATTIC_DB, stats);
+	}
 	if (!dryRun) {
 		await reapOrphans(env, stats);
 		await env.ATTIC_DB.prepare('DELETE FROM device_auth WHERE expires_at < ?1')
@@ -105,23 +122,37 @@ async function purgeNarinfoTags(
 	tags: string[],
 	stats: GcStats
 ): Promise<void> {
-	if (tags.length === 0) return;
-	const store = ctx?.exports?.CachedStore;
-	if (!store) {
+	if (tags.length > 0 && !ctx?.exports?.CachedStore) {
 		console.warn(`gc: CachedStore unavailable; skipping purge of ${tags.length} narinfo tags`);
-		return;
 	}
-	// Batches run sequentially on purpose: purge shares the zone purge API's
-	// rate limits, and GC latency is off any request path.
+	stats.narinfo_tags_purged += await purgeTagsBestEffort(ctx, tags);
+}
+
+/**
+ * Best-effort edge purge (GC sweeps, path removal, settings saves); returns
+ * the number of tags purged. Purges only affect the cache of the entrypoint
+ * that issues them, so this goes through the CachedStore loopback — a purge
+ * from the gateway would target its own (empty) cache. Batches run
+ * sequentially on purpose: purge shares the zone purge API's rate limits.
+ * On failure stale entries linger until their max-age expires.
+ */
+export async function purgeTagsBestEffort(
+	ctx: ExecutionContext | undefined,
+	tags: string[]
+): Promise<number> {
+	const store = ctx?.exports?.CachedStore;
+	if (!store || tags.length === 0) return 0;
+	let purged = 0;
 	for (let i = 0; i < tags.length; i += PURGE_TAG_BATCH) {
 		const batch = tags.slice(i, i + PURGE_TAG_BATCH);
 		try {
 			await store.purgeTags(batch);
-			stats.narinfo_tags_purged += batch.length;
+			purged += batch.length;
 		} catch (e) {
-			console.warn(`gc: narinfo tag purge failed (${batch.length} tags): ${e}`);
+			console.warn(`edge purge failed (${batch.length} tags): ${e}`);
 		}
 	}
+	return purged;
 }
 
 /**
@@ -129,16 +160,29 @@ async function purgeNarinfoTags(
  * statement never writes an unbounded number of rows. Also serves as the
  * initial backfill; the watermark makes reruns cheap.
  *
+ * The processed high-water mark is persisted (server_config) rather than
+ * derived from MAX(object_ref.object_id): a trailing run of refless objects
+ * produces no ref rows, so a derived mark would sit below it forever and
+ * every sync — each GC run and each path removal — would rescan that tail.
+ * The persisted mark advances atomically with each window's batch (a
+ * mid-run kill loses no progress) and only ever forward, so concurrent
+ * syncs can't regress it; double-processing is harmless (INSERT OR IGNORE).
+ * Missing key = fresh or pre-upgrade DB; fall back to the old derivation.
+ *
  * child_id maintenance rides along: new edges resolve inline, and edges that
  * dangled because the referenced path had not been pushed yet resolve once an
  * object in the window supplies it. Closure CTEs traverse child_id, so they
- * only see edges this pass has processed — callers outside runGc (pruneClosure)
- * must sync first.
+ * only see edges this pass has processed — callers outside runGc
+ * (detachClosure) must sync first.
  */
+const REF_SYNC_WATERMARK_KEY = 'ref_sync_watermark';
+
 export async function syncObjectRefs(db: D1, stats?: GcStats): Promise<void> {
 	const bounds = await db
 		.prepare(
-			'SELECT COALESCE((SELECT MAX(object_id) FROM object_ref), 0) AS watermark, ' +
+			'SELECT COALESCE(' +
+				`(SELECT CAST(value AS INTEGER) FROM server_config WHERE key = '${REF_SYNC_WATERMARK_KEY}'), ` +
+				'(SELECT COALESCE(MAX(object_id), 0) FROM object_ref)) AS watermark, ' +
 				'COALESCE((SELECT MAX(id) FROM object), 0) AS max_id'
 		)
 		.first<{ watermark: number; max_id: number }>();
@@ -171,7 +215,14 @@ export async function syncObjectRefs(db: D1, stats?: GcStats): Promise<void> {
 						'AND o2.id > ?1 AND o2.id <= ?2 ' +
 						'AND o2.cache_id = (SELECT p.cache_id FROM object p WHERE p.id = object_ref.object_id))'
 				)
-				.bind(start, end)
+				.bind(start, end),
+			db
+				.prepare(
+					`INSERT INTO server_config (key, value) VALUES ('${REF_SYNC_WATERMARK_KEY}', ?1) ` +
+						'ON CONFLICT (key) DO UPDATE SET value = excluded.value ' +
+						'WHERE CAST(excluded.value AS INTEGER) > CAST(server_config.value AS INTEGER)'
+				)
+				.bind(String(Math.min(end, bounds.max_id)))
 		]);
 		if (stats) stats.refs_synced += results[0]?.meta.changes ?? 0;
 	}
@@ -187,48 +238,73 @@ export async function syncObjectRefs(db: D1, stats?: GcStats): Promise<void> {
 // not in the cache and the edge is skipped.
 
 /**
+ * The recursive arm shared by every closure CTE: expand one step along
+ * resolved object_ref edges. child_id-only traversal is load-bearing —
+ * callers outside runGc must syncObjectRefs first (see its doc).
+ */
+const closureStep = (cte: string): string =>
+	'  UNION' +
+	`  SELECT r.child_id FROM ${cte} k` +
+	'    JOIN object_ref r ON r.object_id = k.id' +
+	'   WHERE r.child_id IS NOT NULL';
+
+/**
  * Objects unreachable from any fresh object or gc_root, in id order after
  * `afterId`. A null cutoff treats every object as fresh (nothing expires).
+ * Detached (removed) objects never seed the keep set — they survive only
+ * while something live still reaches them.
  */
 const UNREACHABLE_SQL =
 	'WITH RECURSIVE keep(id) AS (' +
 	'  SELECT id FROM object' +
 	'   WHERE cache_id = ?1 AND (' +
-	'     ?2 IS NULL' +
-	'     OR COALESCE(last_accessed_at, created_at) >= ?2' +
+	'     ((?2 IS NULL OR COALESCE(last_accessed_at, created_at) >= ?2) AND detached_at IS NULL)' +
 	'     OR store_path_hash IN (SELECT store_path_hash FROM gc_root WHERE cache_id = ?1)' +
 	'   )' +
-	'  UNION' +
-	'  SELECT r.child_id FROM keep k' +
-	'    JOIN object_ref r ON r.object_id = k.id' +
-	'   WHERE r.child_id IS NOT NULL' +
+	closureStep('keep') +
 	') ' +
 	'SELECT o.id, o.store_path_hash FROM object o' +
 	' WHERE o.cache_id = ?1 AND o.id > ?3 AND o.id NOT IN (SELECT id FROM keep)' +
 	' ORDER BY o.id LIMIT ?4';
 
 /**
+ * Detached objects nothing live can reach: not reachable from any
+ * non-detached object nor from a gc_root closure. These are the rows the
+ * removal actually deletes — everything else detached is still someone's
+ * dependency and keeps serving until its last referrer goes.
+ */
+const REAP_DETACHED_SQL =
+	'WITH RECURSIVE keep(id) AS (' +
+	'  SELECT id FROM object' +
+	'   WHERE cache_id = ?1 AND (' +
+	'     detached_at IS NULL' +
+	'     OR store_path_hash IN (SELECT store_path_hash FROM gc_root WHERE cache_id = ?1)' +
+	'   )' +
+	closureStep('keep') +
+	') ' +
+	'SELECT o.id, o.store_path_hash FROM object o' +
+	' WHERE o.cache_id = ?1 AND o.detached_at IS NOT NULL' +
+	'   AND o.id NOT IN (SELECT id FROM keep)';
+
+/**
  * The exclusive closure of a store path: closure(target) minus everything
  * still reachable from objects outside the closure or from gc_roots. These
- * are the rows that become garbage if the target is evicted.
+ * are the rows that become garbage if the target is evicted. Detached
+ * objects don't anchor here either (same rule as UNREACHABLE_SQL): a
+ * removed-but-not-yet-reaped straggler must not protect closure members
+ * from size eviction.
  */
 const EXCLUSIVE_CLOSURE_SQL =
 	'WITH RECURSIVE target(id) AS (' +
 	'  SELECT id FROM object WHERE cache_id = ?1 AND store_path_hash = ?2' +
-	'  UNION' +
-	'  SELECT r.child_id FROM target t' +
-	'    JOIN object_ref r ON r.object_id = t.id' +
-	'   WHERE r.child_id IS NOT NULL' +
+	closureStep('target') +
 	'), keep(id) AS (' +
 	'  SELECT o.id FROM object o' +
 	'   WHERE o.cache_id = ?1 AND (' +
-	'     o.id NOT IN (SELECT id FROM target)' +
+	'     (o.id NOT IN (SELECT id FROM target) AND o.detached_at IS NULL)' +
 	'     OR o.store_path_hash IN (SELECT store_path_hash FROM gc_root WHERE cache_id = ?1)' +
 	'   )' +
-	'  UNION' +
-	'  SELECT r.child_id FROM keep k' +
-	'    JOIN object_ref r ON r.object_id = k.id' +
-	'   WHERE r.child_id IS NOT NULL' +
+	closureStep('keep') +
 	') ' +
 	'SELECT o.id, o.store_path_hash FROM object o' +
 	' WHERE o.id IN (SELECT id FROM target) AND o.id NOT IN (SELECT id FROM keep)';
@@ -236,17 +312,16 @@ const EXCLUSIVE_CLOSURE_SQL =
 /**
  * Least-recently-used top-level object in a cache: referenced by nothing else
  * in the cache and not protected by a gc_root closure. child_id is resolved
- * within one cache, so the referrer check needs no cache filter.
+ * within one cache, so the referrer check needs no cache filter. (Detached
+ * top-level objects can't appear here: the detached pass runs first and a
+ * detached object with no referrers is reaped by it.)
  */
 const OLDEST_TOP_LEVEL_SQL =
 	'WITH RECURSIVE protected(id) AS (' +
 	'  SELECT o.id FROM object o' +
 	'    JOIN gc_root g ON g.cache_id = ?1 AND g.store_path_hash = o.store_path_hash' +
 	'   WHERE o.cache_id = ?1' +
-	'  UNION' +
-	'  SELECT r.child_id FROM protected p' +
-	'    JOIN object_ref r ON r.object_id = p.id' +
-	'   WHERE r.child_id IS NOT NULL' +
+	closureStep('protected') +
 	') ' +
 	'SELECT o.id, o.store_path_hash FROM object o' +
 	' WHERE o.cache_id = ?1' +
@@ -422,10 +497,7 @@ const GLOBAL_OLDEST_TOP_LEVEL_SQL =
 	'WITH RECURSIVE protected(id) AS (' +
 	'  SELECT o.id FROM object o' +
 	'    JOIN gc_root g ON g.cache_id = o.cache_id AND g.store_path_hash = o.store_path_hash' +
-	'  UNION' +
-	'  SELECT r.child_id FROM protected p' +
-	'    JOIN object_ref r ON r.object_id = p.id' +
-	'   WHERE r.child_id IS NOT NULL' +
+	closureStep('protected') +
 	') ' +
 	'SELECT o.id, o.cache_id AS cache_id, o.store_path_hash, c.name AS cache_name' +
 	'  FROM object o JOIN cache c ON c.id = o.cache_id AND c.deleted_at IS NULL' +
@@ -515,7 +587,7 @@ export async function maybeSizeTriggeredGc(env: Env, ctx?: ExecutionContext): Pr
 	try {
 		if (await anyBudgetExceeded(env.ATTIC_DB)) {
 			console.log('gc: size budget exceeded, running out-of-band');
-			const stats = await runGc(env, { ctx });
+			const stats = await runGc(env, { ctx, integrityReport: false });
 			console.log(`gc (size-triggered): ${JSON.stringify(stats)}`);
 		}
 	} catch (e) {
@@ -553,6 +625,9 @@ async function anyBudgetExceeded(db: D1): Promise<boolean> {
 export interface GcRootInfo {
 	hash: string;
 	note: string | null;
+	/** Named pin this row is a revision of; null for anonymous quick pins. */
+	pinName: string | null;
+	keepRevisions: number | null;
 	createdAt: string;
 	/** False when no live object matches the pinned hash (pin has no effect). */
 	inCache: boolean;
@@ -564,10 +639,7 @@ export interface GcRootInfo {
 const CLOSURE_STATS_SQL =
 	'WITH RECURSIVE cl(id) AS (' +
 	'  SELECT id FROM object WHERE cache_id = ?1 AND store_path_hash = ?2' +
-	'  UNION' +
-	'  SELECT r.child_id FROM cl c' +
-	'    JOIN object_ref r ON r.object_id = c.id' +
-	'   WHERE r.child_id IS NOT NULL' +
+	closureStep('cl') +
 	') ' +
 	'SELECT (SELECT COUNT(*) FROM cl) AS objects, ' +
 	'COALESCE((SELECT SUM(ch.file_size) FROM chunk ch ' +
@@ -625,8 +697,10 @@ export async function listGcRoots(env: Env, cacheId: number): Promise<GcRootInfo
 	const roots = (
 		await db
 			.prepare(
-				'SELECT store_path_hash, note, created_at, closure_objects, closure_bytes, stats_at ' +
-					'FROM gc_root WHERE cache_id = ?1 ORDER BY created_at DESC'
+				'SELECT g.store_path_hash, g.note, g.created_at, g.closure_objects, g.closure_bytes, ' +
+					'g.stats_at, p.name AS pin_name, p.keep_revisions ' +
+					'FROM gc_root g LEFT JOIN pin p ON p.id = g.pin_id ' +
+					'WHERE g.cache_id = ?1 ORDER BY p.name IS NULL, p.name, g.created_at DESC'
 			)
 			.bind(cacheId)
 			.all<{
@@ -636,6 +710,8 @@ export async function listGcRoots(env: Env, cacheId: number): Promise<GcRootInfo
 				closure_objects: number | null;
 				closure_bytes: number | null;
 				stats_at: string | null;
+				pin_name: string | null;
+				keep_revisions: number | null;
 			}>()
 	).results;
 
@@ -649,6 +725,8 @@ export async function listGcRoots(env: Env, cacheId: number): Promise<GcRootInfo
 			return {
 				hash: root.store_path_hash,
 				note: root.note,
+				pinName: root.pin_name,
+				keepRevisions: root.keep_revisions,
 				createdAt: root.created_at,
 				inCache: objects > 0,
 				closureObjects: objects,
@@ -658,24 +736,195 @@ export async function listGcRoots(env: Env, cacheId: number): Promise<GcRootInfo
 	);
 }
 
+export interface PinInfo {
+	name: string;
+	keepRevisions: number | null;
+	keepDays: number | null;
+	/** Newest first; the first entry is the current revision. */
+	revisions: { hash: string; createdAt: string; note: string | null }[];
+}
+
+/** Named pins with their revision history (the /pin API's list shape). */
+export async function listPins(env: Env, cacheId: number): Promise<PinInfo[]> {
+	const { results } = await env.ATTIC_DB.prepare(
+		'SELECT p.name, p.keep_revisions, p.keep_days, g.store_path_hash, g.created_at, g.note ' +
+			'FROM pin p LEFT JOIN gc_root g ON g.pin_id = p.id ' +
+			'WHERE p.cache_id = ?1 ORDER BY p.name, g.created_at DESC, g.id DESC'
+	)
+		.bind(cacheId)
+		.all<{
+			name: string;
+			keep_revisions: number | null;
+			keep_days: number | null;
+			store_path_hash: string | null;
+			created_at: string | null;
+			note: string | null;
+		}>();
+	const pins = new Map<string, PinInfo>();
+	for (const row of results) {
+		let pin = pins.get(row.name);
+		if (!pin) {
+			pin = {
+				name: row.name,
+				keepRevisions: row.keep_revisions,
+				keepDays: row.keep_days,
+				revisions: []
+			};
+			pins.set(row.name, pin);
+		}
+		if (row.store_path_hash) {
+			pin.revisions.push({
+				hash: row.store_path_hash,
+				createdAt: row.created_at ?? '',
+				note: row.note
+			});
+		}
+	}
+	return [...pins.values()];
+}
+
+/** The full closure of one store path within a cache (ids only). */
+const CLOSURE_IDS_SQL =
+	'WITH RECURSIVE cl(id) AS (' +
+	'  SELECT id FROM object WHERE cache_id = ?1 AND store_path_hash = ?2' +
+	closureStep('cl') +
+	') SELECT id FROM cl';
+
 /**
- * Delete a store path's closure, minus anything still reachable from paths
- * outside that closure or from gc_roots. Pruning a pinned path is a no-op
- * (unpin first). Freed NARs/chunks are reclaimed by the next GC orphan pass.
- * Returns the number of deleted objects.
+ * Remove a store path: mark its closure detached, then immediately reap
+ * whatever nothing live can still reach (with an edge purge). Removal never
+ * breaks another path's closure — detached-but-referenced objects keep
+ * serving and are reaped by later GC runs once their last referrer goes.
+ * Pinned paths are left alone (unpin first). Returns detached/reaped counts.
  */
-export async function pruneClosure(env: Env, cacheId: number, hash: string): Promise<number> {
+export async function detachClosure(
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	cacheId: number,
+	cacheName: string,
+	hash: string
+): Promise<{ detached: number; reaped: number }> {
 	const db = env.ATTIC_DB;
 	// Closure CTEs only see edges the ref-sync pass has processed; sync first
 	// so recently pushed objects are linked (watermark makes this cheap).
 	await syncObjectRefs(db);
-	const doomed = (await db.prepare(EXCLUSIVE_CLOSURE_SQL).bind(cacheId, hash).all<DoomedRow>())
-		.results;
+	const marked = await db
+		.prepare(
+			`UPDATE object SET detached_at = ?3 WHERE id IN (${CLOSURE_IDS_SQL}) ` +
+				'AND detached_at IS NULL ' +
+				'AND store_path_hash NOT IN (SELECT store_path_hash FROM gc_root WHERE cache_id = ?1)'
+		)
+		.bind(cacheId, hash, new Date().toISOString())
+		.run();
+
+	const tags = await reapDetachedForCache(db, cacheId, cacheName);
+	await purgeTagsBestEffort(ctx, tags);
+	return { detached: marked.meta.changes ?? 0, reaped: tags.length };
+}
+
+/**
+ * Delete the reapable detached objects of one cache and return the narinfo
+ * tags of what was deleted — the delete+purge pairing every caller must
+ * uphold (detachClosure purges immediately; the GC pass batches).
+ */
+async function reapDetachedForCache(db: D1, cacheId: number, cacheName: string): Promise<string[]> {
+	const doomed = (await db.prepare(REAP_DETACHED_SQL).bind(cacheId).all<DoomedRow>()).results;
+	if (doomed.length === 0) return [];
 	await deleteObjects(
 		db,
 		doomed.map((d) => d.id)
 	);
-	return doomed.length;
+	return doomed.map((d) => narinfoTag(cacheName, d.store_path_hash));
+}
+
+/**
+ * Reap detached objects whose last live referrer has since disappeared —
+ * stragglers detachClosure could not delete at removal time.
+ */
+async function detachedPass(
+	db: D1,
+	stats: GcStats,
+	dryRun: boolean,
+	purgeTags: string[]
+): Promise<void> {
+	const caches = (
+		await db
+			.prepare(
+				'SELECT DISTINCT c.id, c.name FROM object o JOIN cache c ON c.id = o.cache_id ' +
+					'WHERE o.detached_at IS NOT NULL AND c.deleted_at IS NULL'
+			)
+			.all<{ id: number; name: string }>()
+	).results;
+	for (const cache of caches) {
+		try {
+			if (dryRun) {
+				const doomed = (await db.prepare(REAP_DETACHED_SQL).bind(cache.id).all<DoomedRow>())
+					.results;
+				stats.detached_objects_reaped += doomed.length;
+				continue;
+			}
+			const tags = await reapDetachedForCache(db, cache.id, cache.name);
+			stats.detached_objects_reaped += tags.length;
+			purgeTags.push(...tags);
+		} catch (e) {
+			console.warn(`gc: detached pass failed for cache ${cache.name}: ${e}`);
+		}
+	}
+}
+
+/**
+ * Enforce keep_revisions / keep_days on named pins: revisions beyond the
+ * limits are unpinned (their gc_root rows deleted). The current (newest)
+ * revision is never pruned; unpinned paths then age out via normal retention.
+ */
+async function prunePinRevisions(db: D1, stats: GcStats): Promise<void> {
+	try {
+		const result = await db
+			.prepare(
+				'DELETE FROM gc_root WHERE id IN (' +
+					'SELECT id FROM (' +
+					'  SELECT g.id, g.created_at, p.keep_revisions, p.keep_days,' +
+					'         ROW_NUMBER() OVER (PARTITION BY g.pin_id ORDER BY g.created_at DESC, g.id DESC) AS rn' +
+					'  FROM gc_root g JOIN pin p ON p.id = g.pin_id' +
+					') WHERE rn > 1 AND (' +
+					'  (keep_revisions IS NOT NULL AND rn > keep_revisions)' +
+					"  OR (keep_days IS NOT NULL AND datetime(created_at) < datetime('now', '-' || keep_days || ' days'))" +
+					'))'
+			)
+			.run();
+		stats.pin_revisions_pruned = result.meta.changes ?? 0;
+	} catch (e) {
+		console.warn(`gc: pin revision prune failed: ${e}`);
+	}
+}
+
+/**
+ * Advisory closure-completeness monitor (the cachix invariant, adapted to
+ * the redirect design): count live objects with a Reference that is neither
+ * resolved locally nor known to any upstream. These closures would fail to
+ * substitute; the count surfaces in GC stats and the log, it does not block
+ * serving.
+ */
+async function closureIntegrityReport(db: D1, stats: GcStats): Promise<void> {
+	try {
+		const row = await db
+			.prepare(
+				'SELECT COUNT(DISTINCT r.object_id) AS n FROM object_ref r ' +
+					'JOIN object o ON o.id = r.object_id ' +
+					'WHERE r.child_id IS NULL AND o.detached_at IS NULL ' +
+					'AND NOT EXISTS (SELECT 1 FROM upstream_check uc ' +
+					'WHERE uc.store_path_hash = r.ref_hash AND uc.present <> 0)'
+			)
+			.first<{ n: number }>();
+		stats.incomplete_closure_objects = row?.n ?? 0;
+		if (stats.incomplete_closure_objects > 0) {
+			console.warn(
+				`gc: ${stats.incomplete_closure_objects} objects have references neither local nor upstream-covered`
+			);
+		}
+	} catch (e) {
+		console.warn(`gc: closure integrity report failed: ${e}`);
+	}
 }
 
 /** Hard-reap caches soft-deleted longer than the grace period ago. */
@@ -687,6 +936,8 @@ async function reapAbandonedCaches(db: D1, stats: GcStats): Promise<void> {
 			[
 				`DELETE FROM object_ref WHERE object_id IN (SELECT id FROM object WHERE cache_id IN (${doomed}))`,
 				`DELETE FROM gc_root WHERE cache_id IN (${doomed})`,
+				`DELETE FROM pin WHERE cache_id IN (${doomed})`,
+				`DELETE FROM cache_upstream WHERE cache_id IN (${doomed})`,
 				`DELETE FROM object WHERE cache_id IN (${doomed})`,
 				'DELETE FROM cache WHERE deleted_at IS NOT NULL AND deleted_at < ?1'
 			].map((sql) => db.prepare(sql).bind(cutoff))
@@ -782,16 +1033,20 @@ async function reapOrphans(env: Env, stats: GcStats): Promise<void> {
 	}
 }
 
-/** Bound the upstream_check cache: recheck absents daily, presents eventually. */
+/** Bound the upstream_check cache: recheck absents daily, presents eventually.
+ * Rows whose registry entry was deleted go immediately. */
 async function pruneUpstreamChecks(db: D1): Promise<void> {
 	const absentCutoff = new Date(Date.now() - UPSTREAM_ABSENT_TTL_SECS * 1000).toISOString();
 	const presentCutoff = new Date(Date.now() - UPSTREAM_PRESENT_TTL_SECS * 1000).toISOString();
 	await db
-		.prepare(
-			// present <> 0 covers both PRESENT and UNPERSISTABLE verdicts.
-			'DELETE FROM upstream_check WHERE (present = 0 AND checked_at < ?1) OR (present <> 0 AND checked_at < ?2)'
-		)
-		.bind(absentCutoff, presentCutoff)
-		.run()
+		.batch([
+			db
+				.prepare(
+					// present <> 0 covers both PRESENT and UNPERSISTABLE verdicts.
+					'DELETE FROM upstream_check WHERE (present = 0 AND checked_at < ?1) OR (present <> 0 AND checked_at < ?2)'
+				)
+				.bind(absentCutoff, presentCutoff),
+			db.prepare('DELETE FROM upstream_check WHERE upstream_id NOT IN (SELECT id FROM upstream)')
+		])
 		.catch((e) => console.warn(`gc: upstream_check prune failed: ${e}`));
 }

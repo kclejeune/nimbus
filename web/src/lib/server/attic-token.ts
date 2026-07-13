@@ -9,6 +9,8 @@ export const NIMBUS_CLAIM_NAMESPACE = 'https://nimbus.kclj.io/v1';
 
 export interface GlobalClaims {
 	/** may trigger garbage collection */ gc?: 1;
+	/** may modify trust-affecting cache settings via the API (signing
+	 * keypair, visibility) — admin-only, like gc */ ct?: 1;
 }
 
 /** Per-cache permission flags, using the attic short keys. */

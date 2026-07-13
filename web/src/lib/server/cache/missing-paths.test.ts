@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	allLiveUpstreams,
 	clearUpstreamsMemo,
-	DEFAULT_UPSTREAM_TTL_SECS,
-	parseUpstreams,
+	effectiveUpstreamMode,
 	PERSIST_MAX_NAR_BYTES,
 	probeUpstream,
+	upstreamsForCache,
 	VERDICT_ABSENT,
 	VERDICT_PRESENT,
 	VERDICT_UNPERSISTABLE,
@@ -16,57 +16,33 @@ import { extractPublicKey, generateKeypair } from '../attic/signing';
 
 /** An Upstream with defaults, for terse expectations. */
 function upstream(partial: Partial<Upstream> & { url: string }): Upstream {
-	return { publicKey: null, ttl: null, mode: 'redirect', persistInto: null, ...partial };
+	return { id: 1, publicKey: null, ttl: null, mode: 'redirect', persistInto: null, ...partial };
 }
 
-describe('parseUpstreams', () => {
-	it('parses the legacy string-array format with defaults', () => {
-		expect(parseUpstreams('["https://cache.nixos.org/"]')).toEqual([
-			upstream({ url: 'https://cache.nixos.org' })
-		]);
+describe('effectiveUpstreamMode', () => {
+	const entry = (default_mode: string, enforced = 0) => ({ default_mode, enforced });
+
+	it('inherits the registry default when no override exists', () => {
+		expect(effectiveUpstreamMode(entry('redirect'), undefined)).toBe('redirect');
+		expect(effectiveUpstreamMode(entry('persist'), undefined)).toBe('persist');
+		expect(effectiveUpstreamMode(entry('off'), undefined)).toBe('off');
 	});
 
-	it('parses full objects and mixed arrays, longest TTL first', () => {
-		const raw = JSON.stringify([
-			{
-				url: 'https://foo.cachix.org/',
-				public_key: 'foo.cachix.org-1:AAAA',
-				ttl: 3600,
-				mode: 'persist'
-			},
-			{ url: 'https://cache.nixos.org', ttl: 365 * 24 * 3600 },
-			{ url: 'https://bar.example', mode: 'bogus' }
-		]);
-		expect(parseUpstreams(raw)).toEqual([
-			upstream({ url: 'https://cache.nixos.org', ttl: 365 * 24 * 3600 }),
-			upstream({ url: 'https://bar.example' }),
-			upstream({
-				url: 'https://foo.cachix.org',
-				publicKey: 'foo.cachix.org-1:AAAA',
-				ttl: 3600,
-				mode: 'persist'
-			})
-		]);
+	it('an override row wins over the default', () => {
+		expect(effectiveUpstreamMode(entry('redirect'), 'off')).toBe('off');
+		expect(effectiveUpstreamMode(entry('off'), 'persist')).toBe('persist');
 	});
 
-	it('sorts by TTL descending, stable among ties (default TTL)', () => {
-		const raw = JSON.stringify([
-			{ url: 'https://c.example', ttl: 60 },
-			{ url: 'https://a.example' },
-			{ url: 'https://b.example' }
-		]);
-		expect(parseUpstreams(raw).map((u) => u.url)).toEqual([
-			'https://a.example',
-			'https://b.example',
-			'https://c.example'
-		]);
+	it('enforced entries participate at least as redirect', () => {
+		expect(effectiveUpstreamMode(entry('redirect', 1), 'off')).toBe('redirect');
+		expect(effectiveUpstreamMode(entry('persist', 1), 'off')).toBe('redirect');
+		// persist stays a per-cache opt-in even when enforced.
+		expect(effectiveUpstreamMode(entry('persist', 1), 'redirect')).toBe('redirect');
 	});
 
-	it('tolerates malformed input', () => {
-		expect(parseUpstreams(null)).toEqual([]);
-		expect(parseUpstreams('not json')).toEqual([]);
-		expect(parseUpstreams('{"url": "x"}')).toEqual([]);
-		expect(parseUpstreams('[42, {"public_key": "k"}, ""]')).toEqual([]);
+	it('unknown mode strings degrade to redirect', () => {
+		expect(effectiveUpstreamMode(entry('bogus'), undefined)).toBe('redirect');
+		expect(effectiveUpstreamMode(entry('redirect'), 'bogus')).toBe('redirect');
 	});
 });
 
@@ -150,60 +126,113 @@ describe('probeUpstream', () => {
 	});
 });
 
-describe('allLiveUpstreams', () => {
+describe('registry resolution', () => {
 	beforeEach(clearUpstreamsMemo);
 
-	function fakeDb(rows: { name: string; upstream_caches: string }[]) {
+	interface RegistryFixture {
+		upstreams: {
+			id: number;
+			url: string;
+			public_key: string | null;
+			ttl: number | null;
+			default_mode: string;
+			enforced: number;
+		}[];
+		subs: { cache_id: number; upstream_id: number; mode: string }[];
+		caches: { id: number; name: string }[];
+	}
+
+	/** Answers the config loader's three-statement batch from fixtures. */
+	function fakeDb(fx: RegistryFixture) {
 		return {
-			prepare: () => ({ all: async () => ({ results: rows }) })
+			prepare: (sql: string) => ({ sql }),
+			batch: async (stmts: { sql: string }[]) =>
+				stmts.map((s) => ({
+					results: s.sql.includes('FROM cache_upstream')
+						? fx.subs
+						: s.sql.includes('FROM upstream')
+							? fx.upstreams
+							: fx.caches
+				}))
 		} as never;
 	}
 
-	it('unions live caches, dedupes by URL, longest TTL first', async () => {
-		const rows = [
-			{ name: 'one', upstream_caches: '["https://a.example", "https://b.example"]' },
-			{
-				name: 'two',
-				upstream_caches: JSON.stringify([
-					'https://b.example',
-					{ url: 'https://c.example', ttl: 365 * 24 * 3600 }
-				])
-			}
-		];
-		expect((await allLiveUpstreams(fakeDb(rows))).map((u) => u.url)).toEqual([
-			'https://c.example',
-			'https://a.example',
-			'https://b.example'
-		]);
-	});
+	const entry = (
+		id: number,
+		url: string,
+		extra: Partial<RegistryFixture['upstreams'][number]> = {}
+	) => ({ id, url, public_key: null, ttl: null, default_mode: 'redirect', enforced: 0, ...extra });
 
-	it('merges strictly: keyed wins, min ttl, persistInto kept', async () => {
-		const rows = [
-			{ name: 'one', upstream_caches: '[{"url": "https://a.example", "ttl": 7200}]' },
-			{
-				name: 'two',
-				upstream_caches:
-					'[{"url": "https://a.example", "public_key": "a-1:KEY", "ttl": 3600, "mode": "persist"}]'
-			}
-		];
-		expect(await allLiveUpstreams(fakeDb(rows))).toEqual([
-			{
-				url: 'https://a.example',
-				publicKey: 'a-1:KEY',
+	it('upstreamsForCache resolves overrides, drops off, longest TTL first', async () => {
+		const db = fakeDb({
+			upstreams: [
+				entry(1, 'https://cachix.example', { ttl: 3600, public_key: 'c-1:KEY' }),
+				entry(2, 'https://nixos.example', { ttl: 365 * 24 * 3600 }),
+				entry(3, 'https://unused.example')
+			],
+			subs: [
+				{ cache_id: 10, upstream_id: 1, mode: 'persist' },
+				{ cache_id: 10, upstream_id: 3, mode: 'off' }
+			],
+			caches: [{ id: 10, name: 'mine' }]
+		});
+		expect(await upstreamsForCache(db, { id: 10, name: 'mine' })).toEqual([
+			upstream({ id: 2, url: 'https://nixos.example', ttl: 365 * 24 * 3600 }),
+			upstream({
+				id: 1,
+				url: 'https://cachix.example',
+				publicKey: 'c-1:KEY',
 				ttl: 3600,
 				mode: 'persist',
-				persistInto: 'two'
-			}
+				persistInto: 'mine'
+			})
 		]);
 	});
 
-	it('persistInto follows the first cache wanting persistence', async () => {
-		const rows = [
-			{ name: 'one', upstream_caches: '[{"url": "https://a.example", "mode": "persist"}]' },
-			{ name: 'two', upstream_caches: '[{"url": "https://a.example", "mode": "persist"}]' }
-		];
-		const [merged] = await allLiveUpstreams(fakeDb(rows));
-		expect(merged.persistInto).toBe('one');
-		expect(merged.ttl).toBe(DEFAULT_UPSTREAM_TTL_SECS);
+	it('enforced upstreams cannot be turned off per cache', async () => {
+		const db = fakeDb({
+			upstreams: [entry(1, 'https://nixos.example', { enforced: 1 })],
+			subs: [{ cache_id: 10, upstream_id: 1, mode: 'off' }],
+			caches: [{ id: 10, name: 'mine' }]
+		});
+		expect((await upstreamsForCache(db, { id: 10, name: 'mine' }))[0].mode).toBe('redirect');
+	});
+
+	it('allLiveUpstreams unions enabled entries; persistInto = first cache by order', async () => {
+		const db = fakeDb({
+			upstreams: [
+				entry(1, 'https://a.example'),
+				entry(2, 'https://b.example', { default_mode: 'off' })
+			],
+			subs: [
+				{ cache_id: 11, upstream_id: 1, mode: 'persist' },
+				{ cache_id: 10, upstream_id: 1, mode: 'persist' },
+				{ cache_id: 10, upstream_id: 2, mode: 'off' }
+			],
+			// Already ordered by (priority, name), as the loader's query returns.
+			caches: [
+				{ id: 10, name: 'one' },
+				{ id: 11, name: 'two' }
+			]
+		});
+		const merged = await allLiveUpstreams(db);
+		// b.example: default off and no cache enables it -> excluded entirely.
+		expect(merged).toEqual([
+			upstream({ id: 1, url: 'https://a.example', mode: 'persist', persistInto: 'one' })
+		]);
+	});
+
+	it('memoizes per isolate until cleared', async () => {
+		const first = fakeDb({
+			upstreams: [entry(1, 'https://a.example')],
+			subs: [],
+			caches: [{ id: 10, name: 'one' }]
+		});
+		const second = fakeDb({ upstreams: [], subs: [], caches: [] });
+		expect(await allLiveUpstreams(first)).toHaveLength(1);
+		// Memo still serves the first snapshot even with a different db.
+		expect(await allLiveUpstreams(second)).toHaveLength(1);
+		clearUpstreamsMemo();
+		expect(await allLiveUpstreams(second)).toHaveLength(0);
 	});
 });

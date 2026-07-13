@@ -66,6 +66,11 @@ export interface UploadNarInfo {
 	sigs: string[];
 	ca: string | null;
 	nar_hash: string;
+	/** Provenance, stamped server-side (client-supplied values are overwritten
+	 * by the router / pullthrough): 'push' or 'pullthrough:<upstream url>'. */
+	source?: string | null;
+	/** Pushing token's subject, stamped server-side like `source`. */
+	created_by?: string | null;
 }
 
 function uploadedResult(fileSize: number | null, fracDeduplicated: number): Response {
@@ -133,21 +138,28 @@ export async function finishDeduplicated(
 	narId: number
 ): Promise<Response> {
 	try {
-		await db.createObject(env.ATTIC_DB, {
-			cache_id: cacheId,
-			nar_id: narId,
-			store_path_hash: info.store_path_hash,
-			store_path: info.store_path,
-			references: info.references,
-			system: info.system,
-			deriver: info.deriver,
-			sigs: info.sigs,
-			ca: info.ca
-		});
+		await db.createObject(env.ATTIC_DB, newObjectFrom(info, cacheId, narId));
 	} finally {
 		await db.releaseNarLock(env.ATTIC_DB, narId).catch(() => {});
 	}
 	return uploadedResult(null, 1);
+}
+
+/** The object row an upload lands, shared by every insert site. */
+function newObjectFrom(info: UploadNarInfo, cacheId: number, narId: number): db.NewObject {
+	return {
+		cache_id: cacheId,
+		nar_id: narId,
+		store_path_hash: info.store_path_hash,
+		store_path: info.store_path,
+		references: info.references,
+		system: info.system,
+		deriver: info.deriver,
+		sigs: info.sigs,
+		ca: info.ca,
+		source: info.source ?? 'push',
+		created_by: info.created_by ?? null
+	};
 }
 
 // --- FastCDC chunked storage (NARs ≥ NAR_CHUNK_THRESHOLD) ---
@@ -250,19 +262,7 @@ async function linkChunkedNar(
 			);
 		}
 		stmts.push(db.updateNarStateStmt(d1, narId, 'V'));
-		stmts.push(
-			db.insertObjectStmt(d1, {
-				cache_id: cacheId,
-				nar_id: narId,
-				store_path_hash: info.store_path_hash,
-				store_path: info.store_path,
-				references: info.references,
-				system: info.system,
-				deriver: info.deriver,
-				sigs: info.sigs,
-				ca: info.ca
-			})
-		);
+		stmts.push(db.insertObjectStmt(d1, newObjectFrom(info, cacheId, narId)));
 		await db.runBatched(d1, stmts);
 	} catch (e) {
 		// Freshly stored R2 objects are content-addressed and adopted by any
@@ -333,17 +333,7 @@ async function createUploadRows(
 			}),
 			db.insertChunkRefStmt(d1, narId, 0, null, info.nar_hash, opts.compression),
 			db.updateNarStateStmt(d1, narId, 'V'),
-			db.insertObjectStmt(d1, {
-				cache_id: cacheId,
-				nar_id: narId,
-				store_path_hash: info.store_path_hash,
-				store_path: info.store_path,
-				references: info.references,
-				system: info.system,
-				deriver: info.deriver,
-				sigs: info.sigs,
-				ca: info.ca
-			})
+			db.insertObjectStmt(d1, newObjectFrom(info, cacheId, narId))
 		]);
 	} catch (e) {
 		await db.updateNarState(d1, narId, 'D').catch(() => {});
@@ -400,7 +390,8 @@ export async function handleUploadPath(
 	request: Request,
 	env: Env,
 	ctx: ExecutionContext | undefined,
-	canPush: (cacheName: string) => boolean
+	canPush: (cacheName: string) => boolean,
+	tokenSub: string | null = null
 ): Promise<Response> {
 	// NAR info comes from a header, or as a JSON preamble before the NAR bytes.
 	// Either way the NAR itself stays a stream; nothing is buffered until the
@@ -442,6 +433,9 @@ export async function handleUploadPath(
 	}
 	if (!info) return errorResponse(400, 'Missing NAR info');
 	if (!canPush(info.cache)) return errorResponse(403, 'Permission denied: push');
+	// Provenance is stamped server-side; whatever the client sent is ignored.
+	info.source = 'push';
+	info.created_by = tokenSub;
 
 	const cache = await db.findCache(env.ATTIC_DB, info.cache);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);

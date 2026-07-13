@@ -4,7 +4,10 @@
 
 import { validateCompressionConfig } from './compression/config';
 import * as db from './db';
+import { purgeTagsBestEffort } from './gc';
 import { extractPublicKey, generateKeypair } from '../attic/signing';
+import type { ExecutionContext } from './platform';
+import { cacheTag } from './store';
 import { FULL_CONTROL, insertGrant } from '$lib/server/auth/grants';
 
 type Env = App.Platform['env'];
@@ -102,12 +105,36 @@ export interface ConfigureCacheOptions {
 	keypair?: { type: 'generate' } | { type: 'set'; keypair: string };
 }
 
-/** Update cache settings; returns the new public key if the keypair changed. */
+/** The trust-affecting subset of ConfigureCacheOptions: signing identity,
+ * visibility, and the client-side trust hints. Changing any of them needs
+ * the trustAuthorized witness (admin session in the web UI, ct claim on the
+ * API) — enforced HERE so no entry point can forget it. */
+const TRUST_FIELDS = ['keypair', 'is_public', 'upstream_cache_key_names'] as const;
+
+function touchesTrustFields(options: ConfigureCacheOptions): boolean {
+	return TRUST_FIELDS.some((field) => field in options);
+}
+
+/**
+ * Update cache settings; returns the new public key if the keypair changed.
+ *
+ * `authz.trustAuthorized` is the caller's translation of its local authority;
+ * it is a separate parameter (never part of `options`) so a client body can't
+ * smuggle it in. A rotated keypair purges the cache's edge entries itself
+ * when `authz.ctx` is provided — every narinfo is re-signed.
+ */
 export async function configureCache(
 	env: Env,
 	name: string,
-	options: ConfigureCacheOptions
+	options: ConfigureCacheOptions,
+	authz: { trustAuthorized?: boolean; ctx?: ExecutionContext } = {}
 ): Promise<{ public_key?: string }> {
+	if (touchesTrustFields(options) && !authz.trustAuthorized) {
+		throw new CacheConfigError(
+			403,
+			'Permission denied: keypair/visibility changes require trust-admin authority'
+		);
+	}
 	const cache = await db.findCache(env.ATTIC_DB, name);
 	if (!cache) throw new CacheConfigError(404, `Cache not found: ${name}`);
 
@@ -145,17 +172,24 @@ export async function configureCache(
 		keypair
 	});
 
-	return keypair ? { public_key: extractPublicKey(keypair) } : {};
+	if (!keypair) return {};
+	// A rotated keypair re-signs every narinfo; evict the cache's cached
+	// copies so clients don't fail signature verification until they expire.
+	await purgeTagsBestEffort(authz.ctx, [cacheTag(name)]);
+	return { public_key: extractPublicKey(keypair) };
 }
 
 /** Soft-delete a cache (data retained until GC's abandoned-cache reap). */
-export async function destroyCache(env: Env, name: string): Promise<void> {
+export async function destroyCache(env: Env, name: string, ctx?: ExecutionContext): Promise<void> {
 	const deleted = await db.softDeleteCache(env.ATTIC_DB, name);
 	if (!deleted) throw new CacheConfigError(404, `Cache not found: ${name}`);
 	// Admin-table side effect (deliberate boundary exception, like the creator
 	// grant above): exact-name grants die with the cache, so re-creating the
 	// name never inherits the old access list.
 	await env.ATTIC_DB.prepare('DELETE FROM permission_grant WHERE pattern = ?1').bind(name).run();
+	// Deleted caches must stop serving now, not when the narinfo max-age runs
+	// out — the edge would otherwise keep answering for up to 90 days.
+	await purgeTagsBestEffort(ctx, [cacheTag(name)]);
 }
 
 /** Rename, keeping the keypair so existing signatures stay valid. */
