@@ -15,6 +15,12 @@ import {
 import { decodeSubject, encodeSubject, insertGrant, removeGrantRow } from '$lib/server/auth/grants';
 import { effectiveAccessOf, requireAdmin, requireCachePermission } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
+import { isValidPublicKey } from '$lib/server/attic/signing';
+import {
+	clearUpstreamsMemo,
+	parseUpstreams,
+	type StoredUpstream
+} from '$lib/server/cache/missing-paths';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { PageServerLoad, Actions } from './$types';
 
@@ -38,20 +44,83 @@ function parseStorePathHash(raw: string): string | null {
 	return STORE_PATH_HASH_RE.test(hash) ? hash : null;
 }
 
-function parseUpstreamList(raw: string): string[] | null {
-	const urls = raw
-		.split('\n')
-		.map((u) => u.trim().replace(/\/+$/, ''))
-		.filter(Boolean);
-	for (const u of urls) {
+/**
+ * Parse the form's JSON-serialized upstream rows ({url, key, ttlHours, mode},
+ * all strings) into the stored shape. Blank rows are dropped; returns an
+ * error string on the first invalid entry.
+ */
+function parseUpstreamForm(raw: string): { upstreams: StoredUpstream[] } | { error: string } {
+	let rows: unknown;
+	try {
+		rows = JSON.parse(raw);
+	} catch {
+		return { error: 'Invalid upstream form data.' };
+	}
+	if (!Array.isArray(rows)) return { error: 'Invalid upstream form data.' };
+
+	const upstreams: StoredUpstream[] = [];
+	for (const row of rows) {
+		const fields = (row ?? {}) as Record<string, unknown>;
+		const url = String(fields.url ?? '')
+			.trim()
+			.replace(/\/+$/, '');
+		const key = String(fields.key ?? '').trim();
+		if (!url && !key) continue;
+		if (!url) return { error: 'Each upstream needs a URL.' };
 		try {
-			const parsed = new URL(u);
-			if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+			const parsed = new URL(url);
+			if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+				return { error: `Upstream URL must be http(s): ${url}` };
+			}
 		} catch {
-			return null;
+			return { error: `Invalid upstream URL: ${url}` };
+		}
+		if (key && !isValidPublicKey(key)) {
+			return { error: `Invalid public key (expected name:base64…): ${key}` };
+		}
+
+		const ttlRaw = String(fields.ttlHours ?? '').trim();
+		const ttlHours = ttlRaw === '' ? null : Number(ttlRaw);
+		if (ttlHours !== null && (!Number.isFinite(ttlHours) || ttlHours <= 0 || ttlHours > 8760)) {
+			return { error: `TTL must be between 1 hour and 1 year (in hours): ${ttlRaw}` };
+		}
+
+		upstreams.push({
+			url,
+			public_key: key || null,
+			ttl: ttlHours === null ? null : Math.round(ttlHours * 3600),
+			mode: fields.mode === 'persist' ? 'persist' : 'redirect'
+		});
+	}
+	return { upstreams };
+}
+
+/**
+ * The root proxy merges every cache's upstreams by URL, so two caches
+ * declaring the same upstream with different trust keys is always a
+ * misconfiguration (the merge would silently pick one). Reject it at save
+ * time; differing ttl/mode merge fine (strictest wins) and pass.
+ */
+async function findUpstreamKeyConflict(
+	db: App.Platform['env']['ATTIC_DB'],
+	cacheName: string,
+	upstreams: StoredUpstream[]
+): Promise<string | null> {
+	const keyed = upstreams.filter((u) => u.public_key);
+	if (keyed.length === 0) return null;
+	const { results } = await db
+		.prepare('SELECT name, upstream_caches FROM cache WHERE deleted_at IS NULL AND name != ?1')
+		.bind(cacheName)
+		.all<{ name: string; upstream_caches: string }>();
+	for (const row of results) {
+		for (const other of parseUpstreams(row.upstream_caches)) {
+			const mine = keyed.find((u) => u.url === other.url);
+			if (mine && other.publicKey && mine.public_key !== other.publicKey) {
+				return `Upstream ${mine.url} is declared by cache "${row.name}" with a different public key; keys for the same upstream must match.`;
+			}
 		}
 	}
-	return urls;
+	return null;
 }
 
 /** Fetch rows by id when the caller has a specific id list (non-admin label
@@ -159,13 +228,13 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		actions: g.actions
 	});
 
-	let upstreams: string[] = [];
-	try {
-		const parsed = JSON.parse(cache.upstream_caches);
-		if (Array.isArray(parsed)) upstreams = parsed;
-	} catch {
-		// treat unparseable config as empty
-	}
+	// Form-ready rows (all strings) so the component can edit them directly.
+	const upstreams = parseUpstreams(cache.upstream_caches).map((u) => ({
+		url: u.url,
+		key: u.publicKey ?? '',
+		ttlHours: u.ttl === null ? '' : String(Math.round(u.ttl / 3600)),
+		mode: u.mode
+	}));
 
 	return {
 		cache: {
@@ -228,10 +297,11 @@ export const actions: Actions = {
 		}
 		const maxBytes = maxGib === null ? null : Math.round(maxGib * 2 ** 30);
 
-		const upstreams = parseUpstreamList(String(form.get('upstream_caches') ?? ''));
-		if (upstreams === null) {
-			return fail(400, { error: 'Upstream caches must be http(s) URLs, one per line.' });
-		}
+		const parsed = parseUpstreamForm(String(form.get('upstreams') ?? '[]'));
+		if ('error' in parsed) return fail(400, { error: parsed.error });
+		const upstreams = parsed.upstreams;
+		const conflict = await findUpstreamKeyConflict(platform.env.ATTIC_DB, params.name, upstreams);
+		if (conflict) return fail(400, { error: conflict });
 
 		try {
 			await configureCache(platform.env, params.name, {
@@ -250,6 +320,8 @@ export const actions: Actions = {
 		await platform.env.ATTIC_DB.prepare('UPDATE cache SET upstream_caches = ?1 WHERE name = ?2')
 			.bind(JSON.stringify(upstreams), params.name)
 			.run();
+		// Single-isolate coherence; other isolates converge within the memo TTL.
+		clearUpstreamsMemo();
 
 		await writeAudit(platform.env.ATTIC_DB, {
 			userId: locals.user.id,

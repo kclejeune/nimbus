@@ -15,6 +15,7 @@ import * as db from './db';
 import { maybeSizeTriggeredGc, runGc } from './gc';
 import { errorResponse, jsonResponse, withCachePolicy, withVisibility } from '../attic/http';
 import {
+	allLiveUpstreams,
 	filterUpstreamPaths,
 	findExistingPaths,
 	findUpstreamNar,
@@ -22,8 +23,16 @@ import {
 } from './missing-paths';
 import { type ExecutionContext } from './platform';
 import { getProxyKeypair, isKnownAbsent, pickReadableWinner, recordAbsent } from './proxy';
+import { persistUpstreamPath } from './pullthrough';
 import { extractPublicKey } from '../attic/signing';
-import { cacheTag, keyedNarinfoUrl, PREFETCH_DEPTH_HEADER, serveStore } from './store';
+import {
+	cacheTag,
+	keyedNarinfoUrl,
+	PERSIST_CACHE_HEADER,
+	PERSIST_UPSTREAM_HEADER,
+	PREFETCH_DEPTH_HEADER,
+	serveStore
+} from './store';
 import {
 	NO_PERMISSION,
 	parseAuthToken,
@@ -142,10 +151,17 @@ async function handleNixCacheInfo(
  * Authorization header is stripped so it never reaches the cache layer, where
  * it would trigger the automatic authenticated-request bypass — authorization
  * already happened here in the gateway, which runs on every request.
+ *
+ * Internal response headers are also handled here, uniformly for every store
+ * route: the pull-through markers (see PERSIST_CACHE_HEADER) spawn the ingest
+ * on THIS invocation's context — waitUntil work registered inside the
+ * CachedStore RPC callee is cancelled when the RPC session ends, so the
+ * download must ride the gateway, like the upload path's warms — and are
+ * stripped so they never reach clients.
  */
 let warnedStoreUnavailable = false;
 
-function forwardToStore(
+async function forwardToStore(
 	request: Request,
 	env: Env,
 	ctx: ExecutionContext | undefined
@@ -156,14 +172,25 @@ function forwardToStore(
 	// value would inflate the loopback fan-out.
 	forwarded.headers.delete(PREFETCH_DEPTH_HEADER);
 	const store = ctx?.exports?.CachedStore;
-	if (!store) {
-		if (!warnedStoreUnavailable) {
-			warnedStoreUnavailable = true;
-			console.warn('ctx.exports.CachedStore unavailable; serving read path uncached');
-		}
-		return serveStore(forwarded, env, ctx);
+	if (!store && !warnedStoreUnavailable) {
+		warnedStoreUnavailable = true;
+		console.warn('ctx.exports.CachedStore unavailable; serving read path uncached');
 	}
-	return store.fetch(forwarded);
+	const response = store ? await store.fetch(forwarded) : await serveStore(forwarded, env, ctx);
+
+	const cacheName = response.headers.get(PERSIST_CACHE_HEADER);
+	const upstreamUrl = response.headers.get(PERSIST_UPSTREAM_HEADER);
+	if (!cacheName || !upstreamUrl || response.status !== 200) return response;
+	// The narinfo body is tiny, so buffering it to hand to the ingest is free.
+	const text = await response.text();
+	if (ctx?.waitUntil) {
+		const origin = new URL(request.url).origin;
+		ctx.waitUntil(persistUpstreamPath(env, ctx, origin, cacheName, upstreamUrl, text));
+	}
+	const stripped = new Response(text, response);
+	stripped.headers.delete(PERSIST_CACHE_HEADER);
+	stripped.headers.delete(PERSIST_UPSTREAM_HEADER);
+	return stripped;
 }
 
 async function handleNarInfo(
@@ -242,7 +269,8 @@ async function handleNar(
 	);
 }
 
-// --- root proxy (read-only): resolve across the requester's readable caches --
+// --- root proxy (read-only): resolve across the requester's readable caches,
+// then fall back to the union of live caches' upstreams on a miss ------------
 
 function handleProxyNixCacheInfo(head: boolean): Response {
 	if (head) return new Response(null, { status: 200 });
@@ -277,11 +305,25 @@ async function handleProxyNarInfo(
 	const token = await proxyToken(request, env);
 	const session = db.readSession(env.ATTIC_DB);
 	const candidates = await db.cachesWithStorePathHash(session, storePathHash);
-	if (candidates.length === 0) recordAbsent(storePathHash);
 	const winner = pickReadableWinner(token, candidates);
-	// Not-found and not-readable are both 404: the root names no caches, so
-	// there is nothing to enumerate.
-	if (!winner) return errorResponse(404, 'Not found', 'NoSuchObject');
+	// No local winner (not stored anywhere, or stored only in caches this
+	// requester can't read): fall back to the union of live caches' upstreams.
+	// Upstream content is public, so serving it regardless of token leaks
+	// nothing; not-found and not-readable both end as 404 — the root names no
+	// caches, so there is nothing to enumerate.
+	if (!winner) {
+		const fallback = new URL(
+			`${new URL(request.url).origin}/_proxy_upstream/${storePathHash}.narinfo`
+		);
+		const response = await forwardToStore(new Request(fallback, request), env, ctx);
+		// The absent memo is token-independent, so only an empty candidate set
+		// (nothing local for anyone) plus an upstream miss may record it.
+		if (response.status === 404) {
+			if (candidates.length === 0) recordAbsent(storePathHash);
+			return errorResponse(404, 'Not found', 'NoSuchObject');
+		}
+		return withCachePolicy(response, true);
+	}
 
 	const keyed = new URL(
 		`${new URL(request.url).origin}/_proxy/${winner.name}/${storePathHash}.narinfo`
@@ -311,7 +353,16 @@ async function handleProxyNar(
 		token,
 		await db.cachesWithNarHash(session, [`sha256:${narHashRaw}`, narHashRaw])
 	);
-	if (!winner) return errorResponse(404, 'Not found', 'NoSuchObject');
+	// NAR URLs served by root-proxy upstream passthrough narinfos resolve here
+	// with no local winner, so the root needs the same upstream redirect as the
+	// per-cache route — against the union of live caches' upstreams.
+	const upstreamRedirect = async (): Promise<Response | null> => {
+		const url = await findUpstreamNar(session, await allLiveUpstreams(session), `nar/${filename}`);
+		return url ? Response.redirect(url, 302) : null;
+	};
+	if (!winner) {
+		return (await upstreamRedirect()) ?? errorResponse(404, 'Not found', 'NoSuchObject');
+	}
 
 	// Download-driven retention, attributed to the winning cache (see handleNar).
 	if (!head) {
@@ -319,12 +370,15 @@ async function handleProxyNar(
 		ctx?.waitUntil(touch);
 	}
 
-	// Same shared content-addressed edge entry as the per-cache route. No
-	// upstream fallback at the root: only locally-stored objects resolve.
+	// Same shared content-addressed edge entry as the per-cache route.
 	const shared = new URL(request.url);
 	shared.pathname = `/_nar/${filename}`;
 	const response = await forwardToStore(new Request(shared, request), env, ctx);
-	if (response.status === 404) return response;
+	if (response.status === 404) {
+		// Deletion race (GC reaped the NAR between resolution and read): the
+		// upstreams may still have it, same as the per-cache route.
+		return (await upstreamRedirect()) ?? response;
+	}
 	return withCachePolicy(
 		withVisibility(new Response(response.body, response), winner.is_public === 1),
 		winner.is_public === 1
@@ -682,15 +736,18 @@ export async function handleCacheApi(
 		return new Response('nimbus is running', { status: 200 });
 	}
 
-	// Root proxy: nix-cache-info / narinfo at depth 1, NARs under /nar/.
+	// Root proxy: nix-cache-info / narinfo at depth 1, NARs under /nar/. NAR
+	// paths may nest deeper than one segment (FlakeHub-style upstreams emit
+	// "nar/<hash>/sha256:<hex>.nar" URLs in their narinfos), so everything
+	// after /nar/ is the file path.
 	if ((method === 'GET' || method === 'HEAD') && segments.length === 1) {
 		if (segments[0] === 'nix-cache-info') return handleProxyNixCacheInfo(method === 'HEAD');
 		if (segments[0].endsWith('.narinfo')) {
 			return handleProxyNarInfo(request, env, ctx, segments[0]);
 		}
 	}
-	if ((method === 'GET' || method === 'HEAD') && segments.length === 2 && segments[0] === 'nar') {
-		return handleProxyNar(request, env, ctx, segments[1], method === 'HEAD');
+	if ((method === 'GET' || method === 'HEAD') && segments.length >= 2 && segments[0] === 'nar') {
+		return handleProxyNar(request, env, ctx, segments.slice(1).join('/'), method === 'HEAD');
 	}
 
 	if (segments[0] === '_api') {
@@ -713,8 +770,17 @@ export async function handleCacheApi(
 		}
 	}
 
-	if ((method === 'GET' || method === 'HEAD') && segments.length === 3 && segments[1] === 'nar') {
-		return handleNar(request, env, ctx, segments[0], segments[2], method === 'HEAD');
+	// Same deep-path allowance as the root /nar/ route, for per-cache
+	// passthroughs of FlakeHub-style upstream narinfos.
+	if ((method === 'GET' || method === 'HEAD') && segments.length >= 3 && segments[1] === 'nar') {
+		return handleNar(
+			request,
+			env,
+			ctx,
+			segments[0],
+			segments.slice(2).join('/'),
+			method === 'HEAD'
+		);
 	}
 
 	return errorResponse(404, 'Not found');

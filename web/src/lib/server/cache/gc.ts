@@ -15,7 +15,9 @@ type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];
 
 const ABANDONED_CACHE_GRACE_SECS = 7 * 24 * 60 * 60;
-/** Upstream "absent" verdicts are rechecked after this long; "present" is stable. */
+/** Upstream "absent" verdicts are rechecked after this long. "Present" rows
+ * lazily expire per-upstream (cachedVerdicts applies the upstream's TTL);
+ * the prune here only bounds table growth for rows never read again. */
 const UPSTREAM_ABSENT_TTL_SECS = 24 * 60 * 60;
 const UPSTREAM_PRESENT_TTL_SECS = 90 * 24 * 60 * 60;
 const REF_SYNC_BATCH = 500;
@@ -786,7 +788,8 @@ async function pruneUpstreamChecks(db: D1): Promise<void> {
 	const presentCutoff = new Date(Date.now() - UPSTREAM_PRESENT_TTL_SECS * 1000).toISOString();
 	await db
 		.prepare(
-			'DELETE FROM upstream_check WHERE (present = 0 AND checked_at < ?1) OR (present = 1 AND checked_at < ?2)'
+			// present <> 0 covers both PRESENT and UNPERSISTABLE verdicts.
+			'DELETE FROM upstream_check WHERE (present = 0 AND checked_at < ?1) OR (present <> 0 AND checked_at < ?2)'
 		)
 		.bind(absentCutoff, presentCutoff)
 		.run()

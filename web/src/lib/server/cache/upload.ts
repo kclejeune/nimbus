@@ -27,12 +27,15 @@ import {
 	type CompressionKind
 } from './compression';
 import * as db from './db';
-import { newDigestStream, type ExecutionContext } from './platform';
+import { bytesToHex } from '../attic/nix-base32';
+import { newDigestStream, readAll, type ExecutionContext } from './platform';
 import { warmNarinfoAfterUpload } from './store';
 
 type Env = App.Platform['env'];
 
-const MAX_BUFFERED_SIZE = 15 * 1024 * 1024;
+/** Bodies at or below this are buffered whole; larger ones stream (also the
+ * routing threshold for pull-through ingestion). */
+export const MAX_BUFFERED_SIZE = 15 * 1024 * 1024;
 const MAX_PREAMBLE_SIZE = 1024 * 1024;
 /** Upper bound on a single CDC chunk — matches the chunker's MAX_CHUNK. */
 const CDC_MAX_CHUNK = 16 * 1024 * 1024;
@@ -93,7 +96,7 @@ function remoteFileJson(key: string): string {
 }
 
 function toHex(buf: ArrayBuffer): string {
-	return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+	return bytesToHex(new Uint8Array(buf));
 }
 
 /**
@@ -121,8 +124,9 @@ async function verifyPossession(
 	return null;
 }
 
-/** Create an object row pointing at an existing NAR (dedup hit). */
-async function finishDeduplicated(
+/** Create an object row pointing at an existing NAR (dedup hit). Also used
+ * by pull-through ingestion (pullthrough.ts). */
+export async function finishDeduplicated(
 	env: Env,
 	info: UploadNarInfo,
 	cacheId: number,
@@ -391,34 +395,6 @@ async function splitStream(
 	return { head, rest };
 }
 
-/** Collect a stream whose declared length fits in memory. */
-async function readAll(
-	body: ReadableStream<Uint8Array>,
-	limit: number
-): Promise<Uint8Array | null> {
-	const parts: Uint8Array[] = [];
-	let total = 0;
-	const reader = body.getReader();
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		if (!value || value.length === 0) continue;
-		total += value.length;
-		if (total > limit) {
-			await reader.cancel().catch(() => {});
-			return null;
-		}
-		parts.push(value);
-	}
-	const out = new Uint8Array(total);
-	let offset = 0;
-	for (const part of parts) {
-		out.set(part, offset);
-		offset += part.length;
-	}
-	return out;
-}
-
 /** PUT /_api/v1/upload-path */
 export async function handleUploadPath(
 	request: Request,
@@ -501,7 +477,11 @@ export async function handleUploadPath(
 	return response;
 }
 
-async function handleBufferedUpload(
+/** Store one in-memory raw NAR through the native pipeline: FastCDC-chunked
+ * when >= NAR_CHUNK_THRESHOLD, single recompressed chunk otherwise; the body
+ * is verified against info.nar_hash either way. Also the pull-through
+ * ingestion entry point for small NARs (pullthrough.ts). */
+export async function handleBufferedUpload(
 	env: Env,
 	info: UploadNarInfo,
 	cacheId: number,
@@ -516,8 +496,9 @@ async function handleBufferedUpload(
 				`NAR hash mismatch: expected ${stripSha256(info.nar_hash)}, got ${narHash}`
 			);
 		}
-		// Buffered bodies are ≤15 MB (at most a handful of chunks), so all of
-		// them process concurrently: dedup checks and R2 puts overlap while the
+		// Buffered bodies are ≤15 MB (at most a handful of chunks; pull-through
+		// routes anything larger through handleStreamingUpload), so all of them
+		// process concurrently: dedup checks and R2 puts overlap while the
 		// synchronous zstd calls serialize themselves on the single thread.
 		const settled = await Promise.allSettled(
 			chunkBuffer(body).map((raw) => processNarChunk(env, kind, raw))
@@ -555,13 +536,15 @@ async function handleBufferedUpload(
 }
 
 /**
- * Streaming upload (>15 MB): FastCDC the incoming NAR, deduplicating each
- * chunk against the store and compressing+storing the fresh ones. The NAR
+ * Streaming upload (>15 MB), also used by pull-through ingestion for large
+ * NARs (bounded chunk admission keeps memory flat): FastCDC the incoming
+ * NAR, deduplicating each chunk against the store and compressing+storing
+ * the fresh ones. The NAR
  * hash is verified before any database row is written; chunks stored before a
  * mismatch is detected are content-addressed and get adopted by a retry (or
  * reaped as orphans).
  */
-async function handleStreamingUpload(
+export async function handleStreamingUpload(
 	env: Env,
 	body: ReadableStream<Uint8Array>,
 	info: UploadNarInfo,

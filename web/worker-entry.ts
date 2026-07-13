@@ -62,6 +62,9 @@ export default {
 	},
 
 	async scheduled(_controller: unknown, env: Env, ctx: unknown) {
+		// Upstream re-validation is not cron work: passthrough narinfos carry
+		// the upstream's TTL as edge max-age (the CDN re-invokes the worker on
+		// expiry) and D1 "present" verdicts lazily expire on the same TTL.
 		const stats = await runGc(env, { ctx: ctx as App.Platform['ctx'] });
 		console.log(`gc: ${JSON.stringify(stats)}`);
 	}

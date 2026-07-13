@@ -30,3 +30,31 @@ export function newDigestStream(): DigestStreamLike {
 	};
 	return new workersCrypto.DigestStream('SHA-256');
 }
+
+/** Collect a stream into memory, or null once it exceeds `limit` bytes. */
+export async function readAll(
+	body: ReadableStream<Uint8Array>,
+	limit: number
+): Promise<Uint8Array | null> {
+	const parts: Uint8Array[] = [];
+	let total = 0;
+	const reader = body.getReader();
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		if (!value || value.length === 0) continue;
+		total += value.length;
+		if (total > limit) {
+			await reader.cancel().catch(() => {});
+			return null;
+		}
+		parts.push(value);
+	}
+	const out = new Uint8Array(total);
+	let offset = 0;
+	for (const part of parts) {
+		out.set(part, offset);
+		offset += part.length;
+	}
+	return out;
+}

@@ -12,7 +12,13 @@ import { errorResponse, withVisibility } from '../attic/http';
 import { buildNarInfo } from '../attic/narinfo';
 import { extractPublicKey } from '../attic/signing';
 import * as db from './db';
-import { fetchUpstreamNarInfo, parseUpstreams } from './missing-paths';
+import {
+	allLiveUpstreams,
+	fetchUpstreamNarInfo,
+	parseUpstreams,
+	upstreamTtlSecs,
+	type Upstream
+} from './missing-paths';
 import { clearAbsent, getProxyKeypair } from './proxy';
 import type { ExecutionContext } from './platform';
 
@@ -39,10 +45,66 @@ const NARINFO_CACHE_CONTROL =
 // re-push dedups server-side).
 const NARINFO_404_CACHE_CONTROL = 'public, max-age=1800';
 
+/**
+ * Cache-Control for upstream passthrough narinfos: the edge holds them for
+ * the upstream's TTL, then revalidates by re-invoking this worker, which
+ * re-fetches the upstream live — CDN-driven revalidation, no cron involved.
+ * An entry the upstream GC'd flips to a (cacheable, tagged) 404 at the next
+ * revalidation, so staleness is bounded by the TTL.
+ */
+function upstreamNarinfoCacheControl(upstream: Upstream): string {
+	const ttl = upstreamTtlSecs(upstream);
+	return `public, max-age=${ttl}, stale-while-revalidate=86400, stale-if-error=86400`;
+}
+
+/**
+ * The shared response for an upstream passthrough narinfo (per-cache and
+ * root proxy): served verbatim with the upstream's own signature, edge-cached
+ * for the upstream's TTL, marked for pull-through when the winning upstream
+ * resolves to a persist cache.
+ */
+function upstreamNarinfoResponse(
+	hit: { text: string; upstream: Upstream },
+	tags: string
+): Response {
+	const response = new Response(hit.text, {
+		status: 200,
+		headers: {
+			'Content-Type': 'text/x-nix-narinfo',
+			'Cache-Control': upstreamNarinfoCacheControl(hit.upstream),
+			'Cache-Tag': tags
+		}
+	});
+	if (hit.upstream.persistInto) {
+		response.headers.set(PERSIST_CACHE_HEADER, hit.upstream.persistInto);
+		response.headers.set(PERSIST_UPSTREAM_HEADER, hit.upstream.url);
+	}
+	return response;
+}
+
+/**
+ * Internal response headers asking the gateway to pull-through this
+ * passthrough into a cache. waitUntil work registered here in the RPC callee
+ * is cancelled when the RPC session ends, so the download must ride the
+ * gateway's execution context — the gateway reads these, spawns the ingest,
+ * and strips them before responding. They are edge-cached with the entry, so
+ * hits keep re-asking until ingestion lands and evicts the entry; ingest is
+ * idempotent and exits early once the object exists.
+ */
+export const PERSIST_CACHE_HEADER = 'X-Nimbus-Persist-Cache';
+export const PERSIST_UPSTREAM_HEADER = 'X-Nimbus-Persist-Upstream';
+
 /** Cache-Tag attached to narinfo responses; GC purges it on object deletion. */
 export function narinfoTag(cacheName: string, storePathHash: string): string {
 	return `narinfo:${cacheName}:${storePathHash}`;
 }
+
+/**
+ * Tag namespace for root-proxy upstream passthroughs. `~` is outside
+ * CACHE_NAME_RE, so it can never collide with a real cache's tags; the
+ * upstream revalidator purges these when an upstream GCs an entry.
+ */
+export const ROOT_UPSTREAM_TAG_NS = '~upstream';
 
 /** Cache-wide tag on narinfo responses, for one-call purges when a config
  * change invalidates all of them at once (keypair rotation re-signs every
@@ -96,7 +158,12 @@ export async function warmNarinfoAfterUpload(
 	const store = ctx?.exports?.CachedStore;
 	if (!store) return;
 	try {
-		await store.purgeTags([narinfoTag(cache.name, storePathHash)]);
+		// The root ~upstream tag evicts a lingering root-proxy passthrough of
+		// the same path (uploads and pull-through ingestion both land here).
+		await store.purgeTags([
+			narinfoTag(cache.name, storePathHash),
+			narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash)
+		]);
 	} catch {
 		// stale entry expires via its max-age
 	}
@@ -117,6 +184,18 @@ export async function serveStore(
 ): Promise<Response> {
 	const segments = new URL(request.url).pathname.split('/').filter(Boolean);
 
+	// Root-proxy upstream fallback: the hash resolves to no local cache, so try
+	// the union of every live cache's upstreams. Cached at the edge under this
+	// internal path so mass queries for upstream-available paths don't re-probe.
+	// Must precede the per-cache narinfo route, which would otherwise match
+	// this path shape and read '_proxy_upstream' as a cache name.
+	if (
+		segments.length === 2 &&
+		segments[0] === '_proxy_upstream' &&
+		segments[1].endsWith('.narinfo')
+	) {
+		return serveRootUpstreamNarInfo(env, segments[1].slice(0, -'.narinfo'.length));
+	}
 	if (segments.length === 2 && segments[1].endsWith('.narinfo')) {
 		return serveNarInfo(request, env, ctx, segments[0], segments[1].slice(0, -'.narinfo'.length));
 	}
@@ -160,6 +239,30 @@ async function serveProxyNarInfo(
 
 	// Same tags as the per-cache entry: GC/upload purges cover both.
 	return narinfoResponse(narinfo, cacheName, storePathHash, cache.is_public === 1);
+}
+
+/**
+ * Root-proxy upstream passthrough: serve the upstream's narinfo verbatim (its
+ * signature is the upstream's own, which clients substituting through the
+ * root already trust — nothing is re-signed). Upstream content is public, so
+ * responses are always cacheable; both hits and misses carry the
+ * ROOT_UPSTREAM_TAG_NS tag so ingestion can evict them once a path lands
+ * locally.
+ */
+async function serveRootUpstreamNarInfo(env: Env, storePathHash: string): Promise<Response> {
+	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
+
+	const session = db.readSession(env.ATTIC_DB);
+	const upstreams = await allLiveUpstreams(session);
+	const tag = narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash);
+
+	const hit =
+		upstreams.length > 0 ? await fetchUpstreamNarInfo(session, upstreams, storePathHash) : null;
+	if (hit) return withVisibility(upstreamNarinfoResponse(hit, tag), true);
+	const absent = errorResponse(404, 'Not found', 'NoSuchObject');
+	absent.headers.set('Cache-Control', NARINFO_404_CACHE_CONTROL);
+	absent.headers.set('Cache-Tag', tag);
+	return withVisibility(absent, true);
 }
 
 /** The shared success response for a served narinfo (per-cache and root proxy). */
@@ -272,16 +375,17 @@ async function serveNarInfo(
 	const isPublic = cache.is_public === 1;
 	if (!found) {
 		// Paths available upstream are filtered out of pushes, so a complete
-		// closure needs the upstream's narinfo served through this cache.
-		const upstream = await fetchUpstreamNarInfo(
-			session,
-			parseUpstreams(cache.upstream_caches),
-			storePathHash
+		// closure needs the upstream's narinfo served through this cache. A
+		// persist-mode entry resolves into this cache.
+		const upstreams = parseUpstreams(cache.upstream_caches).map((u) =>
+			u.mode === 'persist' ? { ...u, persistInto: cacheName } : u
 		);
-		if (upstream) {
-			upstream.headers.set('Cache-Control', NARINFO_CACHE_CONTROL);
-			upstream.headers.set('Cache-Tag', narinfoTags(cacheName, storePathHash));
-			return withVisibility(upstream, isPublic);
+		const hit = await fetchUpstreamNarInfo(session, upstreams, storePathHash);
+		if (hit) {
+			return withVisibility(
+				upstreamNarinfoResponse(hit, narinfoTags(cacheName, storePathHash)),
+				isPublic
+			);
 		}
 		const absent = errorResponse(404, 'Not found', 'NoSuchObject');
 		absent.headers.set('Cache-Control', NARINFO_404_CACHE_CONTROL);

@@ -66,6 +66,71 @@ export async function signMessage(keypair: string, message: Uint8Array): Promise
 	return `${name}:${encodeBase64(new Uint8Array(sig))}`;
 }
 
+/** Key material of `{name}:{base64 pub}`; throws when malformed. */
+function decodePublicKey(publicKey: string): Uint8Array {
+	const colon = publicKey.indexOf(':');
+	if (colon <= 0 || /\s/.test(publicKey)) {
+		throw new Error('Public key missing name separator or contains whitespace');
+	}
+	const bytes = decodeBase64(publicKey.slice(colon + 1));
+	if (bytes.length !== 32) {
+		throw new Error(`Invalid public key length: expected 32, got ${bytes.length}`);
+	}
+	return bytes;
+}
+
+// Imported verify keys per public-key string, mirroring the signing-key cache.
+const verifyKeys = new Map<string, Promise<CryptoKey>>();
+
+function importVerifyKey(publicKey: string): Promise<CryptoKey> {
+	let key = verifyKeys.get(publicKey);
+	if (!key) {
+		const bytes = decodePublicKey(publicKey);
+		key = crypto.subtle.importKey('raw', bytes as BufferSource, 'Ed25519', false, ['verify']);
+		verifyKeys.set(publicKey, key);
+		key.catch(() => verifyKeys.delete(publicKey));
+	}
+	return key;
+}
+
+/** Whether `{name}:{base64 pub}` parses as a Nix public key. */
+export function isValidPublicKey(publicKey: string): boolean {
+	try {
+		decodePublicKey(publicKey);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Verify a Nix signature (`{name}:{base64 sig}`) over a message with a public
+ * key (`{name}:{base64 pub}`). The key names must match — a signature from a
+ * different key of the same upstream proves nothing about this key.
+ */
+export async function verifySignature(
+	publicKey: string,
+	signature: string,
+	message: Uint8Array
+): Promise<boolean> {
+	const keyName = publicKey.slice(0, publicKey.indexOf(':'));
+	const sigColon = signature.indexOf(':');
+	if (sigColon <= 0 || signature.slice(0, sigColon) !== keyName) return false;
+	try {
+		const sigBytes = decodeBase64(signature.slice(sigColon + 1));
+		if (sigBytes.length !== 64) return false;
+		const key = await importVerifyKey(publicKey);
+		return await crypto.subtle.verify(
+			'Ed25519',
+			key,
+			sigBytes as BufferSource,
+			message as BufferSource
+		);
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Nix path fingerprint: `1;{storePath};{narHash base32};{narSize};{refs}` with
  * references as comma-separated full store paths.

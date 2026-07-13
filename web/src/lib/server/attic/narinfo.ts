@@ -3,7 +3,7 @@
 // narinfo; client-supplied sigs are served only when the cache has no keypair.
 
 import { convertHashToBase32 } from './nix-base32';
-import { computeFingerprint, signMessage } from './signing';
+import { computeFingerprint, signMessage, verifySignature } from './signing';
 
 // Protocol-level input shapes; the cache engine's DB rows satisfy these
 // structurally (this module must not depend on the storage layer).
@@ -56,6 +56,88 @@ function parseJsonArray(raw: string): string[] {
 }
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
+
+/** The narinfo fields a signature covers, the signatures themselves, and the
+ * transport fields pull-through ingestion needs. */
+export interface ParsedNarInfo {
+	storePath: string;
+	narHash: string;
+	narSize: number;
+	references: string[];
+	sigs: string[];
+	/** NAR file path relative to the cache root (e.g. "nar/<hash>.nar.zst"). */
+	url: string | null;
+	compression: string | null;
+	fileHash: string | null;
+	fileSize: number | null;
+	system: string | null;
+	deriver: string | null;
+	ca: string | null;
+}
+
+/**
+ * Parse the signature-relevant fields out of a narinfo document. Returns null
+ * when a field the fingerprint needs is missing or malformed.
+ */
+export function parseNarInfo(text: string): ParsedNarInfo | null {
+	const fields = new Map<string, string>();
+	const sigs: string[] = [];
+	for (const line of text.split('\n')) {
+		const colon = line.indexOf(': ');
+		if (colon === -1) continue;
+		const key = line.slice(0, colon);
+		const value = line.slice(colon + 2).trim();
+		if (key === 'Sig') sigs.push(value);
+		else if (!fields.has(key)) fields.set(key, value);
+	}
+	const storePath = fields.get('StorePath');
+	const narHash = fields.get('NarHash');
+	const narSize = Number(fields.get('NarSize'));
+	if (!storePath || !narHash || !Number.isFinite(narSize)) return null;
+	const references = (fields.get('References') ?? '').split(' ').filter(Boolean);
+	const fileSizeRaw = fields.get('FileSize');
+	const fileSize = fileSizeRaw != null ? Number(fileSizeRaw) : null;
+	return {
+		storePath,
+		narHash,
+		narSize,
+		references,
+		sigs,
+		url: fields.get('URL') ?? null,
+		compression: fields.get('Compression') ?? null,
+		fileHash: fields.get('FileHash') ?? null,
+		fileSize: Number.isFinite(fileSize as number) ? fileSize : null,
+		system: fields.get('System') ?? null,
+		deriver: fields.get('Deriver') ?? null,
+		ca: fields.get('CA') ?? null
+	};
+}
+
+/**
+ * Whether any signature on a narinfo document verifies against the given
+ * public key. Used to gate upstream passthrough on the configured trust root.
+ */
+export async function narInfoSignatureValid(text: string, publicKey: string): Promise<boolean> {
+	return parsedNarInfoSignatureValid(parseNarInfo(text), publicKey);
+}
+
+/** narInfoSignatureValid for callers that already hold the parsed document. */
+export async function parsedNarInfoSignatureValid(
+	parsed: ParsedNarInfo | null,
+	publicKey: string
+): Promise<boolean> {
+	if (!parsed) return false;
+	const fingerprint = computeFingerprint(
+		parsed.storePath,
+		parsed.narHash,
+		parsed.narSize,
+		parsed.references
+	);
+	for (const sig of parsed.sigs) {
+		if (await verifySignature(publicKey, sig, fingerprint)) return true;
+	}
+	return false;
+}
 
 export async function buildNarInfo(
 	object: NarInfoObject,
