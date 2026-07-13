@@ -10,7 +10,7 @@
 	let adding = $state(false);
 </script>
 
-<div class="mx-auto max-w-4xl px-8 py-8">
+<div class="mx-auto max-w-6xl px-8 py-8">
 	<header class="mb-8">
 		<h1 class="text-2xl font-semibold tracking-tight">Upstream caches</h1>
 		<p class="mt-1 text-sm text-muted-foreground">
@@ -27,7 +27,7 @@
 				method="POST"
 				action="?/update"
 				use:enhance={toastErrors()}
-				class="space-y-3 rounded-lg border p-4"
+				class="space-y-3 rounded-lg border bg-card p-5"
 			>
 				<input type="hidden" name="id" value={upstream.id} />
 				<div class="grid grid-cols-2 gap-3">
@@ -124,7 +124,7 @@
 
 	<hr class="my-8 border-border" />
 
-	<section>
+	<section class="rounded-lg border border-dashed p-5">
 		<h2 class="text-sm font-medium">Add upstream</h2>
 		<form
 			method="POST"

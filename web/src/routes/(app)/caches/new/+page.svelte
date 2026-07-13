@@ -11,7 +11,9 @@
 	const v = $derived(form?.values);
 </script>
 
-<div class="mx-auto max-w-xl px-8 py-8">
+<!-- Page frame matches the app-wide max-w-6xl; the form itself stays slim
+     (max-w-xl below) so inputs keep a sensible width. -->
+<div class="mx-auto max-w-6xl px-8 py-8">
 	<a
 		href="/caches"
 		class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
@@ -35,7 +37,7 @@
 				submitting = false;
 			};
 		})}
-		class="space-y-6"
+		class="max-w-xl space-y-6"
 	>
 		<div class="space-y-2">
 			<Label for="name">Name</Label>
