@@ -28,9 +28,10 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 	};
 };
 
-/** Validate the shared add/update form fields into an UpstreamInput. */
-function parseUpstreamInput(form: FormData): UpstreamInput | { error: string } {
-	const url = String(form.get('url') ?? '')
+/** Validate the shared add/save form fields into an UpstreamInput. The save
+ * form carries every entry at once, namespaced by `_<id>` suffix. */
+function parseUpstreamInput(form: FormData, suffix = ''): UpstreamInput | { error: string } {
+	const url = String(form.get(`url${suffix}`) ?? '')
 		.trim()
 		.replace(/\/+$/, '');
 	if (!url) return { error: 'Upstream URL is required.' };
@@ -43,19 +44,21 @@ function parseUpstreamInput(form: FormData): UpstreamInput | { error: string } {
 		return { error: `Invalid upstream URL: ${url}` };
 	}
 
-	const key = String(form.get('public_key') ?? '').trim();
+	const key = String(form.get(`public_key${suffix}`) ?? '').trim();
 	if (key && !isValidPublicKey(key)) {
 		return { error: `Invalid public key (expected name:base64…): ${key}` };
 	}
 
-	const ttlRaw = String(form.get('ttl_hours') ?? '').trim();
+	const ttlRaw = String(form.get(`ttl_hours${suffix}`) ?? '').trim();
 	const ttlHours = ttlRaw === '' ? null : Number(ttlRaw);
 	if (ttlHours !== null && (!Number.isFinite(ttlHours) || ttlHours <= 0 || ttlHours > 8760)) {
 		return { error: `TTL must be between 1 hour and 1 year (in hours): ${ttlRaw}` };
 	}
 
-	const defaultMode = normalizeUpstreamMode(String(form.get('default_mode') ?? 'redirect'));
-	const enforced = form.get('enforced') === 'on';
+	const defaultMode = normalizeUpstreamMode(
+		String(form.get(`default_mode${suffix}`) ?? 'redirect')
+	);
+	const enforced = form.get(`enforced${suffix}`) === 'on';
 	if (enforced && defaultMode === 'off') {
 		return { error: 'An enforced upstream cannot default to off.' };
 	}
@@ -89,22 +92,40 @@ export const actions: Actions = {
 		return { saved: true };
 	},
 
-	update: async ({ request, locals, platform }) => {
+	/** Page-level save: every rendered entry posts at once; only entries whose
+	 * values actually changed hit the DB (updateUpstream wipes verdicts on
+	 * url/key changes, so no-op writes must not reach it). */
+	save: async ({ request, locals, platform }) => {
 		requireAdmin(locals);
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
+		const db = platform.env.ATTIC_DB;
 
 		const form = await request.formData();
-		const id = Number(form.get('id'));
-		if (!Number.isInteger(id)) return fail(400, { error: 'Invalid upstream id.' });
-		const input = parseUpstreamInput(form);
-		if ('error' in input) return fail(400, { error: input.error });
-
-		await updateUpstream(platform.env.ATTIC_DB, id, input, { ctx: platform.ctx });
-		await writeAudit(platform.env.ATTIC_DB, {
-			userId: locals.user!.id,
-			action: 'upstream.update',
-			target: input.url
-		});
+		const registry = await listRegistry(db);
+		const changed: string[] = [];
+		for (const entry of registry) {
+			if (form.get(`url_${entry.id}`) === null) continue; // not rendered (stale form)
+			const input = parseUpstreamInput(form, `_${entry.id}`);
+			if ('error' in input) return fail(400, { error: input.error });
+			if (
+				input.url === entry.url &&
+				input.publicKey === entry.publicKey &&
+				input.ttl === entry.ttl &&
+				input.defaultMode === entry.defaultMode &&
+				input.enforced === entry.enforced
+			) {
+				continue;
+			}
+			await updateUpstream(db, entry.id, input, { ctx: platform.ctx });
+			changed.push(input.url);
+		}
+		if (changed.length > 0) {
+			await writeAudit(db, {
+				userId: locals.user!.id,
+				action: 'upstream.update',
+				target: changed.join(', ')
+			});
+		}
 		return { saved: true };
 	},
 
