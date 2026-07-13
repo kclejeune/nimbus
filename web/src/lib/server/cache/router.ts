@@ -766,6 +766,29 @@ export async function handleCacheApi(
 	env: Env,
 	ctx?: ExecutionContext
 ): Promise<Response> {
+	try {
+		return await handleCacheApiInner(request, env, ctx);
+	} catch (e) {
+		// Without this boundary an unhandled throw (a D1/R2 hiccup mid-upload, a
+		// read-path error crossing the CachedStore RPC) surfaces to Cloudflare as
+		// a raw 1101 with no logged stack. Log it — observability is on — and
+		// return a controlled 500 so nix's retry path engages and the stack is
+		// visible in Workers Logs.
+		const { pathname } = new URL(request.url);
+		console.error(
+			`cache-api unhandled: ${request.method} ${pathname}: ` +
+				`${e instanceof Error ? (e.stack ?? e.message) : String(e)}`
+		);
+		const { status, message, kind } = statusOf(e);
+		return errorResponse(status, message, kind);
+	}
+}
+
+async function handleCacheApiInner(
+	request: Request,
+	env: Env,
+	ctx?: ExecutionContext
+): Promise<Response> {
 	const url = new URL(request.url);
 	const segments = url.pathname.split('/').filter(Boolean);
 	const method = request.method;

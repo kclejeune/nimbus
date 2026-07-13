@@ -13,6 +13,7 @@
 
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import sveltekit from './.svelte-kit/cloudflare/_worker.js';
+import { errorResponse } from './src/lib/server/attic/http';
 import { runGc } from './src/lib/server/cache/gc';
 import { handleCacheApi } from './src/lib/server/cache/router';
 import { serveStore } from './src/lib/server/cache/store';
@@ -28,7 +29,20 @@ type Env = App.Platform['env'];
  */
 export class CachedStore extends WorkerEntrypoint {
 	async fetch(request: Request) {
-		return serveStore(request, this.env as Env, this.ctx as App.Platform['ctx']);
+		try {
+			return await serveStore(request, this.env as Env, this.ctx as App.Platform['ctx']);
+		} catch (e) {
+			// serveNar/serveNarInfo have no internal boundary; an uncaught throw
+			// here (transient D1 error, half-linked NAR) would reject the RPC and
+			// surface to nix as a stackless 1101/500. Log the stack (observability
+			// is on) and return a controlled 500 across the loopback instead.
+			const { pathname } = new URL(request.url);
+			console.error(
+				`store read unhandled: ${request.method} ${pathname}: ` +
+					`${e instanceof Error ? (e.stack ?? e.message) : String(e)}`
+			);
+			return errorResponse(500, 'Internal error reading store');
+		}
 	}
 
 	/**
