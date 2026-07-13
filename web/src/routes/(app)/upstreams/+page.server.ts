@@ -24,8 +24,7 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 	return {
 		upstreams: registry.map((u) => ({
 			...u,
-			ttl: u.ttl,
-			ttlText: u.ttl === null ? '' : formatDuration(u.ttl),
+			ttlText: formatDuration(u.ttl),
 			usage: usage.get(u.id) ?? { redirect: 0, persist: 0 }
 		}))
 	};
@@ -47,17 +46,24 @@ function parseUpstreamInput(form: FormData, suffix = ''): UpstreamInput | { erro
 		return { error: `Invalid upstream URL: ${url}` };
 	}
 
+	// Trust without a key is unverifiable — every upstream must have one.
 	const key = String(form.get(`public_key${suffix}`) ?? '').trim();
-	if (key && !isValidPublicKey(key)) {
+	if (!key) {
+		return { error: `A public key is required for ${url} — upstream trust is key-based.` };
+	}
+	if (!isValidPublicKey(key)) {
 		return { error: `Invalid public key (expected name:base64…): ${key}` };
 	}
 
 	const ttlRaw = String(form.get(`ttl${suffix}`) ?? '').trim();
-	const ttl = ttlRaw === '' ? null : parseDuration(ttlRaw);
-	if (ttlRaw !== '' && ttl === null) {
+	if (!ttlRaw) {
+		return { error: `A TTL is required for ${url} — e.g. 3600s, 90m, 720h, 30d, or 1y.` };
+	}
+	const ttl = parseDuration(ttlRaw);
+	if (ttl === null) {
 		return { error: `Invalid TTL "${ttlRaw}" — use a duration like 3600s, 90m, 720h, 30d, or 1y.` };
 	}
-	if (ttl !== null && (ttl < 60 || ttl > 31536000)) {
+	if (ttl < 60 || ttl > 31536000) {
 		return { error: `TTL must be between 1 minute and 1 year: ${ttlRaw}` };
 	}
 
@@ -69,7 +75,7 @@ function parseUpstreamInput(form: FormData, suffix = ''): UpstreamInput | { erro
 		return { error: 'An enforced upstream cannot default to off.' };
 	}
 
-	return { url, publicKey: key || null, ttl, defaultMode, enforced };
+	return { url, publicKey: key, ttl, defaultMode, enforced };
 }
 
 export const actions: Actions = {

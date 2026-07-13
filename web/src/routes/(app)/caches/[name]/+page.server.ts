@@ -7,6 +7,7 @@ import {
 	countStorePaths
 } from '$lib/server/store-paths';
 import { detachClosure } from '$lib/server/cache/gc';
+import { allLiveUpstreams, upstreamsForCache } from '$lib/server/cache/missing-paths';
 import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { canOnCache, canSeeCache } from '$lib/server/auth/permissions';
@@ -68,17 +69,24 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 	const cacheBase = (platform?.env.CACHE_BASE_URL ?? 'https://cache.kclj.io').replace(/\/$/, '');
 	const publicKey = derivePublicKey(cache.keypair);
 
-	const [{ paths, hasMore }, total, pinned, proxyPublicKey] = await Promise.all([
-		queryStorePaths(db, params.name, { sort, dir, q, limit: PATHS_PAGE_SIZE, offset: 0 }),
-		countStorePaths(db, params.name, q),
-		db
-			.prepare('SELECT store_path_hash FROM gc_root WHERE cache_id = ?1')
-			.bind(cache.id)
-			.all<{ store_path_hash: string }>(),
-		getProxyKeypair(platform.env)
-			.then(extractPublicKey)
-			.catch(() => null)
-	]);
+	const [{ paths, hasMore }, total, pinned, proxyPublicKey, cacheUpstreams, proxyUpstreams] =
+		await Promise.all([
+			queryStorePaths(db, params.name, { sort, dir, q, limit: PATHS_PAGE_SIZE, offset: 0 }),
+			countStorePaths(db, params.name, q),
+			db
+				.prepare('SELECT store_path_hash FROM gc_root WHERE cache_id = ?1')
+				.bind(cache.id)
+				.all<{ store_path_hash: string }>(),
+			getProxyKeypair(platform.env)
+				.then(extractPublicKey)
+				.catch(() => null),
+			upstreamsForCache(db, { id: cache.id, name: cache.name }),
+			allLiveUpstreams(db)
+		]);
+	const upstreamRef = (u: { url: string; publicKey: string | null }) => ({
+		url: u.url,
+		publicKey: u.publicKey
+	});
 
 	return {
 		cache: {
@@ -92,7 +100,12 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 			url: `${cacheBase}/${cache.name}`,
 			publicKey
 		},
-		proxy: proxyPublicKey ? { url: cacheBase, publicKey: proxyPublicKey } : null,
+		// The nix.conf snippets carry these: keys always (redirect-tier paths
+		// keep their upstream signatures), URLs behind the checkbox.
+		upstreams: cacheUpstreams.map(upstreamRef),
+		proxy: proxyPublicKey
+			? { url: cacheBase, publicKey: proxyPublicKey, upstreams: proxyUpstreams.map(upstreamRef) }
+			: null,
 		viewer,
 		pinnedHashes: pinned.results.map((r) => r.store_path_hash),
 		paths,

@@ -22,9 +22,10 @@ type D1 = Env['ATTIC_DB'];
 export interface RegistryUpstream {
 	id: number;
 	url: string;
-	publicKey: string | null;
-	/** Seconds; null = default (7 days). */
-	ttl: number | null;
+	/** Never null: trust is key-based (NOT NULL column). */
+	publicKey: string;
+	/** Seconds; never null (NOT NULL column). */
+	ttl: number;
 	defaultMode: UpstreamMode;
 	enforced: boolean;
 	/** Query order (0-based, admin-controlled). */
@@ -34,8 +35,10 @@ export interface RegistryUpstream {
 
 export interface UpstreamInput {
 	url: string;
-	publicKey: string | null;
-	ttl: number | null;
+	/** Required: upstream trust is key-based. */
+	publicKey: string;
+	/** Seconds; required. */
+	ttl: number;
 	defaultMode: UpstreamMode;
 	enforced: boolean;
 }
@@ -63,8 +66,8 @@ export async function listRegistry(db: D1): Promise<RegistryUpstream[]> {
 		.all<{
 			id: number;
 			url: string;
-			public_key: string | null;
-			ttl: number | null;
+			public_key: string;
+			ttl: number;
 			default_mode: string;
 			enforced: number;
 			position: number;
@@ -145,7 +148,7 @@ export async function updateUpstream(
 	const before = await db
 		.prepare('SELECT url, public_key FROM upstream WHERE id = ?1')
 		.bind(id)
-		.first<{ url: string; public_key: string | null }>();
+		.first<{ url: string; public_key: string }>();
 	await db
 		.prepare(
 			'UPDATE upstream SET url = ?2, public_key = ?3, ttl = ?4, default_mode = ?5, enforced = ?6 ' +

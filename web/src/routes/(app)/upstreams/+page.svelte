@@ -77,7 +77,8 @@
 					<Input
 						name="public_key_{entry.id}"
 						bind:value={entry.publicKey}
-						placeholder="name:base64… (optional)"
+						placeholder="name:base64…"
+						required
 						autocomplete="off"
 						class="font-mono text-xs"
 					/>
@@ -129,7 +130,8 @@
 				<Label class="text-xs text-muted-foreground">TTL</Label>
 				<Input
 					name="ttl_{entry.id}"
-					placeholder="7d"
+					placeholder="e.g. 30d"
+					required
 					bind:value={entry.ttl}
 					autocomplete="off"
 					class="h-8 text-xs"
@@ -215,7 +217,8 @@
 						<Input
 							id="new_key"
 							name="public_key"
-							placeholder="name:base64… (optional)"
+							placeholder="name:base64…"
+							required
 							autocomplete="off"
 							class="font-mono text-xs"
 						/>
@@ -333,7 +336,7 @@
 
 	<p class="mt-6 text-xs text-muted-foreground">
 		With a public key set, an upstream path only counts as present when its narinfo carries a valid
-		signature from that key. TTL takes durations like 3600s, 90m, 720h, 30d, or 1y (default 7d) and
+		signature from that key. TTL takes durations like 3600s, 90m, 720h, 30d, or 1y and
 		bounds how long a hit is served before the upstream is re-checked. Upstreams are queried in the
 		order shown here. Changing a URL or key wipes that upstream's cached verdicts so everything
 		re-probes under the new identity.

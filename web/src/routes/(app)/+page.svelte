@@ -103,7 +103,11 @@
 
 	{#if data.proxyPublicKey && data.cacheBaseUrl}
 		<div class="px-4 lg:px-6">
-			<UnifiedEndpointCard url={data.cacheBaseUrl} publicKey={data.proxyPublicKey} />
+			<UnifiedEndpointCard
+				url={data.cacheBaseUrl}
+				publicKey={data.proxyPublicKey}
+				upstreams={data.proxyUpstreams}
+			/>
 		</div>
 	{/if}
 

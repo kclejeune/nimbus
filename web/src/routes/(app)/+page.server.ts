@@ -1,5 +1,6 @@
 import { error, fail } from '@sveltejs/kit';
 import { runGc } from '$lib/server/cache/gc';
+import { allLiveUpstreams } from '$lib/server/cache/missing-paths';
 import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { requireAdmin } from '$lib/server/auth/guard';
@@ -39,7 +40,8 @@ export const load: PageServerLoad = async ({ platform }) => {
 		orphanChunks,
 		globalLimit,
 		ingest,
-		proxyPublicKey
+		proxyPublicKey,
+		proxyUpstreams
 	] = await Promise.all([
 		db.prepare('SELECT COUNT(*) AS n FROM cache WHERE deleted_at IS NULL').first<Count>(),
 		db
@@ -79,7 +81,8 @@ export const load: PageServerLoad = async ({ platform }) => {
 			? getProxyKeypair(platform.env)
 					.then(extractPublicKey)
 					.catch(() => null)
-			: null
+			: null,
+		allLiveUpstreams(db)
 	]);
 
 	// Zero-fill so the chart doesn't interpolate across idle days.
@@ -105,7 +108,8 @@ export const load: PageServerLoad = async ({ platform }) => {
 		globalMaxBytes: globalLimit ? Number(globalLimit.value) : null,
 		buckets,
 		cacheBaseUrl: platform?.env.CACHE_BASE_URL ?? null,
-		proxyPublicKey
+		proxyPublicKey,
+		proxyUpstreams: proxyUpstreams.map((u) => ({ url: u.url, publicKey: u.publicKey }))
 	};
 };
 

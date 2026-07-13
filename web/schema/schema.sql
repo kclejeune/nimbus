@@ -27,8 +27,8 @@ CREATE INDEX IF NOT EXISTS idx_cache_deleted ON cache(deleted_at);
 CREATE TABLE IF NOT EXISTS upstream (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     url TEXT NOT NULL UNIQUE,
-    public_key TEXT,
-    ttl INTEGER, -- seconds; NULL = default (7 days)
+    public_key TEXT NOT NULL, -- trust is key-based; never optional
+    ttl INTEGER NOT NULL, -- seconds
     default_mode TEXT NOT NULL DEFAULT 'redirect', -- off | redirect | persist
     enforced INTEGER NOT NULL DEFAULT 0,
     position INTEGER NOT NULL DEFAULT 0, -- query order, admin-controlled
