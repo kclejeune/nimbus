@@ -168,7 +168,7 @@
 								<div class="truncate font-mono text-xs">{upstream.url}</div>
 								<div class="mt-0.5 text-xs text-muted-foreground">
 									{upstream.keyName ? `signed by ${upstream.keyName}` : 'no signature check'}
-									· TTL {upstream.ttlHours}h
+									· TTL {upstream.ttl}
 									{#if upstream.enforced}
 										· <span class="text-amber-600 dark:text-amber-400">enforced</span>
 									{/if}

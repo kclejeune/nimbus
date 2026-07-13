@@ -137,12 +137,14 @@ describe('registry resolution', () => {
 			ttl: number | null;
 			default_mode: string;
 			enforced: number;
+			position: number;
 		}[];
 		subs: { cache_id: number; upstream_id: number; mode: string }[];
 		caches: { id: number; name: string }[];
 	}
 
-	/** Answers the config loader's three-statement batch from fixtures. */
+	/** Answers the config loader's three-statement batch from fixtures. The
+	 * upstream rows are served pre-sorted, like the SQL ORDER BY position. */
 	function fakeDb(fx: RegistryFixture) {
 		return {
 			prepare: (sql: string) => ({ sql }),
@@ -151,7 +153,7 @@ describe('registry resolution', () => {
 					results: s.sql.includes('FROM cache_upstream')
 						? fx.subs
 						: s.sql.includes('FROM upstream')
-							? fx.upstreams
+							? [...fx.upstreams].sort((a, b) => a.position - b.position || a.id - b.id)
 							: fx.caches
 				}))
 		} as never;
@@ -161,14 +163,23 @@ describe('registry resolution', () => {
 		id: number,
 		url: string,
 		extra: Partial<RegistryFixture['upstreams'][number]> = {}
-	) => ({ id, url, public_key: null, ttl: null, default_mode: 'redirect', enforced: 0, ...extra });
+	) => ({
+		id,
+		url,
+		public_key: null,
+		ttl: null,
+		default_mode: 'redirect',
+		enforced: 0,
+		position: id,
+		...extra
+	});
 
-	it('upstreamsForCache resolves overrides, drops off, longest TTL first', async () => {
+	it('upstreamsForCache resolves overrides, drops off, in position order', async () => {
 		const db = fakeDb({
 			upstreams: [
-				entry(1, 'https://cachix.example', { ttl: 3600, public_key: 'c-1:KEY' }),
-				entry(2, 'https://nixos.example', { ttl: 365 * 24 * 3600 }),
-				entry(3, 'https://unused.example')
+				entry(1, 'https://cachix.example', { ttl: 3600, public_key: 'c-1:KEY', position: 1 }),
+				entry(2, 'https://nixos.example', { ttl: 365 * 24 * 3600, position: 0 }),
+				entry(3, 'https://unused.example', { position: 2 })
 			],
 			subs: [
 				{ cache_id: 10, upstream_id: 1, mode: 'persist' },

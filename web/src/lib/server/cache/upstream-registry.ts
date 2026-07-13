@@ -8,7 +8,6 @@ import { listCacheNames } from '$lib/server/db/queries';
 import { purgeTagsBestEffort } from './gc';
 import {
 	clearUpstreamsMemo,
-	DEFAULT_UPSTREAM_TTL_SECS,
 	effectiveUpstreamMode,
 	fetchUpstreamConfig,
 	normalizeUpstreamMode,
@@ -28,6 +27,8 @@ export interface RegistryUpstream {
 	ttl: number | null;
 	defaultMode: UpstreamMode;
 	enforced: boolean;
+	/** Query order (0-based, admin-controlled). */
+	position: number;
 	createdAt: string;
 }
 
@@ -56,8 +57,8 @@ async function purgeUpstreamEdge(db: D1, ctx: ExecutionContext | undefined): Pro
 export async function listRegistry(db: D1): Promise<RegistryUpstream[]> {
 	const { results } = await db
 		.prepare(
-			'SELECT id, url, public_key, ttl, default_mode, enforced, created_at ' +
-				`FROM upstream ORDER BY COALESCE(ttl, ${DEFAULT_UPSTREAM_TTL_SECS}) DESC, url`
+			'SELECT id, url, public_key, ttl, default_mode, enforced, position, created_at ' +
+				'FROM upstream ORDER BY position, id'
 		)
 		.all<{
 			id: number;
@@ -66,6 +67,7 @@ export async function listRegistry(db: D1): Promise<RegistryUpstream[]> {
 			ttl: number | null;
 			default_mode: string;
 			enforced: number;
+			position: number;
 			created_at: string;
 		}>();
 	return results.map((row) => ({
@@ -75,11 +77,13 @@ export async function listRegistry(db: D1): Promise<RegistryUpstream[]> {
 		ttl: row.ttl,
 		defaultMode: normalizeUpstreamMode(row.default_mode),
 		enforced: row.enforced === 1,
+		position: row.position,
 		createdAt: row.created_at
 	}));
 }
 
-/** Returns false when the URL is already registered. */
+/** Returns false when the URL is already registered. New entries land at the
+ * end of the query order. */
 export async function createUpstream(
 	db: D1,
 	input: UpstreamInput,
@@ -87,8 +91,10 @@ export async function createUpstream(
 ): Promise<boolean> {
 	const result = await db
 		.prepare(
-			'INSERT INTO upstream (url, public_key, ttl, default_mode, enforced, created_at) ' +
-				'VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (url) DO NOTHING'
+			'INSERT INTO upstream (url, public_key, ttl, default_mode, enforced, position, created_at) ' +
+				'VALUES (?1, ?2, ?3, ?4, ?5, ' +
+				'(SELECT COALESCE(MAX(position), -1) + 1 FROM upstream), ?6) ' +
+				'ON CONFLICT (url) DO NOTHING'
 		)
 		.bind(
 			input.url,
@@ -103,6 +109,26 @@ export async function createUpstream(
 	const created = (result.meta.changes ?? 0) > 0;
 	if (created) await purgeUpstreamEdge(db, opts.ctx);
 	return created;
+}
+
+/**
+ * Persist a new query order: `orderedIds` is the full registry in the
+ * desired order. Reordering changes which upstream serves a path first, so
+ * the edge-cached passthroughs are purged like any other registry change.
+ */
+export async function setUpstreamPositions(
+	db: D1,
+	orderedIds: number[],
+	opts: { ctx?: ExecutionContext } = {}
+): Promise<void> {
+	if (orderedIds.length === 0) return;
+	await db.batch(
+		orderedIds.map((id, index) =>
+			db.prepare('UPDATE upstream SET position = ?2 WHERE id = ?1').bind(id, index)
+		)
+	);
+	clearUpstreamsMemo();
+	await purgeUpstreamEdge(db, opts.ctx);
 }
 
 /**

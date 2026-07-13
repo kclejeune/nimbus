@@ -15,6 +15,7 @@ import {
 import { decodeSubject, encodeSubject, insertGrant, removeGrantRow } from '$lib/server/auth/grants';
 import { effectiveAccessOf, requireAdmin, requireCachePermission } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
+import { formatDuration } from '$lib/duration';
 import { DEFAULT_UPSTREAM_TTL_SECS, type UpstreamMode } from '$lib/server/cache/missing-paths';
 import {
 	cacheUpstreamOverrides,
@@ -172,7 +173,7 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		id: u.id,
 		url: u.url,
 		keyName: u.publicKey ? u.publicKey.split(':')[0] : null,
-		ttlHours: Math.round((u.ttl ?? DEFAULT_UPSTREAM_TTL_SECS) / 3600),
+		ttl: formatDuration(u.ttl ?? DEFAULT_UPSTREAM_TTL_SECS),
 		defaultMode: u.defaultMode,
 		enforced: u.enforced,
 		mode: overrides.get(u.id) ?? ('inherit' as const)

@@ -27,11 +27,10 @@ export interface Upstream {
 	/** Nix public key (`name:base64`); non-null enforces signature checks. */
 	publicKey: string | null;
 	/** Seconds a "present" verdict (and its edge-cached passthrough) lives
-	 * before the CDN/lazy re-probe; null = DEFAULT_UPSTREAM_TTL_SECS. The TTL
-	 * doubles as the preference order — upstreams are tried longest-lived
-	 * first, since a long TTL is a statement that the upstream is stable
-	 * (cache.nixos.org never GCs) while a short one marks a volatile source
-	 * (cachix GCs) that should neither be trusted long nor tried first. */
+	 * before the CDN/lazy re-probe; null = DEFAULT_UPSTREAM_TTL_SECS. Give
+	 * stable archives (cache.nixos.org never GCs) a long TTL and volatile
+	 * sources (cachix GCs) a short one. Query order is the registry's
+	 * admin-controlled `position`, not the TTL. */
 	ttl: number | null;
 	/** persist = pull-through: ingest hit paths into the cache instead of
 	 * serving redirects/passthroughs forever. */
@@ -435,10 +434,11 @@ export interface RegistryRow {
 	ttl: number | null;
 	default_mode: string;
 	enforced: number;
+	position: number;
 }
 
 export interface UpstreamConfig {
-	/** Registry rows, longest TTL first (the query order). */
+	/** Registry rows in query order (admin-controlled position). */
 	upstreams: RegistryRow[];
 	/** cache id -> upstream id -> override mode. */
 	overrides: Map<number, Map<number, string>>;
@@ -462,7 +462,10 @@ export function clearUpstreamsMemo(): void {
  * resolution can never drift from the read path's. */
 export async function fetchUpstreamConfig(db: D1): Promise<UpstreamConfig> {
 	const [upstreams, subs, caches] = await db.batch([
-		db.prepare('SELECT id, url, public_key, ttl, default_mode, enforced FROM upstream'),
+		db.prepare(
+			'SELECT id, url, public_key, ttl, default_mode, enforced, position FROM upstream ' +
+				'ORDER BY position, id'
+		),
 		db.prepare('SELECT cache_id, upstream_id, mode FROM cache_upstream'),
 		db.prepare('SELECT id, name FROM cache WHERE deleted_at IS NULL ORDER BY priority, name')
 	]);
@@ -473,11 +476,7 @@ export async function fetchUpstreamConfig(db: D1): Promise<UpstreamConfig> {
 		entry.set(row.upstream_id, row.mode);
 	}
 	return {
-		upstreams: (upstreams.results as RegistryRow[]).sort(
-			(a, b) =>
-				(b.ttl ?? DEFAULT_UPSTREAM_TTL_SECS) - (a.ttl ?? DEFAULT_UPSTREAM_TTL_SECS) ||
-				a.url.localeCompare(b.url)
-		),
+		upstreams: upstreams.results as RegistryRow[],
 		overrides,
 		caches: caches.results as { id: number; name: string }[]
 	};
@@ -511,7 +510,7 @@ export function effectiveUpstreamMode(
 	return mode;
 }
 
-/** The enabled upstreams of one cache, longest TTL first. */
+/** The enabled upstreams of one cache, in registry (position) order. */
 export async function upstreamsForCache(
 	db: D1,
 	cache: { id: number; name: string }
@@ -536,7 +535,7 @@ export async function upstreamsForCache(
 
 /**
  * The root proxy's upstream set: every registry entry enabled for at least
- * one live cache, longest TTL first. persistInto resolves to the first cache
+ * one live cache, in registry (position) order. persistInto resolves to the first cache
  * (by priority, name) whose effective mode is persist. With no live caches,
  * enforced/default-enabled entries still serve the root.
  */

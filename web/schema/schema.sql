@@ -28,9 +28,10 @@ CREATE TABLE IF NOT EXISTS upstream (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     url TEXT NOT NULL UNIQUE,
     public_key TEXT,
-    ttl INTEGER, -- seconds; NULL = default (7 days). Doubles as query order.
+    ttl INTEGER, -- seconds; NULL = default (7 days)
     default_mode TEXT NOT NULL DEFAULT 'redirect', -- off | redirect | persist
     enforced INTEGER NOT NULL DEFAULT 0,
+    position INTEGER NOT NULL DEFAULT 0, -- query order, admin-controlled
     created_at TEXT NOT NULL
 );
 
