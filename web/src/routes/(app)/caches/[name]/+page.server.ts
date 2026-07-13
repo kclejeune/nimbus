@@ -83,9 +83,10 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 			upstreamsForCache(db, { id: cache.id, name: cache.name }),
 			allLiveUpstreams(db)
 		]);
-	const upstreamRef = (u: { url: string; publicKey: string | null }) => ({
+	const upstreamRef = (u: { url: string; publicKey: string | null; nixDefault: boolean }) => ({
 		url: u.url,
-		publicKey: u.publicKey
+		publicKey: u.publicKey,
+		nixDefault: u.nixDefault
 	});
 
 	return {

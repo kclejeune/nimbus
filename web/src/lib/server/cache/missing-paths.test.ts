@@ -16,7 +16,15 @@ import { extractPublicKey, generateKeypair } from '../attic/signing';
 
 /** An Upstream with defaults, for terse expectations. */
 function upstream(partial: Partial<Upstream> & { url: string }): Upstream {
-	return { id: 1, publicKey: null, ttl: null, mode: 'redirect', persistInto: null, ...partial };
+	return {
+		id: 1,
+		publicKey: null,
+		ttl: null,
+		mode: 'redirect',
+		persistInto: null,
+		nixDefault: false,
+		...partial
+	};
 }
 
 describe('effectiveUpstreamMode', () => {
@@ -171,6 +179,7 @@ describe('registry resolution', () => {
 		default_mode: 'redirect',
 		enforced: 0,
 		position: id,
+		nix_default: 0,
 		...extra
 	});
 

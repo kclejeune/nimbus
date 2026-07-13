@@ -74,8 +74,9 @@ function parseUpstreamInput(form: FormData, suffix = ''): UpstreamInput | { erro
 	if (enforced && defaultMode === 'off') {
 		return { error: 'An enforced upstream cannot default to off.' };
 	}
+	const nixDefault = form.get(`nix_default${suffix}`) === 'on';
 
-	return { url, publicKey: key, ttl, defaultMode, enforced };
+	return { url, publicKey: key, ttl, defaultMode, enforced, nixDefault };
 }
 
 export const actions: Actions = {
@@ -126,7 +127,8 @@ export const actions: Actions = {
 				input.publicKey === entry.publicKey &&
 				input.ttl === entry.ttl &&
 				input.defaultMode === entry.defaultMode &&
-				input.enforced === entry.enforced
+				input.enforced === entry.enforced &&
+				input.nixDefault === entry.nixDefault
 			) {
 				continue;
 			}

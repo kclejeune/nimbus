@@ -18,8 +18,11 @@
 		class?: string;
 	} = $props();
 
-	let includeUpstreamUrls = $state(false);
-	const nixConf = $derived(nixConfSnippet(url, publicKey, upstreams, includeUpstreamUrls));
+	let includeKeys = $state(true);
+	let includeUrls = $state(false);
+	const nixConf = $derived(nixConfSnippet(url, publicKey, upstreams, { includeKeys, includeUrls }));
+	// Entries flagged as Nix defaults never appear (already in every nix.conf).
+	const relevant = $derived(upstreams.filter((u) => !u.nixDefault));
 </script>
 
 <Card.Root class={className}>
@@ -43,19 +46,23 @@
 		<div class="mt-4">
 			<span class="mb-1 block text-xs text-muted-foreground">nix.conf</span>
 			<CopyBlock text={nixConf} label="Copy nix.conf snippet" />
-			{#if upstreams.length > 0}
+			{#if relevant.length > 0}
 				<label class="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
 					<input
 						type="checkbox"
-						bind:checked={includeUpstreamUrls}
+						bind:checked={includeKeys}
 						class="size-3.5 rounded border-input text-primary"
 					/>
-					Also list upstream substituters (queried after this endpoint; redirects usually make this unnecessary)
+					Include upstream signing keys (redirected paths keep their upstream signatures)
 				</label>
-				<p class="mt-1 text-xs text-muted-foreground">
-					Upstream signing keys are always included — redirected paths keep their upstream
-					signatures.
-				</p>
+				<label class="mt-1.5 flex items-center gap-2 text-xs text-muted-foreground">
+					<input
+						type="checkbox"
+						bind:checked={includeUrls}
+						class="size-3.5 rounded border-input text-primary"
+					/>
+					Include upstream substituters (queried after this endpoint; redirects usually make this unnecessary)
+				</label>
 			{/if}
 		</div>
 	</Card.Content>

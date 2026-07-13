@@ -19,7 +19,8 @@
 		publicKey: u.publicKey ?? '',
 		ttl: u.ttlText,
 		defaultMode: u.defaultMode as string,
-		enforced: u.enforced
+		enforced: u.enforced,
+		nixDefault: u.nixDefault
 	});
 	// Working copy the inputs bind to (array order = query order); reset from
 	// fresh data after each save.
@@ -28,7 +29,15 @@
 
 	const fingerprint = (rows: ReturnType<typeof editable>[]) =>
 		JSON.stringify(
-			rows.map((r) => [r.id, r.url, r.publicKey, String(r.ttl ?? ''), r.defaultMode, r.enforced])
+			rows.map((r) => [
+				r.id,
+				r.url,
+				r.publicKey,
+				String(r.ttl ?? ''),
+				r.defaultMode,
+				r.enforced,
+				r.nixDefault
+			])
 		);
 	const dirty = $derived(fingerprint(entries) !== fingerprint(data.upstreams.map(editable)));
 
@@ -158,6 +167,18 @@
 				/>
 				Enforced
 			</label>
+			<label
+				class="flex h-8 items-center gap-2 text-sm"
+				title="Already in every Nix installation's default config; omitted from generated nix.conf snippets"
+			>
+				<input
+					name="nix_default_{entry.id}"
+					type="checkbox"
+					bind:checked={entry.nixDefault}
+					class="size-4 rounded border-input text-primary"
+				/>
+				Nix default
+			</label>
 			<div class="flex-1 text-right text-xs text-muted-foreground">
 				{#if usage}
 					used by {usage.redirect + usage.persist}
@@ -255,6 +276,17 @@
 						/>
 						Enforced
 					</label>
+					<label
+						class="flex h-8 items-center gap-2 text-sm"
+						title="Already in every Nix installation's default config; omitted from generated nix.conf snippets"
+					>
+						<input
+							name="nix_default"
+							type="checkbox"
+							class="size-4 rounded border-input text-primary"
+						/>
+						Nix default
+					</label>
 					<Button type="submit" disabled={adding}>
 						<Plus class="size-4" />
 						{adding ? 'Adding…' : 'Add upstream'}
@@ -336,9 +368,9 @@
 
 	<p class="mt-6 text-xs text-muted-foreground">
 		With a public key set, an upstream path only counts as present when its narinfo carries a valid
-		signature from that key. TTL takes durations like 3600s, 90m, 720h, 30d, or 1y and
-		bounds how long a hit is served before the upstream is re-checked. Upstreams are queried in the
-		order shown here. Changing a URL or key wipes that upstream's cached verdicts so everything
-		re-probes under the new identity.
+		signature from that key. TTL takes durations like 3600s, 90m, 720h, 30d, or 1y and bounds how
+		long a hit is served before the upstream is re-checked. Upstreams are queried in the order shown
+		here. Changing a URL or key wipes that upstream's cached verdicts so everything re-probes under
+		the new identity.
 	</p>
 </div>

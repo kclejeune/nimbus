@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS upstream (
     default_mode TEXT NOT NULL DEFAULT 'redirect', -- off | redirect | persist
     enforced INTEGER NOT NULL DEFAULT 0,
     position INTEGER NOT NULL DEFAULT 0, -- query order, admin-controlled
+    -- Ships in Nix's default config; omitted from generated nix.conf snippets.
+    nix_default INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 

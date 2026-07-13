@@ -39,6 +39,9 @@ export interface Upstream {
 	 * serving cache, or for the root proxy the first cache — by priority —
 	 * whose subscription is persist). */
 	persistInto: string | null;
+	/** Ships in Nix's default config (e.g. cache.nixos.org); omitted from
+	 * generated nix.conf snippets. */
+	nixDefault: boolean;
 }
 
 export const DEFAULT_UPSTREAM_TTL_SECS = 7 * 24 * 60 * 60;
@@ -435,6 +438,7 @@ export interface RegistryRow {
 	default_mode: string;
 	enforced: number;
 	position: number;
+	nix_default: number;
 }
 
 export interface UpstreamConfig {
@@ -463,8 +467,8 @@ export function clearUpstreamsMemo(): void {
 export async function fetchUpstreamConfig(db: D1): Promise<UpstreamConfig> {
 	const [upstreams, subs, caches] = await db.batch([
 		db.prepare(
-			'SELECT id, url, public_key, ttl, default_mode, enforced, position FROM upstream ' +
-				'ORDER BY position, id'
+			'SELECT id, url, public_key, ttl, default_mode, enforced, position, nix_default ' +
+				'FROM upstream ORDER BY position, id'
 		),
 		db.prepare('SELECT cache_id, upstream_id, mode FROM cache_upstream'),
 		db.prepare('SELECT id, name FROM cache WHERE deleted_at IS NULL ORDER BY priority, name')
@@ -527,7 +531,8 @@ export async function upstreamsForCache(
 			publicKey: entry.public_key,
 			ttl: entry.ttl,
 			mode,
-			persistInto: mode === 'persist' ? cache.name : null
+			persistInto: mode === 'persist' ? cache.name : null,
+			nixDefault: entry.nix_default === 1
 		});
 	}
 	return out;
@@ -558,7 +563,8 @@ export async function allLiveUpstreams(db: D1): Promise<Upstream[]> {
 			publicKey: entry.public_key,
 			ttl: entry.ttl,
 			mode: persistInto ? 'persist' : 'redirect',
-			persistInto
+			persistInto,
+			nixDefault: entry.nix_default === 1
 		});
 	}
 	return out;

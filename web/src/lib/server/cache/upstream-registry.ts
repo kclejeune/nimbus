@@ -30,6 +30,8 @@ export interface RegistryUpstream {
 	enforced: boolean;
 	/** Query order (0-based, admin-controlled). */
 	position: number;
+	/** Ships in Nix's default config; omitted from generated nix.conf snippets. */
+	nixDefault: boolean;
 	createdAt: string;
 }
 
@@ -41,6 +43,7 @@ export interface UpstreamInput {
 	ttl: number;
 	defaultMode: UpstreamMode;
 	enforced: boolean;
+	nixDefault: boolean;
 }
 
 /**
@@ -60,7 +63,7 @@ async function purgeUpstreamEdge(db: D1, ctx: ExecutionContext | undefined): Pro
 export async function listRegistry(db: D1): Promise<RegistryUpstream[]> {
 	const { results } = await db
 		.prepare(
-			'SELECT id, url, public_key, ttl, default_mode, enforced, position, created_at ' +
+			'SELECT id, url, public_key, ttl, default_mode, enforced, position, nix_default, created_at ' +
 				'FROM upstream ORDER BY position, id'
 		)
 		.all<{
@@ -71,6 +74,7 @@ export async function listRegistry(db: D1): Promise<RegistryUpstream[]> {
 			default_mode: string;
 			enforced: number;
 			position: number;
+			nix_default: number;
 			created_at: string;
 		}>();
 	return results.map((row) => ({
@@ -81,6 +85,7 @@ export async function listRegistry(db: D1): Promise<RegistryUpstream[]> {
 		defaultMode: normalizeUpstreamMode(row.default_mode),
 		enforced: row.enforced === 1,
 		position: row.position,
+		nixDefault: row.nix_default === 1,
 		createdAt: row.created_at
 	}));
 }
@@ -94,9 +99,9 @@ export async function createUpstream(
 ): Promise<boolean> {
 	const result = await db
 		.prepare(
-			'INSERT INTO upstream (url, public_key, ttl, default_mode, enforced, position, created_at) ' +
+			'INSERT INTO upstream (url, public_key, ttl, default_mode, enforced, position, nix_default, created_at) ' +
 				'VALUES (?1, ?2, ?3, ?4, ?5, ' +
-				'(SELECT COALESCE(MAX(position), -1) + 1 FROM upstream), ?6) ' +
+				'(SELECT COALESCE(MAX(position), -1) + 1 FROM upstream), ?6, ?7) ' +
 				'ON CONFLICT (url) DO NOTHING'
 		)
 		.bind(
@@ -105,6 +110,7 @@ export async function createUpstream(
 			input.ttl,
 			input.defaultMode,
 			input.enforced ? 1 : 0,
+			input.nixDefault ? 1 : 0,
 			new Date().toISOString()
 		)
 		.run();
@@ -151,10 +157,18 @@ export async function updateUpstream(
 		.first<{ url: string; public_key: string }>();
 	await db
 		.prepare(
-			'UPDATE upstream SET url = ?2, public_key = ?3, ttl = ?4, default_mode = ?5, enforced = ?6 ' +
-				'WHERE id = ?1'
+			'UPDATE upstream SET url = ?2, public_key = ?3, ttl = ?4, default_mode = ?5, enforced = ?6, ' +
+				'nix_default = ?7 WHERE id = ?1'
 		)
-		.bind(id, input.url, input.publicKey, input.ttl, input.defaultMode, input.enforced ? 1 : 0)
+		.bind(
+			id,
+			input.url,
+			input.publicKey,
+			input.ttl,
+			input.defaultMode,
+			input.enforced ? 1 : 0,
+			input.nixDefault ? 1 : 0
+		)
 		.run();
 	if (before && (before.url !== input.url || before.public_key !== input.publicKey)) {
 		await db.prepare('DELETE FROM upstream_check WHERE upstream_id = ?1').bind(id).run();

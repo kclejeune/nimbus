@@ -109,7 +109,11 @@ export const load: PageServerLoad = async ({ platform }) => {
 		buckets,
 		cacheBaseUrl: platform?.env.CACHE_BASE_URL ?? null,
 		proxyPublicKey,
-		proxyUpstreams: proxyUpstreams.map((u) => ({ url: u.url, publicKey: u.publicKey }))
+		proxyUpstreams: proxyUpstreams.map((u) => ({
+			url: u.url,
+			publicKey: u.publicKey,
+			nixDefault: u.nixDefault
+		}))
 	};
 };
 
