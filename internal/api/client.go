@@ -355,6 +355,39 @@ func (c *Client) UnpinPath(ctx context.Context, cache, storePathHash string) err
 	return c.doJSON(ctx, http.MethodDelete, "/_api/v1/gc-root/"+cache+"/"+storePathHash, nil, nil)
 }
 
+// PinNamed creates or re-points a named pin (cachix-style): re-pinning the
+// name adds a revision. keepRevisions/keepDays of 0 leave the pin's current
+// retention settings unchanged.
+func (c *Client) PinNamed(
+	ctx context.Context,
+	cache, name, storePathHash string,
+	keepRevisions, keepDays int,
+	note string,
+) error {
+	body := map[string]any{"name": name, "store_path_hash": storePathHash}
+	if keepRevisions > 0 {
+		body["keep_revisions"] = keepRevisions
+	}
+	if keepDays > 0 {
+		body["keep_days"] = keepDays
+	}
+	if note != "" {
+		body["note"] = note
+	}
+	return c.doJSON(ctx, http.MethodPost, "/_api/v1/pin/"+cache, body, nil)
+}
+
+// UnpinNamed removes a named pin and all its revisions.
+func (c *Client) UnpinNamed(ctx context.Context, cache, name string) error {
+	return c.doJSON(
+		ctx,
+		http.MethodDelete,
+		"/_api/v1/pin/"+cache+"/"+url.PathEscape(name),
+		nil,
+		nil,
+	)
+}
+
 // RunGc triggers a server-side garbage collection pass and returns the
 // server's stats object verbatim.
 func (c *Client) RunGc(ctx context.Context, dryRun bool) (map[string]any, error) {

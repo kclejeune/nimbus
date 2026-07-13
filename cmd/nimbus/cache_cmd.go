@@ -227,18 +227,35 @@ func pathHashArg(arg string) (string, error) {
 
 func cachePinCmd() *cobra.Command {
 	var note string
+	var keepRevisions, keepDays int
 	cmd := &cobra.Command{
-		Use:   "pin [SERVER:]CACHE STORE_PATH_OR_HASH",
+		Use:   "pin [SERVER:]CACHE [NAME] STORE_PATH_OR_HASH",
 		Short: "Pin a path's closure against garbage collection",
-		Args:  cobra.ExactArgs(2),
+		Long: `Pin a path's closure against garbage collection.
+
+With a NAME (cachix-style), the pin keeps a revision history: re-pinning the
+same name protects the new path while old revisions stay pinned too, bounded
+by --keep-revisions / --keep-days (the current revision is never pruned).
+Without a NAME, a plain single-path pin is created.`,
+		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref, client, err := resolveCache(args[0])
 			if err != nil {
 				return err
 			}
-			hash, err := pathHashArg(args[1])
+			hash, err := pathHashArg(args[len(args)-1])
 			if err != nil {
 				return err
+			}
+			if len(args) == 3 {
+				name := args[1]
+				if err := client.PinNamed(
+					cmd.Context(), ref.Cache, name, hash, keepRevisions, keepDays, note,
+				); err != nil {
+					return err
+				}
+				fmt.Printf("📌 Pinned %s as %q in %q\n", hash, name, ref.Cache)
+				return nil
 			}
 			if err := client.PinPath(cmd.Context(), ref.Cache, hash, note); err != nil {
 				return err
@@ -248,27 +265,36 @@ func cachePinCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&note, "note", "", "annotate why the path is pinned")
+	cmd.Flags().
+		IntVar(&keepRevisions, "keep-revisions", 0, "named pins: keep only the last N revisions")
+	cmd.Flags().
+		IntVar(&keepDays, "keep-days", 0, "named pins: prune revisions older than N days (current always kept)")
 	return cmd
 }
 
 func cacheUnpinCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "unpin [SERVER:]CACHE STORE_PATH_OR_HASH",
-		Short: "Remove a garbage-collection pin",
+		Use:   "unpin [SERVER:]CACHE NAME_OR_PATH",
+		Short: "Remove a garbage-collection pin (by pin name, store path, or hash)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref, client, err := resolveCache(args[0])
 			if err != nil {
 				return err
 			}
-			hash, err := pathHashArg(args[1])
-			if err != nil {
+			// A valid store path / 32-char hash removes an anonymous pin;
+			// anything else is treated as a pin name (with all its revisions).
+			if hash, err := pathHashArg(args[1]); err == nil {
+				if err := client.UnpinPath(cmd.Context(), ref.Cache, hash); err != nil {
+					return err
+				}
+				fmt.Printf("✅ Unpinned %s in %q\n", hash, ref.Cache)
+				return nil
+			}
+			if err := client.UnpinNamed(cmd.Context(), ref.Cache, args[1]); err != nil {
 				return err
 			}
-			if err := client.UnpinPath(cmd.Context(), ref.Cache, hash); err != nil {
-				return err
-			}
-			fmt.Printf("✅ Unpinned %s in %q\n", hash, ref.Cache)
+			fmt.Printf("✅ Removed pin %q (all revisions) in %q\n", args[1], ref.Cache)
 			return nil
 		},
 	}

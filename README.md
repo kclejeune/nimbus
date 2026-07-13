@@ -71,13 +71,20 @@ underneath for one that fits inside a Worker's constraints.
   `substituters` line and one `trusted-public-keys` entry cover every cache.
 - **Server-side compression** — per-cache zstd (WASM), gzip, or none;
   brotli/xz NARs from older imports remain readable.
-- **Upstream awareness** — `get-missing-paths` filters against upstream
-  caches (e.g. `cache.nixos.org`) with cached verdicts so already-public paths
-  are never pushed, and narinfo/NAR reads pass through to upstreams.
-- **Closure-aware GC** — retention keeps *full closures* of fresh objects and
+- **Upstream registry** — upstream trust (URL + public key + TTL) lives in a
+  server-wide, admin-managed registry (one row per URL, so key conflicts are
+  unrepresentable); caches subscribe per-entry as off/redirect/persist, and
+  enforced entries apply to every cache. `get-missing-paths` filters against
+  enabled upstreams with cached verdicts so already-public paths are never
+  pushed, narinfo/NAR reads pass through, and persist-mode entries are
+  ingested (re-signed) into the cache in the background.
+- **Closure-aware GC** — retention keeps _full closures_ of fresh objects and
   pinned roots (never a broken closure), with per-cache size budgets, a global
-  storage ceiling, pin/unpin with notes, size-triggered eviction after pushes,
-  abandoned-upload reaping, and a nightly cron.
+  storage ceiling, size-triggered eviction after pushes, abandoned-upload
+  reaping, and a nightly cron. Path removal is closure-safe: a removed path's
+  shared dependencies stay until their last dependent goes. Pins come in two
+  flavors — quick single-path pins, and cachix-style **named pins** with
+  revision history (`--keep-revisions` / `--keep-days`).
 - **Admin UI** — cache management with per-cache access lists, store-path
   browsing/search, pin/prune, scoped token issuance with revocation,
   users/groups/grants, user activation, ingest monitoring, and an audit log
@@ -97,20 +104,20 @@ underneath for one that fits inside a Worker's constraints.
 
 ## Comparison with attic
 
-| | attic | nimbus |
-| --- | --- | --- |
-| Runtime | Rust daemon (`atticd`) on a server you operate | Cloudflare Worker, scales to zero |
-| Database | PostgreSQL or SQLite | D1 (SQLite; schema is portable) |
-| Storage | S3-compatible or local disk | R2 (zero-egress) |
-| Deduplication | whole-NAR + FastCDC chunks | whole-NAR + FastCDC chunks (≥ 8 MiB uploads; larger 2/8/16 MiB boundaries) |
-| Compression | server-wide zstd/brotli/xz | per-cache zstd/gzip/none |
-| Garbage collection | per-object LRU (can orphan closure members) | closure-aware retention, pins, per-cache budgets, global ceiling |
-| Tokens | static JWTs via `atticadm make-token` | dashboard-issued, scoped, revocable (`jti` + hashed storage), bounded by the issuer's grants |
-| Access control | per-token JWT permission bits | user/group grants (same bit vocabulary) + OIDC group sync, enforced in the UI and API; per-token bits on the wire |
-| Substituter config | one URL + key per cache | per-cache, or one unified endpoint + proxy key for all readable caches |
-| CLI auth | paste a token | browser loopback, device code, or paste a token |
-| Admin interface | CLI only | web dashboard + CLI |
-| NAR downloads | can 307 to presigned S3 URLs | always proxied through the Worker |
+|                    | attic                                          | nimbus                                                                                                            |
+| ------------------ | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Runtime            | Rust daemon (`atticd`) on a server you operate | Cloudflare Worker, scales to zero                                                                                 |
+| Database           | PostgreSQL or SQLite                           | D1 (SQLite; schema is portable)                                                                                   |
+| Storage            | S3-compatible or local disk                    | R2 (zero-egress)                                                                                                  |
+| Deduplication      | whole-NAR + FastCDC chunks                     | whole-NAR + FastCDC chunks (≥ 8 MiB uploads; larger 2/8/16 MiB boundaries)                                        |
+| Compression        | server-wide zstd/brotli/xz                     | per-cache zstd/gzip/none                                                                                          |
+| Garbage collection | per-object LRU (can orphan closure members)    | closure-aware retention, pins, per-cache budgets, global ceiling                                                  |
+| Tokens             | static JWTs via `atticadm make-token`          | dashboard-issued, scoped, revocable (`jti` + hashed storage), bounded by the issuer's grants                      |
+| Access control     | per-token JWT permission bits                  | user/group grants (same bit vocabulary) + OIDC group sync, enforced in the UI and API; per-token bits on the wire |
+| Substituter config | one URL + key per cache                        | per-cache, or one unified endpoint + proxy key for all readable caches                                            |
+| CLI auth           | paste a token                                  | browser loopback, device code, or paste a token                                                                   |
+| Admin interface    | CLI only                                       | web dashboard + CLI                                                                                               |
+| NAR downloads      | can 307 to presigned S3 URLs                   | always proxied through the Worker                                                                                 |
 
 ### Gaps and differences
 
@@ -145,6 +152,8 @@ nimbus watch-store mycache                             # push new store paths as
 nimbus watch-exec mycache -- nix build ...             # watch during a command, flush on exit
 nimbus gc --dry-run                                    # trigger/preview garbage collection
 nimbus cache info|configure|rename|pin|unpin|destroy mycache
+nimbus cache pin mycache v1.7 /nix/store/... --keep-revisions 5   # named pin with history
+nimbus cache unpin mycache v1.7                        # drop the pin and all its revisions
 ```
 
 Caches are addressed as `[server:]cache`; the first login becomes the default
