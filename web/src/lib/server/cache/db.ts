@@ -10,10 +10,43 @@ export const PARAM_BATCH = 99;
 /** Statements per db.batch() call; larger sets are split into sequential batches. */
 export const STMT_BATCH = 100;
 
+/**
+ * D1 serializes writes through a single primary Durable Object; under a burst
+ * (a wide `nix push` plus its get-missing-paths reads) that primary's request
+ * queue can back up and reject a call with "D1 requests queued for too long" or
+ * drop the connection. These are transient — the queue drains — and safe to
+ * retry: a rejected batch is atomic (nothing applied) and a rejected single
+ * statement never committed. Constraint/logic errors carry different messages,
+ * are not matched, and surface immediately.
+ */
+const TRANSIENT_D1_ERROR =
+	/queued for too long|Network connection lost|storage (?:caused|operation)|reset because|connection (?:lost|reset)|please try again/i;
+
+export function isTransientD1Error(e: unknown): boolean {
+	return TRANSIENT_D1_ERROR.test(e instanceof Error ? e.message : String(e));
+}
+
+/** Retry a D1 operation on transient primary-queue/connection errors with
+ * jittered exponential backoff (~40/80/160 ms). Non-transient errors rethrow
+ * on the first failure. */
+export async function withD1Retry<T>(op: () => Promise<T>, attempts = 4): Promise<T> {
+	let backoff = 40;
+	for (let attempt = 1; ; attempt++) {
+		try {
+			return await op();
+		} catch (e) {
+			if (attempt >= attempts || !isTransientD1Error(e)) throw e;
+			await new Promise((r) => setTimeout(r, backoff + Math.random() * backoff));
+			backoff *= 2;
+		}
+	}
+}
+
 /** Run statements in batches of STMT_BATCH. Only atomic within each batch. */
 export async function runBatched(db: D1Database, stmts: D1PreparedStatement[]): Promise<void> {
 	for (let i = 0; i < stmts.length; i += STMT_BATCH) {
-		await db.batch(stmts.slice(i, i + STMT_BATCH));
+		const slice = stmts.slice(i, i + STMT_BATCH);
+		await withD1Retry(() => db.batch(slice));
 	}
 }
 
@@ -412,13 +445,13 @@ export interface NewNar {
 export async function createNar(db: D1Database, nar: NewNar): Promise<number> {
 	// holders_count 0: a fresh 'P' row is protected from the orphan reaper by
 	// its 1h grace period until the linking batch lands the object row.
-	const result = await db
+	const stmt = db
 		.prepare(
 			'INSERT INTO nar (state, nar_hash, nar_size, compression, num_chunks, ' +
 				'completeness_hint, holders_count, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6)'
 		)
-		.bind(nar.state, nar.nar_hash, nar.nar_size, nar.compression, nar.num_chunks, nowRfc3339())
-		.run();
+		.bind(nar.state, nar.nar_hash, nar.nar_size, nar.compression, nar.num_chunks, nowRfc3339());
+	const result = await withD1Retry(() => stmt.run());
 	return requireRowId(result, 'nar');
 }
 
@@ -595,14 +628,14 @@ export async function findExistingChunkHashes(
  * landing — release with releaseNarLock when done.
  */
 export async function tryLockNar(db: D1Database, narHash: string): Promise<NarRow | null> {
-	const row = await db
+	const stmt = db
 		.prepare(
 			'UPDATE nar SET holders_count = holders_count + 1, held_at = ?2 ' +
 				"WHERE id = (SELECT id FROM nar WHERE nar_hash = ?1 AND state = 'V' ORDER BY id LIMIT 1) " +
 				'RETURNING id, state, nar_hash, nar_size, compression, num_chunks'
 		)
-		.bind(narHash, nowRfc3339())
-		.first<NarRow>();
+		.bind(narHash, nowRfc3339());
+	const row = await withD1Retry(() => stmt.first<NarRow>());
 	return row ?? null;
 }
 

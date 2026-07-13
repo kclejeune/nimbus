@@ -14,6 +14,8 @@
 // present if its narinfo carries a valid signature from that key.
 
 import { parseNarInfo, parsedNarInfoSignatureValid, type ParsedNarInfo } from '../attic/narinfo';
+import { withD1Retry } from './db';
+import type { D1PreparedStatement } from '@cloudflare/workers-types';
 
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];
@@ -105,7 +107,7 @@ export async function findExistingPaths(
 	hashes: string[]
 ): Promise<Set<string>> {
 	const existing = new Set<string>();
-	const stmts = [];
+	const stmts: D1PreparedStatement[] = [];
 	for (let i = 0; i < hashes.length; i += BATCH) {
 		const batch = hashes.slice(i, i + BATCH);
 		const placeholders = batch.map((_, j) => `?${j + 2}`).join(', ');
@@ -121,7 +123,7 @@ export async function findExistingPaths(
 				.bind(cacheName, ...batch)
 		);
 	}
-	for (const result of await db.batch<{ store_path_hash: string }>(stmts)) {
+	for (const result of await withD1Retry(() => db.batch<{ store_path_hash: string }>(stmts))) {
 		for (const row of result.results) existing.add(row.store_path_hash);
 	}
 	return existing;
@@ -149,7 +151,7 @@ async function cachedVerdicts(
 ): Promise<Map<string, Verdict>> {
 	const verdicts = new Map<string, Verdict>();
 	const ttlSecs = upstreamTtlSecs(upstream);
-	const stmts = [];
+	const stmts: D1PreparedStatement[] = [];
 	for (let i = 0; i < hashes.length; i += BATCH) {
 		const batch = hashes.slice(i, i + BATCH);
 		const placeholders = batch.map((_, j) => `?${j + 2}`).join(', ');
@@ -163,7 +165,7 @@ async function cachedVerdicts(
 		);
 	}
 	type Row = { store_path_hash: string; present: number; checked_at: string };
-	for (const result of await db.batch<Row>(stmts)) {
+	for (const result of await withD1Retry(() => db.batch<Row>(stmts))) {
 		for (const row of result.results) {
 			if (verdictFresh(row, ttlSecs)) verdicts.set(row.store_path_hash, row.present as Verdict);
 		}
@@ -209,7 +211,7 @@ export async function recordVerdicts(
 	const now = new Date().toISOString();
 	// 4 bind params per row, stay under D1's 100-param limit.
 	const ROWS_PER_STMT = 24;
-	const stmts = [];
+	const stmts: D1PreparedStatement[] = [];
 	for (let i = 0; i < verdicts.length; i += ROWS_PER_STMT) {
 		const batch = verdicts.slice(i, i + ROWS_PER_STMT);
 		const values = batch.map(
@@ -225,7 +227,7 @@ export async function recordVerdicts(
 				.bind(...params)
 		);
 	}
-	if (stmts.length > 0) await db.batch(stmts);
+	if (stmts.length > 0) await withD1Retry(() => db.batch(stmts));
 }
 
 function headVerdict(res: Response): Verdict | null {

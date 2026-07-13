@@ -12,7 +12,7 @@ import {
 } from './cache-config';
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import * as db from './db';
-import { listPins, maybeSizeTriggeredGc, runGc } from './gc';
+import { listPins, runGc } from './gc';
 import { errorResponse, jsonResponse, withCachePolicy, withVisibility } from '../attic/http';
 import {
 	allLiveUpstreams,
@@ -416,13 +416,15 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 		return errorResponse(403, 'Permission denied: push');
 	}
 
-	const cache = await db.findCache(env.ATTIC_DB, body.cache);
+	// Replica reads throughout: staleness at worst re-reports a just-pushed
+	// path as missing, and the upload path dedups the re-push. Keeps this
+	// run-start read burst (nix-fast-build checks every path up front) off the
+	// write primary, which is where the push writes contend.
+	const session = db.readSession(env.ATTIC_DB);
+	const cache = await db.findCache(session, body.cache);
 	if (!cache) return errorResponse(404, `Cache not found: ${body.cache}`, 'NoSuchCache');
 
 	const hashes = body.store_path_hashes.filter((h) => typeof h === 'string' && h.length === 32);
-	// Replica reads: staleness at worst re-reports a just-pushed path as
-	// missing, and the upload path dedups the re-push.
-	const session = db.readSession(env.ATTIC_DB);
 	const existing = await findExistingPaths(session, body.cache, hashes);
 	const missing = hashes.filter((h) => !existing.has(h));
 
@@ -603,9 +605,12 @@ async function handleV1(
 			return errorResponse(404, 'Not found');
 		}
 
-		// Uploads grow storage: after one lands, check size budgets out-of-band
-		// (debounced in maybeSizeTriggeredGc) instead of waiting for the cron.
-		if (ctx && response.ok) ctx.waitUntil(maybeSizeTriggeredGc(env, ctx));
+		// Size-budget enforcement runs on the nightly GC cron (scheduled →
+		// runGc), not inline here: the budget check (a SUM over chunk) plus a
+		// possible full GC hit the D1 write primary, and firing that from every
+		// upload starved concurrent pushes' writes — tipping the primary's queue
+		// into "D1 requests queued for too long". The tradeoff is that a size
+		// budget can be exceeded for up to a day between cron runs.
 		return response;
 	}
 
