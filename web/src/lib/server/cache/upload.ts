@@ -320,7 +320,7 @@ async function createUploadRows(
 		num_chunks: 1
 	});
 	try {
-		const rows = [
+		await db.runBatched(d1, [
 			db.insertChunkStmt(d1, {
 				state: 'V',
 				chunk_hash: info.nar_hash,
@@ -334,8 +334,7 @@ async function createUploadRows(
 			db.insertChunkRefStmt(d1, narId, 0, null, info.nar_hash, opts.compression),
 			db.updateNarStateStmt(d1, narId, 'V'),
 			db.insertObjectStmt(d1, newObjectFrom(info, cacheId, narId))
-		];
-		await db.withD1Retry(() => d1.batch(rows));
+		]);
 	} catch (e) {
 		await db.updateNarState(d1, narId, 'D').catch(() => {});
 		// The stored object is content-addressed: a racing identical upload may

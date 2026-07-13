@@ -14,7 +14,7 @@
 // present if its narinfo carries a valid signature from that key.
 
 import { parseNarInfo, parsedNarInfoSignatureValid, type ParsedNarInfo } from '../attic/narinfo';
-import { withD1Retry } from './db';
+import { dbBatch } from './db';
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
 
 type Env = App.Platform['env'];
@@ -123,7 +123,7 @@ export async function findExistingPaths(
 				.bind(cacheName, ...batch)
 		);
 	}
-	for (const result of await withD1Retry(() => db.batch<{ store_path_hash: string }>(stmts))) {
+	for (const result of await dbBatch<{ store_path_hash: string }>(db, stmts)) {
 		for (const row of result.results) existing.add(row.store_path_hash);
 	}
 	return existing;
@@ -165,7 +165,7 @@ async function cachedVerdicts(
 		);
 	}
 	type Row = { store_path_hash: string; present: number; checked_at: string };
-	for (const result of await withD1Retry(() => db.batch<Row>(stmts))) {
+	for (const result of await dbBatch<Row>(db, stmts)) {
 		for (const row of result.results) {
 			if (verdictFresh(row, ttlSecs)) verdicts.set(row.store_path_hash, row.present as Verdict);
 		}
@@ -227,7 +227,7 @@ export async function recordVerdicts(
 				.bind(...params)
 		);
 	}
-	if (stmts.length > 0) await withD1Retry(() => db.batch(stmts));
+	if (stmts.length > 0) await dbBatch(db, stmts);
 }
 
 function headVerdict(res: Response): Verdict | null {
@@ -467,7 +467,7 @@ export function clearUpstreamsMemo(): void {
 /** Uncached registry load; admin surfaces (registryUsage) share it so their
  * resolution can never drift from the read path's. */
 export async function fetchUpstreamConfig(db: D1): Promise<UpstreamConfig> {
-	const [upstreams, subs, caches] = await db.batch([
+	const [upstreams, subs, caches] = await dbBatch(db, [
 		db.prepare(
 			'SELECT id, url, public_key, ttl, default_mode, enforced, position, nix_default ' +
 				'FROM upstream ORDER BY position, id'

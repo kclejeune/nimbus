@@ -42,11 +42,18 @@ export async function withD1Retry<T>(op: () => Promise<T>, attempts = 4): Promis
 	}
 }
 
+/** Prepared-statement execution wrappers that retry transient D1 errors, so
+ * resilience is uniform across the query layer rather than opt-in per call. */
+export const dbRun = (stmt: D1PreparedStatement) => withD1Retry(() => stmt.run());
+export const dbFirst = <T = unknown>(stmt: D1PreparedStatement) =>
+	withD1Retry(() => stmt.first<T>());
+export const dbBatch = <T = unknown>(db: D1Database, stmts: D1PreparedStatement[]) =>
+	withD1Retry(() => db.batch<T>(stmts));
+
 /** Run statements in batches of STMT_BATCH. Only atomic within each batch. */
 export async function runBatched(db: D1Database, stmts: D1PreparedStatement[]): Promise<void> {
 	for (let i = 0; i < stmts.length; i += STMT_BATCH) {
-		const slice = stmts.slice(i, i + STMT_BATCH);
-		await withD1Retry(() => db.batch(slice));
+		await dbBatch(db, stmts.slice(i, i + STMT_BATCH));
 	}
 }
 
@@ -119,15 +126,16 @@ export function chunkKey(chunk: { remote_file: string }): string | null {
 }
 
 export async function findCache(db: D1Database, name: string): Promise<CacheRow | null> {
-	return db
-		.prepare(
-			'SELECT id, name, keypair, is_public, store_dir, priority, ' +
-				'upstream_cache_key_names, compression, retention_period, ' +
-				'retention_max_bytes ' +
-				'FROM cache WHERE name = ?1 AND deleted_at IS NULL'
-		)
-		.bind(name)
-		.first<CacheRow>();
+	return dbFirst<CacheRow>(
+		db
+			.prepare(
+				'SELECT id, name, keypair, is_public, store_dir, priority, ' +
+					'upstream_cache_key_names, compression, retention_period, ' +
+					'retention_max_bytes ' +
+					'FROM cache WHERE name = ?1 AND deleted_at IS NULL'
+			)
+			.bind(name)
+	);
 }
 
 export interface ObjectWithNarChunks {
@@ -451,7 +459,7 @@ export async function createNar(db: D1Database, nar: NewNar): Promise<number> {
 				'completeness_hint, holders_count, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6)'
 		)
 		.bind(nar.state, nar.nar_hash, nar.nar_size, nar.compression, nar.num_chunks, nowRfc3339());
-	const result = await withD1Retry(() => stmt.run());
+	const result = await dbRun(stmt);
 	return requireRowId(result, 'nar');
 }
 
@@ -496,7 +504,7 @@ export function insertChunkStmt(db: D1Database, chunk: NewChunk): D1PreparedStat
 
 /** Insert one chunk row; returns false when an existing row won the conflict. */
 export async function insertChunk(db: D1Database, chunk: NewChunk): Promise<boolean> {
-	const result = await insertChunkStmt(db, chunk).run();
+	const result = await dbRun(insertChunkStmt(db, chunk));
 	return (result.meta.changes ?? 0) > 0;
 }
 
@@ -581,7 +589,7 @@ export function insertObjectStmt(db: D1Database, object: NewObject): D1PreparedS
 }
 
 export async function createObject(db: D1Database, object: NewObject): Promise<void> {
-	await insertObjectStmt(db, object).run();
+	await dbRun(insertObjectStmt(db, object));
 }
 
 export function updateNarStateStmt(
@@ -593,7 +601,7 @@ export function updateNarStateStmt(
 }
 
 export async function updateNarState(db: D1Database, narId: number, state: string): Promise<void> {
-	await updateNarStateStmt(db, narId, state).run();
+	await dbRun(updateNarStateStmt(db, narId, state));
 }
 
 /**
@@ -635,7 +643,7 @@ export async function tryLockNar(db: D1Database, narHash: string): Promise<NarRo
 				'RETURNING id, state, nar_hash, nar_size, compression, num_chunks'
 		)
 		.bind(narHash, nowRfc3339());
-	const row = await withD1Retry(() => stmt.first<NarRow>());
+	const row = await dbFirst<NarRow>(stmt);
 	return row ?? null;
 }
 
@@ -670,7 +678,7 @@ export async function tryLockChunk(
 	chunkHash: string,
 	compression: string
 ): Promise<ChunkRow | null> {
-	const row = await tryLockChunkStmt(db, chunkHash, compression).first<ChunkRow>();
+	const row = await dbFirst<ChunkRow>(tryLockChunkStmt(db, chunkHash, compression));
 	return row ?? null;
 }
 
@@ -683,7 +691,8 @@ export async function tryLockChunks(
 	const locked = new Map<string, ChunkRow>();
 	for (let i = 0; i < chunkHashes.length; i += STMT_BATCH) {
 		const window = chunkHashes.slice(i, i + STMT_BATCH);
-		const results = await db.batch<ChunkRow>(
+		const results = await dbBatch<ChunkRow>(
+			db,
 			window.map((hash) => tryLockChunkStmt(db, hash, compression))
 		);
 		for (const result of results) {

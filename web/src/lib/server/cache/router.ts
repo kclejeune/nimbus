@@ -13,7 +13,13 @@ import {
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import * as db from './db';
 import { listPins, runGc } from './gc';
-import { errorResponse, jsonResponse, withCachePolicy, withVisibility } from '../attic/http';
+import {
+	errorResponse,
+	jsonResponse,
+	logUnhandled,
+	withCachePolicy,
+	withVisibility
+} from '../attic/http';
 import {
 	allLiveUpstreams,
 	filterUpstreamPaths,
@@ -779,11 +785,7 @@ export async function handleCacheApi(
 		// a raw 1101 with no logged stack. Log it — observability is on — and
 		// return a controlled 500 so nix's retry path engages and the stack is
 		// visible in Workers Logs.
-		const { pathname } = new URL(request.url);
-		console.error(
-			`cache-api unhandled: ${request.method} ${pathname}: ` +
-				`${e instanceof Error ? (e.stack ?? e.message) : String(e)}`
-		);
+		logUnhandled('cache-api unhandled', request, e);
 		const { status, message, kind } = statusOf(e);
 		return errorResponse(status, message, kind);
 	}

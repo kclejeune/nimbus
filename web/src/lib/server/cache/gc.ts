@@ -571,57 +571,6 @@ async function globalSizePass(
 	}
 }
 
-// Best-effort per-isolate debounce for upload-triggered size checks.
-let lastSizeCheck = 0;
-const SIZE_CHECK_DEBOUNCE_MS = 60_000;
-
-/**
- * Run GC immediately if any size budget (per-cache or global) is exceeded.
- * Hooked into upload traffic via ctx.waitUntil, debounced per isolate so a
- * large push doesn't re-check on every request.
- */
-export async function maybeSizeTriggeredGc(env: Env, ctx?: ExecutionContext): Promise<void> {
-	const now = Date.now();
-	if (now - lastSizeCheck < SIZE_CHECK_DEBOUNCE_MS) return;
-	lastSizeCheck = now;
-	try {
-		if (await anyBudgetExceeded(env.ATTIC_DB)) {
-			console.log('gc: size budget exceeded, running out-of-band');
-			const stats = await runGc(env, { ctx, integrityReport: false });
-			console.log(`gc (size-triggered): ${JSON.stringify(stats)}`);
-		}
-	} catch (e) {
-		console.warn(`gc: size-trigger check failed: ${e}`);
-	}
-}
-
-async function anyBudgetExceeded(db: D1): Promise<boolean> {
-	const limitRow = await db
-		.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
-		.first<{ value: string }>();
-	const globalLimit = limitRow ? Number(limitRow.value) : NaN;
-	if (Number.isFinite(globalLimit) && globalLimit > 0) {
-		const total = await db
-			.prepare("SELECT COALESCE(SUM(file_size), 0) AS n FROM chunk WHERE state = 'V'")
-			.first<{ n: number }>();
-		if ((total?.n ?? 0) > globalLimit) return true;
-	}
-
-	const caches = (
-		await db
-			.prepare(
-				'SELECT id, retention_max_bytes FROM cache ' +
-					'WHERE deleted_at IS NULL AND retention_max_bytes IS NOT NULL'
-			)
-			.all<{ id: number; retention_max_bytes: number }>()
-	).results;
-	for (const cache of caches) {
-		const size = await db.prepare(CACHE_SIZE_SQL).bind(cache.id).first<{ n: number }>();
-		if ((size?.n ?? 0) > cache.retention_max_bytes) return true;
-	}
-	return false;
-}
-
 export interface GcRootInfo {
 	hash: string;
 	note: string | null;

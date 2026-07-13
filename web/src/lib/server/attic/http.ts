@@ -28,6 +28,16 @@ export function errorResponse(status: number, message: string, kind?: string): R
 	);
 }
 
+/** Log an unhandled error caught at a request boundary, with the request's
+ * method+path and the error's stack, so it lands in Workers Logs (observability)
+ * instead of surfacing as a stackless Cloudflare 1101. */
+export function logUnhandled(prefix: string, request: Request, e: unknown): void {
+	const { pathname } = new URL(request.url);
+	console.error(
+		`${prefix}: ${request.method} ${pathname}: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`
+	);
+}
+
 export function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), {
 		status,
