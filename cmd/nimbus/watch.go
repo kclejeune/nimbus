@@ -23,6 +23,10 @@ import (
 // database lags; debounce and let path-info decide validity.
 const watchDebounce = 2 * time.Second
 
+// If we exceed this interval with no new paths, start pushing to flush the queue
+// to take advantage of idle time during slow rebuilds. Set to 0 to disable.
+const defaultBatchIdle = 15 * time.Second
+
 func watchStoreCmd() *cobra.Command {
 	var jobs int
 
@@ -48,7 +52,7 @@ func watchStoreCmd() *cobra.Command {
 				SkipInvalid: true,
 			}
 			fmt.Printf("👀 Watching %s; pushing new paths to %q\n", nix.StoreDir, ref.Cache)
-			return watchAndPush(cmd.Context(), pusher, nil, false, nil)
+			return watchAndPush(cmd.Context(), pusher, nil, false, 0, nil)
 		},
 	}
 
@@ -59,6 +63,7 @@ func watchStoreCmd() *cobra.Command {
 func watchExecCmd() *cobra.Command {
 	var jobs int
 	var batch bool
+	var batchIdle time.Duration
 
 	cmd := &cobra.Command{
 		Use:   "watch-exec [SERVER:]CACHE COMMAND [ARGS...]",
@@ -66,6 +71,11 @@ func watchExecCmd() *cobra.Command {
 		Long: `Runs COMMAND while watching the Nix store, collecting new paths and pushing
 them to the cache in one shot after it exits (even when COMMAND fails),
 deduplicating the closure and the already-present check across the whole run.
+
+In batch mode, an idle gap in new store paths (--batch-idle) is treated as a
+build stall on a long derivation and flushes what has accumulated so far, so
+uploads spread over build idle time instead of spiking after COMMAND exits; a
+final flush still runs at exit. Set --batch-idle=0 to only push at exit.
 
 With --batch=false, paths are instead pushed individually as they settle
 while COMMAND is still running.`,
@@ -97,7 +107,7 @@ while COMMAND is still running.`,
 			stop := make(chan struct{})
 			done := make(chan error, 1)
 			ready := make(chan struct{})
-			go func() { done <- watchAndPush(cmd.Context(), pusher, stop, batch, ready) }()
+			go func() { done <- watchAndPush(cmd.Context(), pusher, stop, batch, batchIdle, ready) }()
 
 			// Paths created before the watcher is in place are invisible to
 			// it, so don't start the command until then.
@@ -132,6 +142,8 @@ while COMMAND is still running.`,
 	cmd.Flags().IntVarP(&jobs, "jobs", "j", 5, "parallel upload jobs")
 	cmd.Flags().
 		BoolVar(&batch, "batch", true, "push everything in one shot after the command exits (--batch=false streams pushes)")
+	cmd.Flags().DurationVar(&batchIdle, "batch-idle", defaultBatchIdle,
+		"in batch mode, flush accumulated paths after this idle gap in new store paths (0 waits until exit)")
 	// Stop flag parsing at the first positional so COMMAND's own flags (e.g.
 	// `sh -c`) aren't claimed by watch-exec.
 	cmd.Flags().SetInterspersed(false)
@@ -140,13 +152,16 @@ while COMMAND is still running.`,
 
 // watchAndPush pushes new store paths as they settle until stop closes (any
 // still-pending paths are flushed) or ctx is cancelled. With batch, settled
-// paths only accumulate and the stop flush pushes them as a single batch.
-// ready (if non-nil) is closed once new store paths are guaranteed visible.
+// paths accumulate and the stop flush pushes them as a single batch; if
+// batchIdle > 0, an idle gap that long with no new paths also flushes what has
+// settled so far (a mid-run batch). ready (if non-nil) is closed once new store
+// paths are guaranteed visible.
 func watchAndPush(
 	ctx context.Context,
 	pusher *push.Pusher,
 	stop <-chan struct{},
 	batch bool,
+	batchIdle time.Duration,
 	ready chan<- struct{},
 ) error {
 	watcher, err := fsnotify.NewWatcher()
@@ -159,13 +174,14 @@ func watchAndPush(
 		// fails on unopenable ones (e.g. sockets in the store); fall back to
 		// diffing directory listings.
 		fmt.Fprintf(os.Stderr, "watch %s: %v; falling back to polling\n", nix.StoreDir, err)
-		return pollAndPush(ctx, pusher, stop, batch, ready)
+		return pollAndPush(ctx, pusher, stop, batch, batchIdle, ready)
 	}
 	if ready != nil {
 		close(ready)
 	}
 
 	pending := map[string]time.Time{}
+	lastActivity := time.Now()
 	record := func(event fsnotify.Event) {
 		if !event.Has(fsnotify.Create) {
 			return
@@ -175,6 +191,7 @@ func watchAndPush(
 			return
 		}
 		pending[path] = time.Now()
+		lastActivity = time.Now()
 	}
 
 	ticker := time.NewTicker(watchDebounce)
@@ -208,6 +225,9 @@ func watchAndPush(
 			fmt.Fprintf(os.Stderr, "watch error: %v\n", err)
 		case <-ticker.C:
 			if batch {
+				if batchIdle > 0 && len(pending) > 0 && time.Since(lastActivity) >= batchIdle {
+					pushSettled(ctx, pusher, pending)
+				}
 				continue
 			}
 			pushSettled(ctx, pusher, pending)
@@ -224,6 +244,7 @@ func pollAndPush(
 	pusher *push.Pusher,
 	stop <-chan struct{},
 	batch bool,
+	batchIdle time.Duration,
 	ready chan<- struct{},
 ) error {
 	names, err := storeNames()
@@ -239,6 +260,7 @@ func pollAndPush(
 	}
 
 	pending := map[string]time.Time{}
+	lastActivity := time.Now()
 	scan := func() {
 		names, err := storeNames()
 		if err != nil {
@@ -252,6 +274,7 @@ func pollAndPush(
 			known[name] = struct{}{}
 			if !ignoredStoreName(name) {
 				pending[filepath.Join(nix.StoreDir, name)] = time.Now()
+				lastActivity = time.Now()
 			}
 		}
 	}
@@ -269,6 +292,9 @@ func pollAndPush(
 		case <-ticker.C:
 			scan()
 			if batch {
+				if batchIdle > 0 && len(pending) > 0 && time.Since(lastActivity) >= batchIdle {
+					pushSettled(ctx, pusher, pending)
+				}
 				continue
 			}
 			pushSettled(ctx, pusher, pending)
