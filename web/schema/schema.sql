@@ -14,12 +14,34 @@ CREATE TABLE IF NOT EXISTS cache (
     created_at TEXT NOT NULL,
     deleted_at TEXT,
     retention_period INTEGER,
-    retention_max_bytes INTEGER, -- size budget in compressed bytes; NULL = unlimited
-    upstream_caches TEXT NOT NULL DEFAULT '["https://cache.nixos.org"]'
+    retention_max_bytes INTEGER -- size budget in compressed bytes; NULL = unlimited
 );
 
 CREATE INDEX IF NOT EXISTS idx_cache_name ON cache(name);
 CREATE INDEX IF NOT EXISTS idx_cache_deleted ON cache(deleted_at);
+
+-- Instance-level upstream registry: trust (URL + public key + TTL) is
+-- admin-managed and lives in ONE row per URL — the UNIQUE constraint makes a
+-- same-URL/different-key conflict unrepresentable. enforced=1 guarantees at
+-- least redirect participation for every cache.
+CREATE TABLE IF NOT EXISTS upstream (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL UNIQUE,
+    public_key TEXT,
+    ttl INTEGER, -- seconds; NULL = default (7 days). Doubles as query order.
+    default_mode TEXT NOT NULL DEFAULT 'redirect', -- off | redirect | persist
+    enforced INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+-- Per-cache subscription override; a missing row inherits the registry
+-- entry's default_mode.
+CREATE TABLE IF NOT EXISTS cache_upstream (
+    cache_id INTEGER NOT NULL REFERENCES cache(id),
+    upstream_id INTEGER NOT NULL REFERENCES upstream(id),
+    mode TEXT NOT NULL, -- off | redirect | persist
+    PRIMARY KEY (cache_id, upstream_id)
+);
 
 -- Direct references between store paths, derived from object.refs JSON.
 -- ref_hash is the 32-char store path hash of the referenced path and the
@@ -38,20 +60,40 @@ CREATE INDEX IF NOT EXISTS idx_object_ref_child ON object_ref(child_id);
 CREATE INDEX IF NOT EXISTS idx_object_ref_unresolved ON object_ref(ref_hash)
     WHERE child_id IS NULL;
 
+-- Named pins (cachix parity): a pin is a name whose gc_root rows are its
+-- revision history (newest = current). keep_revisions / keep_days prune old
+-- revisions during GC (unpin only — retention then governs those paths).
+CREATE TABLE IF NOT EXISTS pin (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cache_id INTEGER NOT NULL REFERENCES cache(id),
+    name TEXT NOT NULL,
+    keep_revisions INTEGER, -- NULL = keep all revisions
+    keep_days INTEGER,      -- NULL = no age limit
+    created_at TEXT NOT NULL,
+    UNIQUE (cache_id, name)
+);
+
 -- Pinned store paths: GC always keeps the full closure of every root.
--- closure_objects/closure_bytes are display stats cached by GC (stats_at is
--- the refresh time); the dashboard reads them instead of recomputing.
+-- Rows with pin_id are a named pin's revisions; pin_id NULL is an anonymous
+-- quick pin. closure_objects/closure_bytes are display stats cached by GC
+-- (stats_at is the refresh time); the dashboard reads them instead of
+-- recomputing.
 CREATE TABLE IF NOT EXISTS gc_root (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cache_id INTEGER NOT NULL REFERENCES cache(id),
     store_path_hash TEXT NOT NULL,
     note TEXT,
+    pin_id INTEGER REFERENCES pin(id),
     created_at TEXT NOT NULL,
     closure_objects INTEGER,
     closure_bytes INTEGER,
-    stats_at TEXT,
-    UNIQUE (cache_id, store_path_hash)
+    stats_at TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gc_root_anon ON gc_root(cache_id, store_path_hash)
+    WHERE pin_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gc_root_pin ON gc_root(pin_id, store_path_hash)
+    WHERE pin_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_gc_root_cache ON gc_root(cache_id);
 
 -- Server-wide settings (key/value), e.g. global_max_bytes (physical storage
 -- ceiling across all caches, enforced by GC's global eviction pass).
@@ -60,14 +102,18 @@ CREATE TABLE IF NOT EXISTS server_config (
     value TEXT NOT NULL
 );
 
--- Cached upstream narinfo existence checks (get-missing-paths filtering).
+-- Cached upstream narinfo existence checks (get-missing-paths filtering and
+-- read-path fallback), keyed by registry id so verdicts follow the trust
+-- identity and are wiped when its key rotates.
 CREATE TABLE IF NOT EXISTS upstream_check (
-    upstream TEXT NOT NULL,
+    upstream_id INTEGER NOT NULL REFERENCES upstream(id),
     store_path_hash TEXT NOT NULL,
     present INTEGER NOT NULL,
     checked_at TEXT NOT NULL,
-    PRIMARY KEY (upstream, store_path_hash)
+    PRIMARY KEY (upstream_id, store_path_hash)
 );
+-- GC's closure-integrity report probes verdicts by hash alone.
+CREATE INDEX IF NOT EXISTS idx_upstream_check_hash ON upstream_check(store_path_hash);
 
 -- NAR table (content-addressed)
 CREATE TABLE IF NOT EXISTS nar (
@@ -100,7 +146,13 @@ CREATE TABLE IF NOT EXISTS object (
     ca TEXT,
     created_at TEXT NOT NULL,
     last_accessed_at TEXT,
-    created_by TEXT,
+    created_by TEXT, -- pushing token's subject; NULL for pull-through ingests
+    -- Removal marker: a detached object keeps serving while other paths
+    -- reference it, stops anchoring retention, and is reaped once nothing
+    -- non-detached (or pinned) can reach it. Cleared on re-push.
+    detached_at TEXT,
+    -- Provenance: 'push' or 'pullthrough:<upstream url>'; NULL on legacy rows.
+    source TEXT,
     UNIQUE(cache_id, store_path_hash)
 );
 
