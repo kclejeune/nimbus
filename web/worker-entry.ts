@@ -77,5 +77,16 @@ export default {
 		// expiry) and D1 "present" verdicts lazily expire on the same TTL.
 		const stats = await runGc(env, { ctx: ctx as App.Platform['ctx'] });
 		console.log(`gc: ${JSON.stringify(stats)}`);
+		// Refresh D1 query-planner statistics after GC changes row counts. Without
+		// stats SQLite mis-plans the hot lookups — the download-touch and narinfo
+		// serve queries chose idx_nar_state (every valid nar, ~28k rows/call) over
+		// the selective idx_nar_hash, reading ~825M rows/day and overloading D1
+		// under CI read bursts. ANALYZE makes them seek by nar_hash instead.
+		try {
+			await env.ATTIC_DB.exec('ANALYZE');
+			console.log('analyze: refreshed D1 planner statistics');
+		} catch (e) {
+			console.warn(`analyze: failed to refresh statistics: ${e}`);
+		}
 	}
 };
