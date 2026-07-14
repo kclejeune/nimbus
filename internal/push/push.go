@@ -19,16 +19,9 @@ import (
 	"github.com/kclejeune/nimbus/internal/nix"
 )
 
-// At or above this NAR size the client cuts the NAR with FastCDC itself and
-// uploads only the chunks the server is missing, instead of streaming the whole
-// NAR for the server to chunk+compress in one invocation. Two reasons to keep
-// it well under Cloudflare's ~100 MB request-body limit: the server's streaming
-// path holds ~3 concurrent chunks plus a 32 MiB chunker buffer, sitting near
-// the Worker's 128 MB per-request memory ceiling (see web/ upload.ts
-// handleStreamingUpload), and CI pushes several NARs at once onto a shared
-// isolate. 32 MiB is ~p95 of observed NAR sizes, so only the largest ~5% take
-// the client-CDC path while the rest stay on the cheaper server route.
-const chunkedThreshold = 32 * 1024 * 1024
+// Above this NAR size (the Workers request-body limit) the client cuts the
+// NAR with FastCDC itself and uploads only the chunks the server is missing.
+const chunkedThreshold = 100 * 1024 * 1024
 
 // Concurrent compress+PUT workers per chunked NAR; also bounds how many raw
 // chunks (≤16 MiB each) are buffered at once.
