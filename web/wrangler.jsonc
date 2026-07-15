@@ -94,7 +94,14 @@
 		{
 			"binding": "ATTIC_DB",
 			"database_name": "attic",
-			"database_id": "872ceec3-5438-4069-b3fa-69fbb66dd011"
+			"database_id": "872ceec3-5438-4069-b3fa-69fbb66dd011",
+			// `npm run migrate` (chained into `npm run deploy`) applies unapplied
+			// files in lexicographic order, tracked in d1_migrations — keep the
+			// YYYY-MM-DD filename prefix so order stays chronological. The table
+			// was seeded 2026-07-14 with the migrations applied by hand before
+			// this existed (several are non-idempotent ALTERs; they must never
+			// re-run).
+			"migrations_dir": "schema/migrations"
 		}
 	]
 
