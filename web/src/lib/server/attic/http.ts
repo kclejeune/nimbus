@@ -8,6 +8,7 @@ const KIND_BY_STATUS: Record<number, string> = {
 	403: 'AccessError',
 	404: 'NotFound',
 	409: 'CacheAlreadyExists',
+	429: 'TooManyRequests',
 	500: 'InternalServerError',
 	503: 'IncompleteNar'
 };

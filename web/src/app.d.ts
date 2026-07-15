@@ -1,7 +1,7 @@
 // See https://svelte.dev/docs/kit/types#app.d.ts
 // for information about these interfaces
 
-import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+import type { D1Database, R2Bucket, RateLimit } from '@cloudflare/workers-types';
 import type { SessionUser } from '$lib/server/auth/types';
 import type { EffectiveAccess } from '$lib/server/auth/permissions';
 
@@ -51,8 +51,14 @@ declare global {
 				 * positive value warms direct references (one level — prefetched
 				 * serves never prefetch further). */
 				PREFETCH_DEPTH?: string;
-				/** Prefetch loopbacks allowed per isolate per minute (default 240). */
+				/** Prefetch loopbacks per isolate per minute (default 240) — the
+				 * fallback budget when PREFETCH_LIMITER is not bound. */
 				PREFETCH_BUDGET?: string;
+				/** Colo-wide prefetch fan-out limiter (wrangler.jsonc ratelimits). */
+				PREFETCH_LIMITER?: RateLimit;
+				/** Colo-wide backstop for the unauthenticated CLI device-auth
+				 * endpoints (the only anonymous D1-primary writes). */
+				DEVICE_AUTH_LIMITER?: RateLimit;
 			};
 			ctx: ExecutionContext;
 		}

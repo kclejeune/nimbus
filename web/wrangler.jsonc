@@ -42,6 +42,29 @@
 		{ "pattern": "cache.kclj.io", "custom_domain": true }
 	],
 
+	// Colo-scoped, eventually-consistent rate limiters (best-effort backstops,
+	// not accounting), sized generously: their job is stopping runaway
+	// pathology, not shaping legitimate traffic. Prefetch: speculative
+	// loopback fan-out across every isolate in a colo (guardrail block in
+	// store.ts) — each warm costs ~2 replica reads and zero primary work, so
+	// 100/sec/colo is still trivial load while keeping prefetch effective
+	// under a large cold mass query. Device-auth: the only unauthenticated
+	// endpoints that touch the D1 primary, keyed per client IP + endpoint
+	// (router.ts) — 300/min/IP is ~25x one login flow's polling rate, so even
+	// a shared/CGNAT IP with many simultaneous logins never trips it, while
+	// an abuser is still capped at ~5 primary ops/sec/IP.
+	"ratelimits": [
+		{
+			"name": "PREFETCH_LIMITER",
+			"namespace_id": "1001",
+			"simple": { "limit": 6000, "period": 60 }
+		},
+		{
+			"name": "DEVICE_AUTH_LIMITER",
+			"namespace_id": "1002",
+			"simple": { "limit": 300, "period": 60 }
+		}
+	],
 	"vars": {
 		"APP_URL": "https://app.cache.kclj.io",
 		"CACHE_BASE_URL": "https://cache.kclj.io",

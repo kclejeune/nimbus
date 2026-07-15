@@ -333,11 +333,18 @@ function isPrefetchLoopback(request: Request): boolean {
 //   - prefetch loopbacks are local-only: a miss 404s (uncacheable) instead of
 //     probing upstreams and recording verdicts — warming an upstream
 //     passthrough is a real client miss's job;
-//   - a per-isolate budget (PREFETCH_BUDGET per minute, default 240) caps
-//     total loopback fan-out no matter how many cold serves race;
+//   - a fan-out budget caps total loopbacks no matter how many cold serves
+//     race: colo-wide via the PREFETCH_LIMITER ratelimit binding (6000/min,
+//     wrangler.jsonc — each warm is ~2 replica reads and zero primary work,
+//     so this is a runaway backstop, not traffic shaping), falling back to a
+//     per-isolate RateBudget tuned by PREFETCH_BUDGET where the binding is
+//     absent (local dev, tests);
 //   - a recently-prefetched memo collapses a fleet walking the same closure
 //     into one warm per ref per window per isolate.
-const PREFETCH_MAX_REFS = 64;
+// Per-serve cap only — the colo-wide budget is the real governor, so this
+// just bounds one pathological narinfo's share of it. 128 covers even large
+// dev-shell/meta-package reference lists (typical packages have 5-30).
+const PREFETCH_MAX_REFS = 128;
 const PREFETCH_DEFAULT_BUDGET_PER_MIN = 240;
 const PREFETCH_MEMO_TTL_MS = 5 * 60 * 1000;
 const PREFETCH_MEMO_MAX_ENTRIES = 50_000;
@@ -347,6 +354,24 @@ const prefetchBudget = new RateBudget(60_000);
 function prefetchBudgetPerMin(env: Env): number {
 	const raw = Number(env.PREFETCH_BUDGET);
 	return Number.isFinite(raw) && raw > 0 ? raw : PREFETCH_DEFAULT_BUDGET_PER_MIN;
+}
+
+/**
+ * One unit of prefetch fan-out budget. The ratelimit binding — colo-wide,
+ * eventually consistent, exactly the permissive backstop speculative work
+ * wants — when bound; the per-isolate RateBudget otherwise. A binding error
+ * counts as refused: prefetch is speculative, so it fails closed (contrast
+ * the device-auth limiter in router.ts, which is user-facing and fails open).
+ */
+async function takePrefetchBudget(env: Env): Promise<boolean> {
+	if (env.PREFETCH_LIMITER) {
+		try {
+			return (await env.PREFETCH_LIMITER.limit({ key: 'prefetch' })).success;
+		} catch {
+			return false;
+		}
+	}
+	return prefetchBudget.tryTake(prefetchBudgetPerMin(env));
 }
 
 function prefetchReferences(
@@ -380,39 +405,43 @@ function prefetchReferences(
 		.filter((h) => h !== servedHash)
 		.slice(0, PREFETCH_MAX_REFS);
 
-	// Dedup before spending budget (a skipped ref costs nothing); once the
-	// window's budget is gone, stop rather than scan on — the remaining refs
-	// are warmed by the next cold serve after the window rolls.
-	const budget = prefetchBudgetPerMin(env);
-	const hashes: string[] = [];
-	for (const hash of candidates) {
-		const key = `${cacheName}:${hash}`;
-		if (recentPrefetches.get(key)) continue;
-		if (!prefetchBudget.tryTake(budget)) break;
-		recentPrefetches.set(key, true);
-		hashes.push(hash);
-	}
-	if (hashes.length === 0) return;
+	if (candidates.length === 0) return;
 
 	// Reuse the request URL as the base so the gateway's ?pk= cache keying is
 	// preserved — the warmed entries must land under the keys clients hit.
 	const base = new URL(request.url);
+	// The budget take is async (the ratelimit binding), so the dedup-then-
+	// spend loop rides waitUntil, off the response path. Dedup before
+	// spending (a skipped ref costs nothing); once the budget refuses, stop
+	// rather than scan on — the remaining refs are warmed by the next cold
+	// serve after the window rolls. Warms overlap; only the budget takes are
+	// sequential.
 	ctx.waitUntil(
-		Promise.all(
-			hashes.map(async (hash) => {
+		(async () => {
+			const warms: Promise<void>[] = [];
+			for (const hash of candidates) {
+				const key = `${cacheName}:${hash}`;
+				if (recentPrefetches.get(key)) continue;
+				if (!(await takePrefetchBudget(env))) break;
+				recentPrefetches.set(key, true);
 				const url = new URL(base);
 				url.pathname = `/${cacheName}/${hash}.narinfo`;
-				try {
-					const res = await store.fetch(
-						new Request(url, { headers: { [PREFETCH_MARKER_HEADER]: '1' } })
-					);
-					// narinfo bodies are tiny; consume so the cache write completes.
-					await res.arrayBuffer();
-				} catch {
-					// best-effort
-				}
-			})
-		)
+				warms.push(
+					(async () => {
+						try {
+							const res = await store.fetch(
+								new Request(url, { headers: { [PREFETCH_MARKER_HEADER]: '1' } })
+							);
+							// narinfo bodies are tiny; consume so the cache write completes.
+							await res.arrayBuffer();
+						} catch {
+							// best-effort
+						}
+					})()
+				);
+			}
+			await Promise.all(warms);
+		})()
 	);
 }
 

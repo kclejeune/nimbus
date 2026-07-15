@@ -573,6 +573,22 @@ async function handleV1(
 		return handleAuthConfig(env);
 	}
 	if (method === 'POST' && route === 'cli' && segments.length === 4) {
+		// These are the only unauthenticated endpoints that touch the D1
+		// primary (device start INSERTs a row; token polls read one), so they
+		// get a best-effort backstop before any work. Keyed per client IP and
+		// endpoint — there is no authenticated identity here, and per-IP keeps
+		// one client from consuming everyone else's budget. The limit is a
+		// runaway backstop, not traffic shaping: ~25x one login flow's polling
+		// rate (~12/min), so even a shared/CGNAT IP with many simultaneous
+		// logins never trips it. User-facing, so a limiter error fails open
+		// (contrast the prefetch budget, which fails closed).
+		if (env.DEVICE_AUTH_LIMITER) {
+			const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
+			const { success } = await env.DEVICE_AUTH_LIMITER.limit({
+				key: `device:${segments[3]}:${ip}`
+			}).catch(() => ({ success: true }));
+			if (!success) return errorResponse(429, 'Too many requests; retry shortly');
+		}
 		if (segments[3] === 'device') return handleDeviceStart(env);
 		if (segments[3] === 'token') {
 			const body = await (request.json() as Promise<{ device_code?: string }>).catch(() => null);

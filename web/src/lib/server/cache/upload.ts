@@ -42,10 +42,12 @@ const MAX_PREAMBLE_SIZE = 1024 * 1024;
 const CDC_MAX_CHUNK = 16 * 1024 * 1024;
 /**
  * Serving a NAR costs one R2 subrequest per chunk against the invocation's
- * ~1000-subrequest budget; manifests that could never be served are rejected
- * at upload time instead.
+ * 10,000-subrequest budget (Workers Paid default; raiseable via
+ * limits.subrequests); manifests that could never be served are rejected at
+ * upload time instead. 2000 chunks ≈ a 16 GB NAR at the ~8 MB chunk target,
+ * with 5x subrequest headroom left for the serve's other calls.
  */
-const MAX_NAR_CHUNKS = 800;
+const MAX_NAR_CHUNKS = 2000;
 /**
  * In-flight processNarChunk tasks per streaming upload. Bounds peak memory:
  * each task can hold a raw chunk (≤16 MiB) plus its compressed output while

@@ -34,7 +34,11 @@ export function pickReadableWinner(
 // closures are exactly what fills it, and TtlMemo's sweep-first eviction
 // reclaims expired entries instead of wiping the live set back onto D1.
 const ABSENT_TTL_MS = 60_000;
-const ABSENT_MAX_ENTRIES = 20_000;
+// Sized like the touch/prefetch memos: a fleet's cold mass query can sustain
+// hundreds of distinct misses/sec, and 20k (333/sec x 60s TTL) was the one
+// cap such a storm could realistically fill. ~150 B/entry, so the worst case
+// is a few MB.
+const ABSENT_MAX_ENTRIES = 50_000;
 const absentStorePaths = new TtlMemo<true>(ABSENT_TTL_MS, ABSENT_MAX_ENTRIES);
 
 export function isKnownAbsent(storePathHash: string): boolean {
