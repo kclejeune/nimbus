@@ -36,6 +36,7 @@ import {
 } from './missing-paths';
 import { readAll, type ExecutionContext } from './platform';
 import { warmNarinfoAfterUpload } from './store';
+import { TtlMemo } from './ttl-memo';
 import {
 	finishDeduplicated,
 	handleBufferedUpload,
@@ -54,10 +55,10 @@ const NAR_FETCH_TIMEOUT_MS = 20_000;
 // until ingestion lands and evicts the entry. This memo collapses the
 // re-asks (and concurrent duplicate downloads) within an isolate; entries
 // are recorded at ingest start, so a failed or unpersistable attempt retries
-// only after the cooldown. Size-capped like the proxy absent memo.
+// only after the cooldown.
 const INGEST_COOLDOWN_MS = 5 * 60 * 1000;
 const INGEST_MEMO_MAX_ENTRIES = 10_000;
-const recentIngests = new Map<string, number>();
+const recentIngests = new TtlMemo<true>(INGEST_COOLDOWN_MS, INGEST_MEMO_MAX_ENTRIES);
 
 /**
  * Ingest one upstream-served path into `cacheName`. Best-effort and
@@ -80,10 +81,8 @@ export async function persistUpstreamPath(
 	if (storePathHash.length !== 32) return;
 
 	const memoKey = `${cacheName}:${storePathHash}`;
-	const last = recentIngests.get(memoKey);
-	if (last !== undefined && Date.now() - last < INGEST_COOLDOWN_MS) return;
-	if (recentIngests.size >= INGEST_MEMO_MAX_ENTRIES) recentIngests.clear();
-	recentIngests.set(memoKey, Date.now());
+	if (recentIngests.get(memoKey)) return;
+	recentIngests.set(memoKey, true);
 
 	try {
 		// The persist marker rode an edge-cached response, so re-check the

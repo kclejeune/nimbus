@@ -42,7 +42,7 @@ import {
 	keyedNarinfoUrl,
 	PERSIST_CACHE_HEADER,
 	PERSIST_UPSTREAM_HEADER,
-	PREFETCH_DEPTH_HEADER,
+	PREFETCH_MARKER_HEADER,
 	serveStore
 } from './store';
 import {
@@ -204,9 +204,9 @@ async function forwardToStore(
 ): Promise<Response> {
 	const forwarded = new Request(request);
 	forwarded.headers.delete('Authorization');
-	// Internal recursion control for reference prefetch; a client-supplied
-	// value would inflate the loopback fan-out.
-	forwarded.headers.delete(PREFETCH_DEPTH_HEADER);
+	// Internal prefetch-loopback marker (store.ts); client-supplied, it would
+	// falsely mark the request as a prefetch and disable its upstream fallback.
+	forwarded.headers.delete(PREFETCH_MARKER_HEADER);
 	const store = ctx?.exports?.CachedStore;
 	if (!store && !warnedStoreUnavailable) {
 		warnedStoreUnavailable = true;

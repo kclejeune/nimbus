@@ -1,7 +1,7 @@
-// A per-isolate, size-capped, TTL'd memo — the shape the read path otherwise
-// hand-rolls repeatedly (the download-touch, token-revocation, and cache-row
-// memos all use it; the older absent-path/ingest-cooldown/upstream-config
-// memos predate it and could adopt it too). Entries expire after their TTL; on
+// A per-isolate, size-capped, TTL'd memo — the shape the server's read and
+// push paths otherwise hand-roll repeatedly. (The upstream-config memo in
+// missing-paths.ts stays hand-rolled on purpose: it memoizes a single
+// in-flight PROMISE, a different shape.) Entries expire after their TTL; on
 // reaching maxEntries it first sweeps expired keys, so a hot high-cardinality
 // memo usually reclaims space without dropping live entries — the wholesale
 // wipe (which for the download-touch memo regenerates the very D1 writes it

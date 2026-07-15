@@ -47,6 +47,12 @@ declare global {
 				OIDC_GROUPS_CLAIM?: string;
 				/** Groups-claim value that auto-activates pending users at login. */
 				OIDC_ACTIVATION_GROUP?: string;
+				/** Reference prefetch on cold narinfo serves: unset/0 = off; any
+				 * positive value warms direct references (one level — prefetched
+				 * serves never prefetch further). */
+				PREFETCH_DEPTH?: string;
+				/** Prefetch loopbacks allowed per isolate per minute (default 240). */
+				PREFETCH_BUDGET?: string;
 			};
 			ctx: ExecutionContext;
 		}

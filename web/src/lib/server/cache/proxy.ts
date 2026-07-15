@@ -30,24 +30,19 @@ export function pickReadableWinner(
 // readability is token-dependent, so only token-independent absence — an
 // empty candidate set — is safe to remember). Per-isolate and TTL-bounded:
 // uploads can't purge it, so a just-pushed path may 404 at the root for up
-// to ABSENT_TTL_MS. Size-capped as a mass-query backstop.
+// to ABSENT_TTL_MS. The size cap matters here: mass queries of mostly-absent
+// closures are exactly what fills it, and TtlMemo's sweep-first eviction
+// reclaims expired entries instead of wiping the live set back onto D1.
 const ABSENT_TTL_MS = 60_000;
 const ABSENT_MAX_ENTRIES = 20_000;
-const absentStorePaths = new Map<string, number>();
+const absentStorePaths = new TtlMemo<true>(ABSENT_TTL_MS, ABSENT_MAX_ENTRIES);
 
 export function isKnownAbsent(storePathHash: string): boolean {
-	const until = absentStorePaths.get(storePathHash);
-	if (until === undefined) return false;
-	if (Date.now() > until) {
-		absentStorePaths.delete(storePathHash);
-		return false;
-	}
-	return true;
+	return absentStorePaths.get(storePathHash) === true;
 }
 
 export function recordAbsent(storePathHash: string): void {
-	if (absentStorePaths.size >= ABSENT_MAX_ENTRIES) absentStorePaths.clear();
-	absentStorePaths.set(storePathHash, Date.now() + ABSENT_TTL_MS);
+	absentStorePaths.set(storePathHash, true);
 }
 
 /** Called after an upload lands the path, so this isolate stops 404ing it. */
@@ -64,8 +59,7 @@ export function clearAbsent(storePathHash: string): void {
 // downloads of the same object within a window down to one write. A hot path
 // is still touched at most once per TOUCH_COALESCE_MS per active isolate,
 // which keeps it comfortably "recently accessed" while shedding the redundant
-// writes; a rarely-downloaded path (gaps > window) always touches. TTL-bounded
-// and size-capped like the absent memo above.
+// writes; a rarely-downloaded path (gaps > window) always touches.
 const TOUCH_COALESCE_MS = 5 * 60 * 1000;
 const TOUCH_MEMO_MAX_ENTRIES = 50_000;
 const recentTouches = new TtlMemo<true>(TOUCH_COALESCE_MS, TOUCH_MEMO_MAX_ENTRIES);

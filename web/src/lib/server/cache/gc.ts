@@ -7,7 +7,7 @@
 // Every sweep is idempotent; passes are ordered so each exposes work for the
 // next (retention deletes objects -> orphans NARs -> orphans chunks -> R2).
 
-import { chunkKey, PARAM_BATCH, runBatched } from './db';
+import { chunkKey, dbRun, PARAM_BATCH, runBatched } from './db';
 import { type ExecutionContext } from './platform';
 import { narinfoTag } from './store';
 
@@ -52,6 +52,8 @@ export interface GcStats {
 	incomplete_closure_objects: number;
 	refs_synced: number;
 	narinfo_tags_purged: number;
+	/** 1 when this run did nothing because another run held the GC lock. */
+	skipped_lock_held: number;
 	[key: string]: number;
 }
 
@@ -67,14 +69,68 @@ function emptyStats(): GcStats {
 		pin_revisions_pruned: 0,
 		incomplete_closure_objects: 0,
 		refs_synced: 0,
-		narinfo_tags_purged: 0
+		narinfo_tags_purged: 0,
+		skipped_lock_held: 0
 	};
 }
 
-export async function runGc(
-	env: Env,
-	opts: { dryRun?: boolean; ctx?: ExecutionContext; integrityReport?: boolean } = {}
-): Promise<GcStats> {
+// Cross-isolate GC mutex (a server_config row, compare-and-set on the
+// primary): a manual /gc trigger racing the nightly cron — or a second manual
+// trigger — would double the heaviest D1 load in the system, possibly during
+// a push. The TTL bounds a lock leaked by a killed run; a healthy run
+// releases in its finally. Every sweep is idempotent, so a skipped run loses
+// nothing — the next one covers it.
+const GC_LOCK_KEY = 'gc_lock';
+const GC_LOCK_TTL_MS = 30 * 60 * 1000;
+
+/** Take the GC lock; returns a release token, or null when another run holds
+ * a live lock. Single-statement compare-and-set: the INSERT wins outright or
+ * the UPDATE only applies over an expired holder. */
+async function acquireGcLock(db: D1): Promise<string | null> {
+	const now = Date.now();
+	const token = String(now);
+	// dbRun: a transient primary blip here would otherwise abort the whole
+	// nightly run at its very first statement.
+	const result = await dbRun(
+		db
+			.prepare(
+				`INSERT INTO server_config (key, value) VALUES ('${GC_LOCK_KEY}', ?1) ` +
+					'ON CONFLICT (key) DO UPDATE SET value = excluded.value ' +
+					'WHERE CAST(server_config.value AS INTEGER) < ?2'
+			)
+			.bind(token, now - GC_LOCK_TTL_MS)
+	);
+	return (result.meta.changes ?? 0) > 0 ? token : null;
+}
+
+/** Release only our own lock: a run that outlived the TTL and lost the lock
+ * to a newer holder must not delete that holder's row. */
+async function releaseGcLock(db: D1, token: string): Promise<void> {
+	await dbRun(
+		db.prepare(`DELETE FROM server_config WHERE key = '${GC_LOCK_KEY}' AND value = ?1`).bind(token)
+	).catch((e) => console.warn(`gc: lock release failed; the stale lock expires via its TTL: ${e}`));
+}
+
+export interface GcOptions {
+	dryRun?: boolean;
+	ctx?: ExecutionContext;
+	integrityReport?: boolean;
+}
+
+export async function runGc(env: Env, opts: GcOptions = {}): Promise<GcStats> {
+	const lock = await acquireGcLock(env.ATTIC_DB);
+	if (!lock) {
+		console.warn('gc: another run holds the lock; skipping');
+		return { ...emptyStats(), skipped_lock_held: 1 };
+	}
+	try {
+		return await runGcLocked(env, opts);
+	} finally {
+		await releaseGcLock(env.ATTIC_DB, lock);
+	}
+}
+
+async function runGcLocked(env: Env, opts: GcOptions): Promise<GcStats> {
 	const stats = emptyStats();
 	const dryRun = opts.dryRun ?? false;
 	// Cache-Tags of deleted objects, purged from the edge cache at the end so

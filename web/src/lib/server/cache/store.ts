@@ -21,6 +21,8 @@ import {
 	type Upstream
 } from './missing-paths';
 import { clearAbsent, getProxyKeypair } from './proxy';
+import { RateBudget } from './rate-budget';
+import { TtlMemo } from './ttl-memo';
 import type { ExecutionContext } from './platform';
 
 type Env = App.Platform['env'];
@@ -307,23 +309,48 @@ function narinfoResponse(
 // Predictive reference prefetch: a narinfo served here missed the edge cache,
 // and Nix's closure walk (`nix copy`, substitution) will ask for the direct
 // references next — warm them through the CachedStore loopback so the client
-// only ever pays a cold miss every PREFETCH_DEPTH+1 levels of the walk. The
-// depth header bounds recursion; each prefetched URL is one loopback fetch in
-// THIS invocation, while deeper levels spend their own invocation's budget.
-// Already-warm entries are served by the edge without running this code, so
-// repeat prefetches of a warmed path cost nothing downstream.
-// Internal-only: the gateway strips this header from client requests, so a
-// caller can't start the recursion at an inflated depth.
-export const PREFETCH_DEPTH_HEADER = 'X-Nimbus-Prefetch-Depth';
-// DISABLED (depth 0) after the 2026-07-08 incident: under a mass query with a
-// cold edge cache, per-miss fan-out (~25 clients x dozens of refs x depth 2)
+// pays fewer cold misses on the walk. Already-warm entries are served by the
+// edge without running this code, so repeat prefetches of a warmed path cost
+// nothing downstream.
+// The marker header rides every prefetch loopback and nothing else — the
+// gateway strips it from client requests; isPrefetchLoopback is how the serve
+// path recognizes one.
+export const PREFETCH_MARKER_HEADER = 'X-Nimbus-Prefetch';
+
+function isPrefetchLoopback(request: Request): boolean {
+	return request.headers.get(PREFETCH_MARKER_HEADER) != null;
+}
+
+// Re-enabled behind guardrails after the 2026-07-08 incident, where per-miss
+// fan-out under a cold mass query (~25 clients x dozens of refs x depth 2)
 // stormed D1 with loopback invocations and upstream-verdict writes, 500ing
-// narinfo/NAR serving until the cache warmed. Re-enabling needs a global
-// fan-out budget and no recursion — see docs/plans.
-const PREFETCH_DEPTH = 0;
+// narinfo/NAR serving until the cache warmed. The guardrails, each closing
+// one incident ingredient:
+//   - prefetch is env-gated (PREFETCH_DEPTH, unset/0 = off) and reaches
+//     direct references only: a prefetch loopback never prefetches further
+//     (the marker check below), so recursion is structurally impossible —
+//     there is no depth number to mis-configure;
+//   - prefetch loopbacks are local-only: a miss 404s (uncacheable) instead of
+//     probing upstreams and recording verdicts — warming an upstream
+//     passthrough is a real client miss's job;
+//   - a per-isolate budget (PREFETCH_BUDGET per minute, default 240) caps
+//     total loopback fan-out no matter how many cold serves race;
+//   - a recently-prefetched memo collapses a fleet walking the same closure
+//     into one warm per ref per window per isolate.
 const PREFETCH_MAX_REFS = 64;
+const PREFETCH_DEFAULT_BUDGET_PER_MIN = 240;
+const PREFETCH_MEMO_TTL_MS = 5 * 60 * 1000;
+const PREFETCH_MEMO_MAX_ENTRIES = 50_000;
+const recentPrefetches = new TtlMemo<true>(PREFETCH_MEMO_TTL_MS, PREFETCH_MEMO_MAX_ENTRIES);
+const prefetchBudget = new RateBudget(60_000);
+
+function prefetchBudgetPerMin(env: Env): number {
+	const raw = Number(env.PREFETCH_BUDGET);
+	return Number.isFinite(raw) && raw > 0 ? raw : PREFETCH_DEFAULT_BUDGET_PER_MIN;
+}
 
 function prefetchReferences(
+	env: Env,
 	ctx: ExecutionContext | undefined,
 	request: Request,
 	cacheName: string,
@@ -332,9 +359,9 @@ function prefetchReferences(
 ): void {
 	const store = ctx?.exports?.CachedStore;
 	if (!store || !ctx?.waitUntil) return;
-	const raw = request.headers.get(PREFETCH_DEPTH_HEADER);
-	const depth = raw == null ? PREFETCH_DEPTH : Number(raw);
-	if (!Number.isInteger(depth) || depth <= 0) return;
+	if (isPrefetchLoopback(request)) return;
+	// Off unless configured on (Number(undefined) is NaN, so unset stays off).
+	if (!(Number(env.PREFETCH_DEPTH) > 0)) return;
 
 	let refs: unknown;
 	try {
@@ -343,7 +370,7 @@ function prefetchReferences(
 		return;
 	}
 	if (!Array.isArray(refs)) return;
-	const hashes = [
+	const candidates = [
 		...new Set(
 			refs
 				.filter((r): r is string => typeof r === 'string' && r.length >= 32)
@@ -352,6 +379,19 @@ function prefetchReferences(
 	]
 		.filter((h) => h !== servedHash)
 		.slice(0, PREFETCH_MAX_REFS);
+
+	// Dedup before spending budget (a skipped ref costs nothing); once the
+	// window's budget is gone, stop rather than scan on — the remaining refs
+	// are warmed by the next cold serve after the window rolls.
+	const budget = prefetchBudgetPerMin(env);
+	const hashes: string[] = [];
+	for (const hash of candidates) {
+		const key = `${cacheName}:${hash}`;
+		if (recentPrefetches.get(key)) continue;
+		if (!prefetchBudget.tryTake(budget)) break;
+		recentPrefetches.set(key, true);
+		hashes.push(hash);
+	}
 	if (hashes.length === 0) return;
 
 	// Reuse the request URL as the base so the gateway's ?pk= cache keying is
@@ -364,7 +404,7 @@ function prefetchReferences(
 				url.pathname = `/${cacheName}/${hash}.narinfo`;
 				try {
 					const res = await store.fetch(
-						new Request(url, { headers: { [PREFETCH_DEPTH_HEADER]: String(depth - 1) } })
+						new Request(url, { headers: { [PREFETCH_MARKER_HEADER]: '1' } })
 					);
 					// narinfo bodies are tiny; consume so the cache write completes.
 					await res.arrayBuffer();
@@ -393,6 +433,12 @@ async function serveNarInfo(
 	if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
 	const isPublic = cache.is_public === 1;
 	if (!found) {
+		// Prefetch loopbacks stop at the local store (see the guardrail block
+		// at PREFETCH_MARKER_HEADER). The errorResponse 404 is no-store, so it
+		// can never mask the upstream fallback a real client miss runs below.
+		if (isPrefetchLoopback(request)) {
+			return errorResponse(404, 'Not found', 'NoSuchObject');
+		}
 		// Paths available upstream are filtered out of pushes, so a complete
 		// closure needs the upstream's narinfo served through this cache. A
 		// persist-mode subscription resolves into this cache (upstreamsForCache
@@ -415,7 +461,7 @@ async function serveNarInfo(
 	}
 
 	const narinfo = await buildNarInfo(found.object, found.nar, found.chunks, cache.keypair);
-	prefetchReferences(ctx, request, cacheName, storePathHash, found.object.refs);
+	prefetchReferences(env, ctx, request, cacheName, storePathHash, found.object.refs);
 
 	return narinfoResponse(narinfo, cacheName, storePathHash, isPublic);
 }
