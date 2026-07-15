@@ -5,6 +5,7 @@
 import { permissionForCache, type VerifiedToken } from '../attic/token';
 import { generateKeypair } from '../attic/signing';
 import type { LiveCacheRow } from './db';
+import { TtlMemo } from './ttl-memo';
 
 type Env = App.Platform['env'];
 
@@ -52,6 +53,34 @@ export function recordAbsent(storePathHash: string): void {
 /** Called after an upload lands the path, so this isolate stops 404ing it. */
 export function clearAbsent(storePathHash: string): void {
 	absentStorePaths.delete(storePathHash);
+}
+
+// Download-touch coalescing. Retention is download-driven: every NAR GET would
+// otherwise UPDATE last_accessed_at on the D1 write primary — even on edge
+// cache hits, since the touch runs in the gateway (router.ts). That couples
+// read throughput to the single-primary write ceiling and steals write budget
+// from uploads. Retention only needs approximate recency (minute-granular
+// last_accessed drives LRU), so this per-isolate memo collapses repeat
+// downloads of the same object within a window down to one write. A hot path
+// is still touched at most once per TOUCH_COALESCE_MS per active isolate,
+// which keeps it comfortably "recently accessed" while shedding the redundant
+// writes; a rarely-downloaded path (gaps > window) always touches. TTL-bounded
+// and size-capped like the absent memo above.
+const TOUCH_COALESCE_MS = 5 * 60 * 1000;
+const TOUCH_MEMO_MAX_ENTRIES = 50_000;
+const recentTouches = new TtlMemo<true>(TOUCH_COALESCE_MS, TOUCH_MEMO_MAX_ENTRIES);
+
+/**
+ * Whether the download-touch for (cacheName, narHash) should be written now,
+ * recording the decision. Returns false when this isolate already touched it
+ * within TOUCH_COALESCE_MS. Keyed per cache because the touch attributes the
+ * access to that cache's object rows.
+ */
+export function shouldTouch(cacheName: string, narHash: string): boolean {
+	const key = `${cacheName}:${narHash}`;
+	if (recentTouches.get(key)) return false;
+	recentTouches.set(key, true);
+	return true;
 }
 
 export function proxyKeyName(env: Env): string {

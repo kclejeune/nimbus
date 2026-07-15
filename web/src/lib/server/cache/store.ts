@@ -11,6 +11,7 @@
 import { errorResponse, withVisibility } from '../attic/http';
 import { buildNarInfo } from '../attic/narinfo';
 import { extractPublicKey } from '../attic/signing';
+import { findCacheCached } from './cache-lookup';
 import * as db from './db';
 import {
 	allLiveUpstreams,
@@ -204,7 +205,7 @@ export async function serveStore(
 		segments[0] === '_proxy_upstream' &&
 		segments[1].endsWith('.narinfo')
 	) {
-		return serveRootUpstreamNarInfo(env, segments[1].slice(0, -'.narinfo'.length));
+		return serveRootUpstreamNarInfo(env, ctx, segments[1].slice(0, -'.narinfo'.length));
 	}
 	if (segments.length === 2 && segments[1].endsWith('.narinfo')) {
 		return serveNarInfo(request, env, ctx, segments[0], segments[1].slice(0, -'.narinfo'.length));
@@ -233,7 +234,7 @@ async function serveProxyNarInfo(
 
 	const session = db.readSession(env.ATTIC_DB);
 	const [cache, found, keypair] = await Promise.all([
-		db.findCache(session, cacheName),
+		findCacheCached(session, cacheName),
 		db.findObjectWithChunks(session, cacheName, storePathHash),
 		getProxyKeypair(env).catch((e) => {
 			console.warn(`proxy keypair unavailable, serving stored sigs: ${e}`);
@@ -259,7 +260,11 @@ async function serveProxyNarInfo(
  * ROOT_UPSTREAM_TAG_NS tag so ingestion can evict them once a path lands
  * locally.
  */
-async function serveRootUpstreamNarInfo(env: Env, storePathHash: string): Promise<Response> {
+async function serveRootUpstreamNarInfo(
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	storePathHash: string
+): Promise<Response> {
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
 	const session = db.readSession(env.ATTIC_DB);
@@ -269,7 +274,9 @@ async function serveRootUpstreamNarInfo(env: Env, storePathHash: string): Promis
 	const tag = `${narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash)},${cacheTag(ROOT_UPSTREAM_TAG_NS)}`;
 
 	const hit =
-		upstreams.length > 0 ? await fetchUpstreamNarInfo(session, upstreams, storePathHash) : null;
+		upstreams.length > 0
+			? await fetchUpstreamNarInfo(session, upstreams, storePathHash, ctx)
+			: null;
 	if (hit) return withVisibility(upstreamNarinfoResponse(hit, tag), true);
 	const absent = errorResponse(404, 'Not found', 'NoSuchObject');
 	absent.headers.set('Cache-Control', NARINFO_404_CACHE_CONTROL);
@@ -380,7 +387,7 @@ async function serveNarInfo(
 
 	const session = db.readSession(env.ATTIC_DB);
 	const [cache, found] = await Promise.all([
-		db.findCache(session, cacheName),
+		findCacheCached(session, cacheName),
 		db.findObjectWithChunks(session, cacheName, storePathHash)
 	]);
 	if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
@@ -391,7 +398,7 @@ async function serveNarInfo(
 		// persist-mode subscription resolves into this cache (upstreamsForCache
 		// sets persistInto).
 		const upstreams = await upstreamsForCache(session, cache);
-		const hit = await fetchUpstreamNarInfo(session, upstreams, storePathHash);
+		const hit = await fetchUpstreamNarInfo(session, upstreams, storePathHash, ctx);
 		if (hit) {
 			return withVisibility(
 				upstreamNarinfoResponse(

@@ -10,6 +10,7 @@ import {
 	destroyCache,
 	renameCache
 } from './cache-config';
+import { findCacheCached } from './cache-lookup';
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import * as db from './db';
 import { listPins, runGc } from './gc';
@@ -21,14 +22,20 @@ import {
 	withVisibility
 } from '../attic/http';
 import {
-	allLiveUpstreams,
 	filterUpstreamPaths,
 	findExistingPaths,
-	findUpstreamNar,
+	upstreamNarRedirect,
 	upstreamsForCache
 } from './missing-paths';
 import { type ExecutionContext } from './platform';
-import { getProxyKeypair, isKnownAbsent, pickReadableWinner, recordAbsent } from './proxy';
+import {
+	getProxyKeypair,
+	isKnownAbsent,
+	pickReadableWinner,
+	recordAbsent,
+	shouldTouch
+} from './proxy';
+import { TtlMemo } from './ttl-memo';
 import { persistUpstreamPath } from './pullthrough';
 import { extractPublicKey } from '../attic/signing';
 import {
@@ -56,6 +63,28 @@ import {
 
 type Env = App.Platform['env'];
 
+// Per-isolate memo of the token-revocation verdict, keyed by jti. Every
+// authenticated request (a CI fleet reuses one token for hundreds of
+// pulls/sec) otherwise runs isTokenDisabled against D1; without this memo that
+// query also hit the write primary. The read now goes to a replica AND is
+// cached here for a short TTL, collapsing a burst of same-token requests to
+// one lookup per window. The TTL bounds how long a just-revoked or
+// just-suspended token keeps working (both fail-safe: re-enabling is likewise
+// delayed at most one TTL); these attic JWTs are already short-lived, so the
+// window is small next to their lifetime. Only successful reads are memoized —
+// a thrown D1 error falls through to the caller's fail-open path uncached.
+const REVOCATION_TTL_MS = 30_000;
+const REVOCATION_MEMO_MAX_ENTRIES = 10_000;
+const revocationMemo = new TtlMemo<boolean>(REVOCATION_TTL_MS, REVOCATION_MEMO_MAX_ENTRIES);
+
+async function isJtiDisabled(env: Env, jti: string): Promise<boolean> {
+	const cached = revocationMemo.get(jti);
+	if (cached !== undefined) return cached;
+	const disabled = await db.isTokenDisabled(db.readSession(env.ATTIC_DB), jti);
+	revocationMemo.set(jti, disabled);
+	return disabled;
+}
+
 async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedToken | null> {
 	const bearer = parseAuthToken(request.headers.get('Authorization'));
 	if (!bearer) return null;
@@ -81,7 +110,7 @@ async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedT
 	// only — the signature already verified).
 	if (token.jti) {
 		try {
-			if (await db.isTokenDisabled(env.ATTIC_DB, token.jti)) {
+			if (await isJtiDisabled(env, token.jti)) {
 				throw new Error('Token has been revoked');
 			}
 		} catch (e) {
@@ -114,9 +143,11 @@ async function authorizeCacheRead(
 	}
 	const hasDiscovery = Object.values(permission).some(Boolean);
 
-	// Replica read: a cache-config change (e.g. visibility flip) taking effect
-	// with sub-second replica lag is acceptable for read authorization.
-	const cache = await db.findCache(db.readSession(env.ATTIC_DB), cacheName);
+	// Replica read, memoized per isolate: a cache-config change (e.g. visibility
+	// flip) taking effect with replica lag — now bounded by the memo TTL rather
+	// than sub-second — is acceptable for read authorization, and collapses the
+	// per-path lookups of a mass-query burst to one row read per window.
+	const cache = await findCacheCached(env.ATTIC_DB, cacheName);
 	if (!cache) {
 		if (hasDiscovery) {
 			return { response: errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache') };
@@ -244,8 +275,8 @@ async function handleNar(
 	// Retention is download-driven (like the reference server): touch every
 	// object in this cache backed by the NAR, off the critical path. This must
 	// happen in the gateway — downloads served from the edge cache never reach
-	// the CachedStore entrypoint.
-	if (!head) {
+	// the CachedStore entrypoint. shouldTouch coalesces the writes per isolate.
+	if (!head && shouldTouch(cacheName, narHashRaw)) {
 		const touch = db.touchObjectsForNarHash(env.ATTIC_DB, cacheName, narHashRaw).catch(() => {});
 		ctx?.waitUntil(touch);
 	}
@@ -260,11 +291,7 @@ async function handleNar(
 	const response = await forwardToStore(new Request(shared, request), env, ctx);
 
 	if (response.status === 404) {
-		const upstreamUrl = await findUpstreamNar(
-			env.ATTIC_DB,
-			await upstreamsForCache(env.ATTIC_DB, auth.cache),
-			`nar/${filename}`
-		);
+		const upstreamUrl = await upstreamNarRedirect(env, ctx, auth.cache, filename);
 		if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
 		return response;
 	}
@@ -362,7 +389,7 @@ async function handleProxyNar(
 	// with no local winner, so the root needs the same upstream redirect as the
 	// per-cache route — against the union of live caches' upstreams.
 	const upstreamRedirect = async (): Promise<Response | null> => {
-		const url = await findUpstreamNar(session, await allLiveUpstreams(session), `nar/${filename}`);
+		const url = await upstreamNarRedirect(env, ctx, null, filename);
 		return url ? Response.redirect(url, 302) : null;
 	};
 	if (!winner) {
@@ -370,7 +397,7 @@ async function handleProxyNar(
 	}
 
 	// Download-driven retention, attributed to the winning cache (see handleNar).
-	if (!head) {
+	if (!head && shouldTouch(winner.name, narHashRaw)) {
 		const touch = db.touchObjectsForNarHash(env.ATTIC_DB, winner.name, narHashRaw).catch(() => {});
 		ctx?.waitUntil(touch);
 	}

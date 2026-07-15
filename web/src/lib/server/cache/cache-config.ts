@@ -2,6 +2,7 @@
 // plain functions are shared: the router's HTTP handlers wrap them, and the
 // admin UI calls them in-process (no more service-binding hop).
 
+import { invalidateCacheRow } from './cache-lookup';
 import { validateCompressionConfig } from './compression/config';
 import * as db from './db';
 import { purgeTagsBestEffort } from './gc';
@@ -72,6 +73,8 @@ export async function createCache(
 		compression,
 		retention_period: options.retention_period ?? null
 	});
+	// Evict any brief negative memo left by a serve that raced ahead of create.
+	invalidateCacheRow(name);
 
 	if (grantFullControlTo) {
 		const user = await env.ATTIC_DB.prepare('SELECT 1 AS x FROM user WHERE id = ?1')
@@ -171,6 +174,11 @@ export async function configureCache(
 		upstream_cache_key_names: options.upstream_cache_key_names,
 		keypair
 	});
+	// Serve paths memoize the row; drop it so this isolate re-reads promptly.
+	// Not instantaneous — a lookup already in flight can re-memoize the old
+	// row — but staleness stays bounded by the memo TTL, here and in other
+	// isolates alike.
+	invalidateCacheRow(name);
 
 	if (!keypair) return {};
 	// A rotated keypair re-signs every narinfo; evict the cache's cached
@@ -183,6 +191,7 @@ export async function configureCache(
 export async function destroyCache(env: Env, name: string, ctx?: ExecutionContext): Promise<void> {
 	const deleted = await db.softDeleteCache(env.ATTIC_DB, name);
 	if (!deleted) throw new CacheConfigError(404, `Cache not found: ${name}`);
+	invalidateCacheRow(name);
 	// Admin-table side effect (deliberate boundary exception, like the creator
 	// grant above): exact-name grants die with the cache, so re-creating the
 	// name never inherits the old access list.
@@ -206,6 +215,8 @@ export async function renameCache(env: Env, oldName: string, newName: string): P
 	if (outcome === 'conflict') {
 		throw new CacheConfigError(409, `A cache named "${newName}" already exists`);
 	}
+	invalidateCacheRow(oldName);
+	invalidateCacheRow(newName);
 	// Exact-name grants follow the cache (glob grants are untouched). Minted
 	// tokens are snapshots and do not follow — existing rule.
 	await env.ATTIC_DB.prepare('UPDATE permission_grant SET pattern = ?2 WHERE pattern = ?1')

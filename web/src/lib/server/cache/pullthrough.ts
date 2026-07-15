@@ -41,6 +41,7 @@ import {
 	handleBufferedUpload,
 	handleStreamingUpload,
 	MAX_BUFFERED_SIZE,
+	tryLockNarProbed,
 	type UploadNarInfo
 } from './upload';
 
@@ -140,7 +141,7 @@ export async function persistUpstreamPath(
 		// Unlike client pushes there is no possession to prove — the metadata
 		// was signature-verified against the upstream's key, and a fresh ingest
 		// below verifies the actual bytes against the signed NarHash.
-		const existingNar = await db.tryLockNar(d1, info.nar_hash);
+		const existingNar = await tryLockNarProbed(env, info.nar_hash);
 		if (existingNar) {
 			await finishDeduplicated(env, info, cache.id, existingNar.id);
 			await warmNarinfoAfterUpload(ctx, origin, cache, storePathHash);

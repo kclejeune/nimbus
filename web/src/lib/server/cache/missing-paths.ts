@@ -14,7 +14,9 @@
 // present if its narinfo carries a valid signature from that key.
 
 import { parseNarInfo, parsedNarInfoSignatureValid, type ParsedNarInfo } from '../attic/narinfo';
-import { dbBatch } from './db';
+import { dbBatch, readSession } from './db';
+import { type ExecutionContext } from './platform';
+import { TtlMemo } from './ttl-memo';
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
 
 type Env = App.Platform['env'];
@@ -203,6 +205,9 @@ async function cachedVerdictsAcrossUpstreams(
 	return verdicts;
 }
 
+/** Batched, awaited verdict writes — for batch and background paths
+ * (filterUpstreamPaths, pull-through ingestion). Serve paths record through
+ * the deferred, coalesced recordVerdictDeferred instead. */
 export async function recordVerdicts(
 	db: D1,
 	upstreamId: number,
@@ -228,6 +233,38 @@ export async function recordVerdicts(
 		);
 	}
 	if (stmts.length > 0) await dbBatch(db, stmts);
+}
+
+// Coalescing for the single-row verdict writes on the read paths below. Each
+// is an INSERT OR REPLACE — a primary write-txn — and used to be awaited
+// inline before the response, so a cold mass query (e.g. right after a
+// registry edit or keypair rotation purged the passthrough edge entries)
+// fired one blocking primary write per path per upstream: the same
+// write-storm family as the 2026-07-08 prefetch incident. The memo skips
+// re-recording an unchanged verdict within the window, and the write itself
+// rides waitUntil so the response never waits on the primary. Verdicts are a
+// probe cache, so a write lost to a cancelled invocation just means one
+// re-probe. filterUpstreamPaths keeps its own batched, awaited writes: one
+// batch per get-missing-paths call, off the serve path.
+const VERDICT_WRITE_COALESCE_MS = 60_000;
+const VERDICT_WRITE_MEMO_MAX_ENTRIES = 20_000;
+const recentVerdictWrites = new TtlMemo<Verdict>(
+	VERDICT_WRITE_COALESCE_MS,
+	VERDICT_WRITE_MEMO_MAX_ENTRIES
+);
+
+function recordVerdictDeferred(
+	db: D1,
+	ctx: ExecutionContext | undefined,
+	upstreamId: number,
+	hash: string,
+	verdict: Verdict
+): void {
+	const key = `${upstreamId}:${hash}`;
+	if (recentVerdictWrites.get(key) === verdict) return;
+	recentVerdictWrites.set(key, verdict);
+	const write = recordVerdicts(db, upstreamId, [{ hash, verdict }]).catch(() => {});
+	ctx?.waitUntil(write);
 }
 
 function headVerdict(res: Response): Verdict | null {
@@ -345,7 +382,8 @@ export async function filterUpstreamPaths(
 export async function fetchUpstreamNarInfo(
 	db: D1,
 	upstreams: Upstream[],
-	storePathHash: string
+	storePathHash: string,
+	ctx: ExecutionContext | undefined
 ): Promise<{ text: string; upstream: Upstream } | null> {
 	const cached = await cachedVerdictsAcrossUpstreams(db, upstreams, storePathHash);
 	for (const upstream of upstreams) {
@@ -356,29 +394,21 @@ export async function fetchUpstreamNarInfo(
 			const res = await fetch(`${upstream.url}/${storePathHash}.narinfo`);
 			if (res.status === 200) {
 				const text = await res.text();
-				// A mis-signed body is recorded absent (rechecked daily), so a
-				// GC'd-and-repushed or re-signed upstream entry recovers on its own.
+				// Recording on any change actively corrects verdicts probed without
+				// ingestibility knowledge (e.g. a redirect-mode HEAD before the
+				// upstream flipped to persist), and records mis-signed bodies absent
+				// (rechecked daily), so a re-signed upstream entry recovers on its
+				// own. The ABSENT case always differs from `verdict` — the loop
+				// skipped upstreams already known absent.
 				const fresh = await classifyNarinfo(upstream, text);
-				if (fresh === VERDICT_ABSENT) {
-					await recordVerdicts(db, upstream.id, [{ hash: storePathHash, verdict: fresh }]).catch(
-						() => {}
-					);
-					continue;
-				}
-				// Recording on any change (not just first sight) actively corrects
-				// verdicts probed without ingestibility knowledge (e.g. a
-				// redirect-mode HEAD before the upstream flipped to persist).
 				if (verdict !== fresh) {
-					await recordVerdicts(db, upstream.id, [{ hash: storePathHash, verdict: fresh }]).catch(
-						() => {}
-					);
+					recordVerdictDeferred(db, ctx, upstream.id, storePathHash, fresh);
 				}
+				if (fresh === VERDICT_ABSENT) continue;
 				return { text, upstream };
 			}
 			if (res.status === 404) {
-				await recordVerdicts(db, upstream.id, [
-					{ hash: storePathHash, verdict: VERDICT_ABSENT }
-				]).catch(() => {});
+				recordVerdictDeferred(db, ctx, upstream.id, storePathHash, VERDICT_ABSENT);
 			} else {
 				// Unexpected status (rate limit, block, outage): worth surfacing,
 				// since the caller silently treats it as a miss.
@@ -402,7 +432,8 @@ export async function fetchUpstreamNarInfo(
 export async function findUpstreamNar(
 	db: D1,
 	upstreams: Upstream[],
-	narPath: string
+	narPath: string,
+	ctx: ExecutionContext | undefined
 ): Promise<string | null> {
 	const key = `nar:${narPath}`;
 	const cached = await cachedVerdictsAcrossUpstreams(db, upstreams, key);
@@ -415,11 +446,53 @@ export async function findUpstreamNar(
 		// against the NarHash of the (signature-checked) narinfo that named them.
 		const probed = await probeUpstream(upstream, key);
 		if (probed !== null) {
-			await recordVerdicts(db, upstream.id, [{ hash: key, verdict: probed }]).catch(() => {});
+			recordVerdictDeferred(db, ctx, upstream.id, key, probed);
 		}
 		if (probed === VERDICT_PRESENT) return url;
 	}
 	return null;
+}
+
+// Per-isolate memo of upstream-NAR redirect resolution. The 302 for an
+// upstream-held NAR is minted in the gateway (whose cache is disabled), so a
+// fleet pulling the same closure re-resolves the same NAR once per client per
+// download — at least a verdict read each time. The memo collapses that to
+// one resolution per window. Hits and misses both memoize: a miss is already
+// sticky for a day at the D1 layer (absent verdicts), and a hit going stale
+// mid-window at worst redirects to a URL the client then 404s on and retries
+// elsewhere — the downloaded bytes are always verified against the narinfo's
+// NarHash regardless. Registry edits reach redirects within this TTL plus the
+// upstreamConfig memo's.
+const NAR_REDIRECT_TTL_MS = 5 * 60 * 1000;
+const NAR_REDIRECT_MEMO_MAX_ENTRIES = 20_000;
+const narRedirectMemo = new TtlMemo<string | null>(
+	NAR_REDIRECT_TTL_MS,
+	NAR_REDIRECT_MEMO_MAX_ENTRIES
+);
+
+/**
+ * Memoized upstream-NAR redirect URL for a cache — or, with a null cache, for
+ * the root proxy against the union of live caches' upstreams. Keyed per cache
+ * (upstream sets differ per cache); the root scope keys under `~`, which
+ * CACHE_NAME_RE keeps out of real cache names. Resolution reads a replica;
+ * verdict writes are deferred (recordVerdictDeferred).
+ */
+export async function upstreamNarRedirect(
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	cache: { id: number; name: string } | null,
+	filename: string
+): Promise<string | null> {
+	const key = `${cache ? cache.name : '~'}:${filename}`;
+	const cached = narRedirectMemo.get(key);
+	if (cached !== undefined) return cached;
+	const session = readSession(env.ATTIC_DB);
+	const upstreams = cache
+		? await upstreamsForCache(session, cache)
+		: await allLiveUpstreams(session);
+	const url = await findUpstreamNar(session, upstreams, `nar/${filename}`, ctx);
+	narRedirectMemo.set(key, url);
+	return url;
 }
 
 // --- registry resolution -----------------------------------------------------

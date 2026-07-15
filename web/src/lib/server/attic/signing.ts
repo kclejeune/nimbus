@@ -37,23 +37,40 @@ export function extractPublicKey(keypair: string): string {
 	return `${name}:${encodeBase64(bytes.slice(32))}`;
 }
 
+/**
+ * Per-isolate CryptoKey import memo, keyed by the key-material string (used
+ * for the signing/verify keys here and the JWT keys in token.ts). The PROMISE
+ * is memoized so concurrent first uses share one in-flight import, and a
+ * failed import evicts itself so a transient error is neither cached for the
+ * isolate's lifetime nor surfaced as an unhandled rejection.
+ */
+export function cachedKeyImport(
+	cache: Map<string, Promise<CryptoKey>>,
+	material: string,
+	doImport: (material: string) => Promise<CryptoKey>
+): Promise<CryptoKey> {
+	let key = cache.get(material);
+	if (!key) {
+		key = doImport(material);
+		cache.set(material, key);
+		key.catch(() => cache.delete(material));
+	}
+	return key;
+}
+
 // Imported signing keys per keypair string, so a narinfo miss doesn't re-run
 // base64 + PKCS#8 assembly + importKey. Isolate-lifetime; rotation stores a
 // new keypair string, which simply misses this cache.
 const signingKeys = new Map<string, Promise<CryptoKey>>();
 
 function importSigningKey(keypair: string): Promise<CryptoKey> {
-	let key = signingKeys.get(keypair);
-	if (!key) {
-		const { bytes } = decodeKeypair(keypair);
+	return cachedKeyImport(signingKeys, keypair, async (kp) => {
+		const { bytes } = decodeKeypair(kp);
 		const pkcs8 = new Uint8Array(PKCS8_ED25519_PREFIX.length + 32);
 		pkcs8.set(PKCS8_ED25519_PREFIX);
 		pkcs8.set(bytes.slice(0, 32), PKCS8_ED25519_PREFIX.length);
-		key = crypto.subtle.importKey('pkcs8', pkcs8 as BufferSource, 'Ed25519', false, ['sign']);
-		signingKeys.set(keypair, key);
-		key.catch(() => signingKeys.delete(keypair));
-	}
-	return key;
+		return crypto.subtle.importKey('pkcs8', pkcs8 as BufferSource, 'Ed25519', false, ['sign']);
+	});
 }
 
 /** Sign a message with a Nix-format keypair, returning `{name}:{base64 sig}`. */
@@ -83,14 +100,11 @@ function decodePublicKey(publicKey: string): Uint8Array {
 const verifyKeys = new Map<string, Promise<CryptoKey>>();
 
 function importVerifyKey(publicKey: string): Promise<CryptoKey> {
-	let key = verifyKeys.get(publicKey);
-	if (!key) {
-		const bytes = decodePublicKey(publicKey);
-		key = crypto.subtle.importKey('raw', bytes as BufferSource, 'Ed25519', false, ['verify']);
-		verifyKeys.set(publicKey, key);
-		key.catch(() => verifyKeys.delete(publicKey));
-	}
-	return key;
+	return cachedKeyImport(verifyKeys, publicKey, async (pk) =>
+		crypto.subtle.importKey('raw', decodePublicKey(pk) as BufferSource, 'Ed25519', false, [
+			'verify'
+		])
+	);
 }
 
 /** Whether `{name}:{base64 pub}` parses as a Nix public key. */

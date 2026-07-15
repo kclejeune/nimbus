@@ -132,7 +132,11 @@ CREATE TABLE IF NOT EXISTS nar (
     created_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_nar_hash ON nar(nar_hash);
+-- Composite (nar_hash, state): hot NAR-by-hash lookups also filter state='V',
+-- so this keeps the seek plan-independent of ANALYZE statistics and covers
+-- nar_hash-prefix lookups (replaces a plain idx_nar_hash). See the
+-- 2026-07-14-nar-hash-state-index migration.
+CREATE INDEX IF NOT EXISTS idx_nar_hash_state ON nar(nar_hash, state);
 CREATE INDEX IF NOT EXISTS idx_nar_state ON nar(state);
 
 -- Object table (cache-specific view of a NAR)

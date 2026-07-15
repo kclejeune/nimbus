@@ -629,6 +629,23 @@ export async function findExistingChunkHashes(
 	return existing;
 }
 
+// Row shape shared by findValidNar's SELECT and tryLockNar's RETURNING — the
+// probe/lock pair must agree on it (same idea as CHUNK_JOIN_COLUMNS above).
+const NAR_ROW_COLUMNS = 'id, state, nar_hash, nar_size, compression, num_chunks';
+
+/** Valid NAR row by hash, without taking a hold — the replica-side existence
+ * probe for tryLockNarProbed (upload.ts), which owns the probe-then-lock
+ * rationale. */
+export async function findValidNar(db: D1Database, narHash: string): Promise<NarRow | null> {
+	return dbFirst<NarRow>(
+		db
+			.prepare(
+				`SELECT ${NAR_ROW_COLUMNS} FROM nar WHERE nar_hash = ?1 AND state = 'V' ORDER BY id LIMIT 1`
+			)
+			.bind(narHash)
+	);
+}
+
 /**
  * Dedup hold: atomically bump holders_count on the valid NAR row, returning
  * it, or null when none exists. The orphan reaper skips held rows, so a NAR
@@ -640,7 +657,7 @@ export async function tryLockNar(db: D1Database, narHash: string): Promise<NarRo
 		.prepare(
 			'UPDATE nar SET holders_count = holders_count + 1, held_at = ?2 ' +
 				"WHERE id = (SELECT id FROM nar WHERE nar_hash = ?1 AND state = 'V' ORDER BY id LIMIT 1) " +
-				'RETURNING id, state, nar_hash, nar_size, compression, num_chunks'
+				`RETURNING ${NAR_ROW_COLUMNS}`
 		)
 		.bind(narHash, nowRfc3339());
 	const row = await dbFirst<NarRow>(stmt);

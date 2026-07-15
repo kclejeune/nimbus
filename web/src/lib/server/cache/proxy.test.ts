@@ -4,7 +4,8 @@ import {
 	isKnownAbsent,
 	pickReadableWinner,
 	proxyKeyName,
-	recordAbsent
+	recordAbsent,
+	shouldTouch
 } from './proxy';
 import type { VerifiedToken, Permission } from '../attic/token';
 import { NO_PERMISSION } from '../attic/token';
@@ -62,6 +63,38 @@ describe('absent-path memo', () => {
 		recordAbsent('h1');
 		clearAbsent('h1');
 		expect(isKnownAbsent('h1')).toBe(false);
+	});
+});
+
+describe('download-touch coalescing', () => {
+	// Fresh NAR key per test so the per-isolate memo never carries across cases
+	// (Date.now() is frozen under fake timers, so it can't provide uniqueness).
+	let seq = 0;
+	const freshNar = () => `nar-${seq++}`;
+	afterEach(() => vi.useRealTimers());
+
+	it('touches once per window, then again after it elapses', () => {
+		vi.useFakeTimers();
+		const nar = freshNar();
+		expect(shouldTouch('cache-a', nar)).toBe(true);
+		// Repeats within the window are suppressed.
+		expect(shouldTouch('cache-a', nar)).toBe(false);
+		expect(shouldTouch('cache-a', nar)).toBe(false);
+		// The window is 5 minutes; just under it still suppresses.
+		vi.advanceTimersByTime(4 * 60_000);
+		expect(shouldTouch('cache-a', nar)).toBe(false);
+		// Past the window it touches again.
+		vi.advanceTimersByTime(61_000);
+		expect(shouldTouch('cache-a', nar)).toBe(true);
+	});
+
+	it('keys per cache so the same NAR touches each cache independently', () => {
+		vi.useFakeTimers();
+		const nar = freshNar();
+		expect(shouldTouch('cache-x', nar)).toBe(true);
+		// Different cache, same NAR hash: not suppressed by cache-x's entry.
+		expect(shouldTouch('cache-y', nar)).toBe(true);
+		expect(shouldTouch('cache-x', nar)).toBe(false);
 	});
 });
 

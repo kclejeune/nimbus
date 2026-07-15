@@ -3,6 +3,7 @@
 // `{ caches: { "<name-or-pattern>": { r/w/d/cc/cr/cq/cd: 1 } } }`.
 
 import { NIMBUS_CLAIM_NAMESPACE } from '$lib/server/attic-token';
+import { cachedKeyImport } from './signing';
 
 const CLAIM_NAMESPACE = 'https://jwt.attic.rs/v1';
 const CLOCK_LEEWAY_SECONDS = 60;
@@ -81,6 +82,29 @@ async function importRs256Key(pubkeyBase64: string): Promise<CryptoKey> {
 	);
 }
 
+// Per-isolate verify-key memos (cachedKeyImport, signing.ts): the base64/DER
+// parse + importKey otherwise runs on every authenticated request as pure
+// repeated CPU. The material comes from env config, so each map holds one
+// live entry in practice.
+const hs256Keys = new Map<string, Promise<CryptoKey>>();
+const rs256Keys = new Map<string, Promise<CryptoKey>>();
+
+function importHs256KeyCached(secretBase64: string): Promise<CryptoKey> {
+	return cachedKeyImport(hs256Keys, secretBase64, async (b64) =>
+		crypto.subtle.importKey(
+			'raw',
+			Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)) as BufferSource,
+			{ name: 'HMAC', hash: 'SHA-256' },
+			false,
+			['verify']
+		)
+	);
+}
+
+function importRs256KeyCached(pubkeyBase64: string): Promise<CryptoKey> {
+	return cachedKeyImport(rs256Keys, pubkeyBase64, importRs256Key);
+}
+
 /**
  * Verify an attic JWT (HS256 or RS256) and extract its cache permissions.
  * Throws on any validation failure (signature, exp/nbf, bound issuer/audience).
@@ -100,14 +124,7 @@ export async function verifyAtticToken(
 
 	let valid: boolean;
 	if (header.alg === 'HS256' && keys.hs256SecretBase64) {
-		const secret = Uint8Array.from(atob(keys.hs256SecretBase64), (c) => c.charCodeAt(0));
-		const key = await crypto.subtle.importKey(
-			'raw',
-			secret as BufferSource,
-			{ name: 'HMAC', hash: 'SHA-256' },
-			false,
-			['verify']
-		);
+		const key = await importHs256KeyCached(keys.hs256SecretBase64);
 		valid = await crypto.subtle.verify(
 			'HMAC',
 			key,
@@ -115,7 +132,7 @@ export async function verifyAtticToken(
 			signedData as BufferSource
 		);
 	} else if (header.alg === 'RS256' && keys.rs256PubkeyBase64) {
-		const key = await importRs256Key(keys.rs256PubkeyBase64);
+		const key = await importRs256KeyCached(keys.rs256PubkeyBase64);
 		valid = await crypto.subtle.verify(
 			'RSASSA-PKCS1-v1_5',
 			key,

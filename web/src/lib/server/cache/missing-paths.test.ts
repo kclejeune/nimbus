@@ -3,6 +3,7 @@ import {
 	allLiveUpstreams,
 	clearUpstreamsMemo,
 	effectiveUpstreamMode,
+	findUpstreamNar,
 	PERSIST_MAX_NAR_BYTES,
 	probeUpstream,
 	upstreamsForCache,
@@ -25,6 +26,12 @@ function upstream(partial: Partial<Upstream> & { url: string }): Upstream {
 		nixDefault: false,
 		...partial
 	};
+}
+
+function stubFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
+	const spy = vi.fn(handler);
+	vi.stubGlobal('fetch', spy);
+	return spy;
 }
 
 describe('effectiveUpstreamMode', () => {
@@ -58,12 +65,6 @@ describe('probeUpstream', () => {
 	afterEach(() => vi.unstubAllGlobals());
 
 	const keyless = upstream({ url: 'https://up.example' });
-
-	function stubFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
-		const spy = vi.fn(handler);
-		vi.stubGlobal('fetch', spy);
-		return spy;
-	}
 
 	it('HEADs the narinfo when no key is configured', async () => {
 		const spy = stubFetch(() => new Response(null, { status: 200 }));
@@ -131,6 +132,74 @@ describe('probeUpstream', () => {
 			publicKey: extractPublicKey(otherKeypair)
 		});
 		expect(await probeUpstream(wrongKey, 'a'.repeat(32))).toBe(VERDICT_ABSENT);
+	});
+});
+
+describe('findUpstreamNar verdict writes', () => {
+	afterEach(() => vi.unstubAllGlobals());
+
+	// The write-coalescing memo is module-level and outlives each test, so every
+	// test probes fresh NAR paths instead of resetting shared state.
+	let seq = 0;
+	const freshPath = () => `nar/${(seq++).toString(36).padStart(8, '0')}.nar.xz`;
+
+	/** A db whose reads return nothing and whose batches (verdict writes) are
+	 * captured for assertions. */
+	function verdictDb() {
+		const batches: unknown[][] = [];
+		const db = {
+			prepare: (sql: string) => ({
+				bind: (...params: unknown[]) => ({
+					sql,
+					params,
+					all: async () => ({ results: [] })
+				})
+			}),
+			batch: async (stmts: unknown[]) => {
+				batches.push(stmts);
+				return stmts.map(() => ({ results: [] }));
+			}
+		} as never;
+		return { db, batches };
+	}
+
+	function collectingCtx() {
+		const tasks: Promise<unknown>[] = [];
+		return { tasks, ctx: { waitUntil: (p: Promise<unknown>) => void tasks.push(p) } as never };
+	}
+
+	it('records a probed verdict via waitUntil and coalesces repeats', async () => {
+		const { db, batches } = verdictDb();
+		const { tasks, ctx } = collectingCtx();
+		stubFetch(() => new Response(null, { status: 200 }));
+
+		const path = freshPath();
+		const up = [upstream({ url: 'https://up.example' })];
+		expect(await findUpstreamNar(db, up, path, ctx)).toBe(`https://up.example/${path}`);
+		// The write rides waitUntil, not the response path.
+		expect(tasks).toHaveLength(1);
+		await Promise.all(tasks);
+		expect(batches).toHaveLength(1);
+
+		// Same verdict inside the coalescing window: probed again (the fake db
+		// remembers nothing) but not re-written.
+		expect(await findUpstreamNar(db, up, path, ctx)).toBe(`https://up.example/${path}`);
+		await Promise.all(tasks);
+		expect(batches).toHaveLength(1);
+	});
+
+	it('re-records when the verdict changes despite the coalescing window', async () => {
+		const { db, batches } = verdictDb();
+		const { tasks, ctx } = collectingCtx();
+		const path = freshPath();
+		const up = [upstream({ url: 'https://up.example' })];
+
+		stubFetch(() => new Response(null, { status: 200 }));
+		expect(await findUpstreamNar(db, up, path, ctx)).toBe(`https://up.example/${path}`);
+		stubFetch(() => new Response(null, { status: 404 }));
+		expect(await findUpstreamNar(db, up, path, ctx)).toBe(null);
+		await Promise.all(tasks);
+		expect(batches).toHaveLength(2);
 	});
 });
 

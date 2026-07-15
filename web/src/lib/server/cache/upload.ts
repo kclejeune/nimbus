@@ -26,6 +26,7 @@ import {
 	zstdDecompress,
 	type CompressionKind
 } from './compression';
+import { findCacheCached } from './cache-lookup';
 import * as db from './db';
 import { bytesToHex } from '../attic/nix-base32';
 import { newDigestStream, readAll, type ExecutionContext } from './platform';
@@ -129,6 +130,24 @@ async function verifyPossession(
 	return null;
 }
 
+/**
+ * Whole-NAR dedup hold with a replica probe first — the canonical
+ * probe-before-lock rationale, shared by the chunk probe in processNarChunk
+ * and pull-through ingestion: the hold is an UPDATE, so taking it directly
+ * costs a primary write-txn even when no valid row exists, which is the
+ * common case for new content. Only a probe hit takes the (authoritative)
+ * lock. A stale replica miss just means redundant fresh-path work that the
+ * content-addressed design already converges (here a duplicate nar row,
+ * which concurrent pushes of the same NAR could always produce and the
+ * orphan reaper tolerates; a row young enough to be missing from a replica
+ * is inside the reaper's grace period). A probe hit whose row vanished
+ * before the lock (GC race) comes back null and falls through to fresh.
+ */
+export async function tryLockNarProbed(env: Env, narHash: string): Promise<db.NarRow | null> {
+	const probed = await db.findValidNar(db.readSession(env.ATTIC_DB), narHash);
+	return probed ? db.tryLockNar(env.ATTIC_DB, narHash) : null;
+}
+
 /** Create an object row pointing at an existing NAR (dedup hit). Also used
  * by pull-through ingestion (pullthrough.ts). */
 export async function finishDeduplicated(
@@ -186,7 +205,11 @@ async function processNarChunk(
 ): Promise<NarChunkRecord> {
 	const hash = toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource));
 
-	const existing = await db.tryLockChunk(env.ATTIC_DB, `sha256:${hash}`, kind);
+	// Same probe-before-lock as tryLockNarProbed (which owns the rationale);
+	// a stale replica miss re-stores content-addressed bytes that the
+	// (chunk_hash, compression) unique index converges.
+	const probed = await db.findChunk(db.readSession(env.ATTIC_DB), `sha256:${hash}`, kind);
+	const existing = probed ? await db.tryLockChunk(env.ATTIC_DB, `sha256:${hash}`, kind) : null;
 	if (existing) {
 		return {
 			chunkId: existing.id,
@@ -437,13 +460,16 @@ export async function handleUploadPath(
 	info.source = 'push';
 	info.created_by = tokenSub;
 
-	const cache = await db.findCache(env.ATTIC_DB, info.cache);
+	// Memoized replica read, like the serve path: push bursts otherwise re-read
+	// the row from the primary once per pushed path, and staleness only delays
+	// a create-then-push or affects tolerant fields (compression choice).
+	const cache = await findCacheCached(env.ATTIC_DB, info.cache);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
 
 	let response: Response;
 	// Dedup: an existing valid NAR with this hash just gains another object —
 	// after the client proves possession by streaming the claimed bytes.
-	const existing = await db.tryLockNar(env.ATTIC_DB, info.nar_hash);
+	const existing = await tryLockNarProbed(env, info.nar_hash);
 	if (existing) {
 		const denied = await verifyPossession(narBody, info.nar_hash);
 		if (denied) {
@@ -676,18 +702,20 @@ export async function handleCdcQuery(
 	const denied = validateManifest(body);
 	if (denied) return denied;
 	const info = body.nar_info;
-	const cache = await db.findCache(env.ATTIC_DB, info.cache);
+	const cache = await findCacheCached(env.ATTIC_DB, info.cache);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
 
-	const existing = await db.tryLockNar(env.ATTIC_DB, info.nar_hash);
+	const existing = await tryLockNarProbed(env, info.nar_hash);
 	if (existing) {
 		const response = await finishDeduplicated(env, info, cache.id, existing.id);
 		ctx?.waitUntil(warmNarinfoAfterUpload(ctx, origin, cache, info.store_path_hash));
 		return response;
 	}
 
+	// Replica read: a stale miss only makes the client upload a chunk the
+	// server already has, and the chunk PUT dedups that on arrival.
 	const unique = [...new Set(body.chunks.map((c) => `sha256:${c.hash}`))];
-	const present = await db.findExistingChunkHashes(env.ATTIC_DB, unique, 'zstd');
+	const present = await db.findExistingChunkHashes(db.readSession(env.ATTIC_DB), unique, 'zstd');
 	const missing = unique.filter((h) => !present.has(h)).map((h) => h.slice('sha256:'.length));
 	return json({ kind: 'pending', missing_chunk_hashes: missing });
 }
@@ -722,9 +750,11 @@ export async function handleCdcChunkPut(
 		return errorResponse(400, `Chunk hash mismatch: expected ${hash}, got ${actual}`);
 	}
 
-	if (await db.findChunk(env.ATTIC_DB, `sha256:${hash}`, 'zstd')) {
+	if (await db.findChunk(db.readSession(env.ATTIC_DB), `sha256:${hash}`, 'zstd')) {
 		// Already stored (raced or the client re-sent); nothing to do. If GC
-		// reaps it before the complete call, the 409 retry re-uploads it.
+		// reaps it before the complete call, the 409 retry re-uploads it. A
+		// stale replica miss just re-stores the same content-addressed bytes,
+		// and the insert below converges on the winning row.
 		return json({ ok: true, deduplicated: true });
 	}
 
@@ -761,12 +791,12 @@ export async function handleCdcComplete(
 	const denied = validateManifest(body);
 	if (denied) return denied;
 	const info = body.nar_info;
-	const cache = await db.findCache(env.ATTIC_DB, info.cache);
+	const cache = await findCacheCached(env.ATTIC_DB, info.cache);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
 	const warm = () =>
 		ctx?.waitUntil(warmNarinfoAfterUpload(ctx, origin, cache, info.store_path_hash));
 
-	const existingNar = await db.tryLockNar(env.ATTIC_DB, info.nar_hash);
+	const existingNar = await tryLockNarProbed(env, info.nar_hash);
 	if (existingNar) {
 		const response = await finishDeduplicated(env, info, cache.id, existingNar.id);
 		warm();
@@ -774,7 +804,9 @@ export async function handleCdcComplete(
 	}
 
 	// Lock chunks in one batch round-trip (deduplicating repeats within the
-	// NAR: one lock per unique row).
+	// NAR: one lock per unique row). No replica probe here, unlike
+	// tryLockNarProbed: the client only uploaded the chunks reported missing,
+	// so a lock hit is the common case and the probe would be pure overhead.
 	const uniqueHashes = [...new Set(body.chunks.map((c) => c.hash))];
 	const lockedRows = await db.tryLockChunks(
 		env.ATTIC_DB,
