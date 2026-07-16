@@ -115,6 +115,10 @@ underneath for one that fits inside a Worker's constraints.
 <table>
   <tr>
     <td><img src="docs/screenshots/cache-detail.png" alt="Cache detail: trust configuration, unified endpoint, and store path browser"></td>
+    <td><img src="docs/screenshots/path-detail.png" alt="Store path detail: NAR and chunk breakdown, pin state, references, and referrers"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/paths.png" alt="Paths explorer: browse store paths across every readable cache"></td>
     <td><img src="docs/screenshots/monitoring.png" alt="Monitoring: storage growth and push activity over time"></td>
   </tr>
   <tr>
