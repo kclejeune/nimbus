@@ -42,7 +42,7 @@ const toStorePath = (p: PathRow): StorePath => ({
 });
 
 /** Escape LIKE wildcards so a search term is matched literally. */
-function likeTerm(q: string): string {
+export function likeTerm(q: string): string {
 	return `%${q.replace(/[%_\\]/g, (m) => '\\' + m)}%`;
 }
 

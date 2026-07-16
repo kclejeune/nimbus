@@ -3,7 +3,8 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { goto } from '$app/navigation';
 	import { page as pageState } from '$app/state';
-	import { PAGE_SIZES, fitPageSize } from './page-size';
+	import { PAGE_SIZES } from '$lib/pagination';
+	import { fitPageSize } from './page-size';
 
 	let { data } = $props();
 

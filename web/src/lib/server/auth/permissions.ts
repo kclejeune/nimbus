@@ -75,6 +75,20 @@ export function canSeeCache(access: EffectiveAccess, cacheName: string): boolean
 	return false;
 }
 
+/**
+ * Read-surface browsing (the /paths explorer and the store-path detail
+ * pages): public caches are browsable by any active user — mirroring the
+ * protocol, where anonymous pulls are allowed — plus everything canSeeCache
+ * grants. Deliberately a separate rule: the cache *management* table stays
+ * grant-only.
+ */
+export function canBrowseCache(
+	access: EffectiveAccess,
+	cache: { name: string; isPublic: boolean }
+): boolean {
+	return cache.isPublic || canSeeCache(access, cache.name);
+}
+
 export interface RequestedScope {
 	pattern: string;
 	bits: CachePermission;

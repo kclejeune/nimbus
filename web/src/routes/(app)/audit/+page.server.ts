@@ -2,7 +2,7 @@ import { error } from '@sveltejs/kit';
 import { requireAdmin } from '$lib/server/auth/guard';
 import type { PageServerLoad } from './$types';
 
-import { parseLimit } from './page-size';
+import { parseLimit, parsePage } from '$lib/pagination';
 
 interface AuditRow {
 	id: string;
@@ -19,7 +19,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
-	const page = Math.max(1, Math.floor(Number(url.searchParams.get('page'))) || 1);
+	const page = parsePage(url.searchParams.get('page'));
 	const limit = parseLimit(url.searchParams.get('limit'));
 
 	// One row past the page detects "next" without a second scan per request;

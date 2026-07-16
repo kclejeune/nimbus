@@ -1,6 +1,6 @@
 import { error } from '@sveltejs/kit';
 import { readSession, STORE_PATH_HASH_RE, findCache } from '$lib/server/cache/db';
-import { canSeeCache } from '$lib/server/auth/permissions';
+import { canBrowseCache } from '$lib/server/auth/permissions';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
 import type { PageServerLoad } from './$types';
 
@@ -81,7 +81,9 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	]);
 
 	if (!cache) throw error(404, `Cache "${params.name}" not found`);
-	if (!canSeeCache(access, params.name)) {
+	// Same browse rule as the /paths explorer: public caches are viewable by
+	// any active user; private ones need a grant.
+	if (!canBrowseCache(access, { name: cache.name, isPublic: cache.is_public === 1 })) {
 		throw error(403, 'Permission denied');
 	}
 

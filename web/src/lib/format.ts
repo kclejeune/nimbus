@@ -27,6 +27,16 @@ export function formatIsoDateTime(iso: string | null | undefined): string {
 	return iso ? iso.slice(0, 16).replace('T', ' ') : '—';
 }
 
+/** "YYYY-MM-DD" (UTC) from an ISO string; em dash when absent. */
+export function formatIsoDate(iso: string | null | undefined): string {
+	return iso ? iso.slice(0, 10) : '—';
+}
+
+/** /nix/store/ prefix trimmed, keeping <hash>-<name>. */
+export function shortStorePath(path: string): string {
+	return path.replace(/^\/nix\/store\//, '');
+}
+
 /** Coarse relative time ("3h ago") from an ISO timestamp; '' when unparsable. */
 export function formatRelativeTime(iso: string): string {
 	const ms = Date.now() - Date.parse(iso);

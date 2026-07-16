@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { formatBytes, formatCount, formatIsoDateTime } from '$lib/format';
+	import { formatBytes, formatCount, formatIsoDateTime, shortStorePath } from '$lib/format';
+	import StorePathTable from '$lib/components/store-path-table.svelte';
 	import CopyField from '$lib/components/copy-field.svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { ArrowLeft, Pin } from '@lucide/svelte';
@@ -13,11 +14,6 @@
 		const base = path.replace(/^\/nix\/store\//, '');
 		const dash = base.indexOf('-');
 		return dash >= 0 ? base.slice(dash + 1) : base;
-	}
-
-	/** /nix/store/<hash>- prefix trimmed, keeping <hash>-<name>. */
-	function shortHash(path: string): string {
-		return path.replace(/^\/nix\/store\//, '');
 	}
 
 	// RFC3339 timestamp → "YYYY-MM-DD HH:MM" (UTC), matching the app's style.
@@ -201,35 +197,10 @@
 		{/if}
 	</section>
 
-	{#snippet pathTableHead()}
-		<thead class="border-b bg-muted text-left text-xs text-muted-foreground">
-			<tr>
-				<th class="px-4 py-2.5 font-medium">Store path</th>
-				<th class="w-32 px-4 py-2.5 font-medium">Added</th>
-				<th class="w-28 px-4 py-2.5 text-right font-medium">NAR size</th>
-			</tr>
-		</thead>
-	{/snippet}
-
-	{#snippet pathRow(row: { hash: string; storePath: string; createdAt: string; narSize: number })}
-		<tr class="transition-colors hover:bg-muted/30">
-			<td class="px-4 py-2.5 font-mono text-xs break-all">
-				<a href="{cacheHref}/paths/{row.hash}" class="hover:text-primary hover:underline">
-					{shortHash(row.storePath)}
-				</a>
-			</td>
-			<td class="px-4 py-2.5 font-mono text-xs text-muted-foreground">
-				{row.createdAt ? row.createdAt.slice(0, 10) : '—'}
-			</td>
-			<td class="px-4 py-2.5 text-right font-mono">{formatBytes(row.narSize)}</td>
-		</tr>
-	{/snippet}
-
 	<section class="mb-8">
 		<h2 class="mb-1 text-sm font-medium">
 			References
-			<span class="font-normal text-muted-foreground">({formatCount(data.references.length)})</span
-			>
+			<span class="font-normal text-muted-foreground">({formatCount(data.references.length)})</span>
 		</h2>
 		<p class="mb-3 text-xs text-muted-foreground">Paths this store path depends on.</p>
 		{#if data.references.length === 0}
@@ -237,32 +208,15 @@
 				<p class="text-sm text-muted-foreground">No references.</p>
 			</div>
 		{:else}
-			<div class="overflow-x-auto rounded-lg border">
-				<table class="w-full text-sm">
-					{@render pathTableHead()}
-					<tbody class="divide-y">
-						{#each data.references as ref (ref.hash)}
-							{#if ref.storePath && ref.createdAt != null && ref.narSize != null}
-								{@render pathRow({
-									hash: ref.hash,
-									storePath: ref.storePath,
-									createdAt: ref.createdAt,
-									narSize: ref.narSize
-								})}
-							{:else}
-								<tr class="transition-colors hover:bg-muted/30">
-									<td class="px-4 py-2.5 font-mono text-xs break-all text-muted-foreground">
-										{ref.hash}
-										<span class="ml-1 font-sans">not in this cache</span>
-									</td>
-									<td class="px-4 py-2.5 font-mono text-xs text-muted-foreground">—</td>
-									<td class="px-4 py-2.5 text-right font-mono text-muted-foreground">—</td>
-								</tr>
-							{/if}
-						{/each}
-					</tbody>
-				</table>
-			</div>
+			<StorePathTable
+				rows={data.references.map((ref) => ({
+					href: ref.storePath ? `${cacheHref}/paths/${ref.hash}` : null,
+					storePath: ref.storePath,
+					hash: ref.hash,
+					createdAt: ref.createdAt,
+					narSize: ref.narSize
+				}))}
+			/>
 		{/if}
 	</section>
 
@@ -279,16 +233,15 @@
 				<p class="text-sm text-muted-foreground">No referrers.</p>
 			</div>
 		{:else}
-			<div class="overflow-x-auto rounded-lg border">
-				<table class="w-full text-sm">
-					{@render pathTableHead()}
-					<tbody class="divide-y">
-						{#each data.referrers.rows as referrer (referrer.hash)}
-							{@render pathRow(referrer)}
-						{/each}
-					</tbody>
-				</table>
-			</div>
+			<StorePathTable
+				rows={data.referrers.rows.map((referrer) => ({
+					href: `${cacheHref}/paths/${referrer.hash}`,
+					storePath: referrer.storePath,
+					hash: referrer.hash,
+					createdAt: referrer.createdAt,
+					narSize: referrer.narSize
+				}))}
+			/>
 			{#if data.referrers.total > data.referrers.rows.length}
 				<p class="mt-2 text-xs text-muted-foreground">
 					and {formatCount(data.referrers.total - data.referrers.rows.length)} more…

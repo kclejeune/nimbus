@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { formatBytes, formatCount } from '$lib/format';
+	import { formatCount } from '$lib/format';
+	import StorePathTable from '$lib/components/store-path-table.svelte';
 	import { goto } from '$app/navigation';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Select from '$lib/components/ui/select/index.js';
@@ -14,14 +15,6 @@
 	// '/' can never appear in a cache name so this cannot collide.
 	const ALL = '//all';
 	const selectedCache = $derived(data.cacheFilter ?? ALL);
-
-	function shortHash(path: string): string {
-		// Trim the /nix/store/<hash>- prefix for readability; keep the human name.
-		return path.replace(/^\/nix\/store\//, '');
-	}
-
-	// RFC3339 timestamp → YYYY-MM-DD.
-	const fmtDate = (s: string) => (s ? s.slice(0, 10) : '');
 
 	/** Query string for the current filters; page omitted when 1. */
 	function href(next: { cache?: string | null; q?: string; page?: number }): string {
@@ -98,47 +91,23 @@
 			</p>
 		</div>
 	{:else}
-		<div class="overflow-x-auto rounded-lg border">
-			<table class="w-full text-sm">
-				<thead class="border-b bg-muted text-left text-xs text-muted-foreground">
-					<tr>
-						<th class="px-4 py-2.5 font-medium">Store path</th>
-						<th class="w-28 px-4 py-2.5 font-medium">Cache</th>
-						<th class="w-32 px-4 py-2.5 font-medium">Added</th>
-						<th class="w-28 px-4 py-2.5 text-right font-medium">NAR size</th>
-					</tr>
-				</thead>
-				<tbody class="divide-y">
-					{#each data.paths as p (`${p.cache}/${p.hash}`)}
-						<tr class="transition-colors hover:bg-muted/30">
-							<td class="px-4 py-2.5 font-mono text-xs">
-								<a
-									href="/caches/{encodeURIComponent(p.cache)}/paths/{p.hash}"
-									class="hover:text-primary hover:underline"
-								>
-									{shortHash(p.storePath)}
-								</a>
-							</td>
-							<td class="px-4 py-2.5 font-mono text-xs">
-								<a href="/caches/{encodeURIComponent(p.cache)}" class="hover:underline">
-									{p.cache}
-								</a>
-							</td>
-							<td class="px-4 py-2.5 font-mono text-xs text-muted-foreground">
-								{fmtDate(p.createdAt)}
-							</td>
-							<td class="px-4 py-2.5 text-right font-mono">{formatBytes(p.narSize)}</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
-
-			{#if data.paths.length === 0}
-				<p class="py-12 text-center text-sm text-muted-foreground">
-					No paths match “{data.q}”.
-				</p>
-			{/if}
-		</div>
+		{#if data.paths.length === 0}
+			<div class="rounded-lg border py-12 text-center">
+				<p class="text-sm text-muted-foreground">No paths match “{data.q}”.</p>
+			</div>
+		{:else}
+			<StorePathTable
+				showCache
+				rows={data.paths.map((p) => ({
+					href: `/caches/${encodeURIComponent(p.cache)}/paths/${p.hash}`,
+					storePath: p.storePath,
+					hash: p.hash,
+					createdAt: p.createdAt,
+					narSize: p.narSize,
+					cache: { name: p.cache, href: `/caches/${encodeURIComponent(p.cache)}` }
+				}))}
+			/>
+		{/if}
 
 		<div class="mt-3 flex items-center justify-between gap-3">
 			<p class="text-xs text-muted-foreground">
