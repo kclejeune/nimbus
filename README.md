@@ -93,7 +93,8 @@ underneath for one that fits inside a Worker's constraints.
   revision history (`--keep-revisions` / `--keep-days`).
 - **Admin UI** — cache management with per-cache access lists and size-budget
   meters, store-path browsing/search with per-path detail (references,
-  referrers, NAR/chunk breakdown), pin/prune, scoped token issuance with
+  referrers, NAR/chunk breakdown) plus a cross-cache path explorer over
+  everything the viewer can read, pin/prune, scoped token issuance with
   revocation, users/groups/grants, user activation, upstream registry
   management, ingest monitoring (plus read-traffic hit/miss stats via
   Analytics Engine when configured), GC run reports with closure-integrity

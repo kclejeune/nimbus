@@ -5,6 +5,7 @@ import {
 	Boxes,
 	ChartLine,
 	CloudDownload,
+	FolderSearch,
 	KeyRound,
 	LayoutDashboard,
 	ScrollText,
@@ -23,6 +24,7 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
 	{ title: 'Overview', url: '/', icon: LayoutDashboard },
 	{ title: 'Caches', url: '/caches', icon: Boxes },
+	{ title: 'Paths', url: '/paths', icon: FolderSearch },
 	{ title: 'Upstreams', url: '/upstreams', icon: CloudDownload, adminOnly: true },
 	{ title: 'Monitoring', url: '/monitoring', icon: ChartLine },
 	{ title: 'Tokens', url: '/tokens', icon: KeyRound },

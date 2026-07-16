@@ -44,12 +44,15 @@ interface PinRow {
 interface RefRow {
 	ref_hash: string;
 	store_path: string | null;
+	created_at: string | null;
+	nar_size: number | null;
 }
 
 interface ReferrerRow {
 	store_path_hash: string;
 	store_path: string;
 	created_at: string;
+	nar_size: number;
 }
 
 /** Parse a JSON string-array column; malformed data degrades to []. */
@@ -125,13 +128,20 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 			.bind(cache.id, params.hash)
 			.all<PinRow>(),
 		// References, resolved to a store path when the referenced object exists
-		// in this cache (via child_id when linked, else by hash).
+		// in this cache (via child_id when linked, else by hash), each carrying
+		// its added date and NAR size through the object → nar join. Unresolved
+		// hashes keep NULL columns and render as bare hashes.
 		read
 			.prepare(
-				`SELECT r.ref_hash, COALESCE(oc.store_path, oh.store_path) AS store_path
+				`SELECT r.ref_hash,
+				        COALESCE(oc.store_path, oh.store_path) AS store_path,
+				        COALESCE(oc.created_at, oh.created_at) AS created_at,
+				        COALESCE(nc.nar_size, nh.nar_size) AS nar_size
 				 FROM object_ref r
 				 LEFT JOIN object oc ON oc.id = r.child_id AND oc.cache_id = ?1
+				 LEFT JOIN nar nc ON nc.id = oc.nar_id
 				 LEFT JOIN object oh ON oh.cache_id = ?1 AND oh.store_path_hash = r.ref_hash
+				 LEFT JOIN nar nh ON nh.id = oh.nar_id
 				 WHERE r.object_id = (SELECT id FROM object
 				                      WHERE cache_id = ?1 AND store_path_hash = ?2)
 				 ORDER BY COALESCE(oc.store_path, oh.store_path, r.ref_hash)`
@@ -143,9 +153,11 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		// so the "and N more" count costs no second scan of the join.
 		read
 			.prepare(
-				`SELECT o.store_path_hash, o.store_path, o.created_at, COUNT(*) OVER () AS total
+				`SELECT o.store_path_hash, o.store_path, o.created_at, n.nar_size,
+				        COUNT(*) OVER () AS total
 				 FROM object_ref r
 				 JOIN object o ON o.id = r.object_id
+				 JOIN nar n ON n.id = o.nar_id
 				 WHERE r.ref_hash = ?2 AND o.cache_id = ?1
 				 ORDER BY o.store_path ASC
 				 LIMIT ${REFERRERS_LIMIT}`
@@ -196,12 +208,18 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 				.filter((p) => p.pin_id !== null)
 				.map((p) => ({ name: p.pin_name ?? `#${p.pin_id}`, note: p.note, createdAt: p.created_at }))
 		},
-		references: refs.results.map((r) => ({ hash: r.ref_hash, storePath: r.store_path })),
+		references: refs.results.map((r) => ({
+			hash: r.ref_hash,
+			storePath: r.store_path,
+			createdAt: r.created_at,
+			narSize: r.nar_size
+		})),
 		referrers: {
 			rows: referrers.results.map((r) => ({
 				hash: r.store_path_hash,
 				storePath: r.store_path,
-				createdAt: r.created_at
+				createdAt: r.created_at,
+				narSize: r.nar_size
 			})),
 			total: referrers.results[0]?.total ?? 0
 		}

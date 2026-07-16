@@ -201,67 +201,99 @@
 		{/if}
 	</section>
 
-	<div class="grid gap-8 lg:grid-cols-2">
-		<section class="rounded-lg border bg-card p-5">
-			<h2 class="text-sm font-medium">
-				References
-				<span class="font-normal text-muted-foreground"
-					>({formatCount(data.references.length)})</span
-				>
-			</h2>
-			<p class="mt-1 text-xs text-muted-foreground">Paths this store path depends on.</p>
-			{#if data.references.length === 0}
-				<p class="mt-4 text-sm text-muted-foreground">No references.</p>
-			{:else}
-				<ul class="mt-4 space-y-1.5">
-					{#each data.references as ref (ref.hash)}
-						<li class="font-mono text-xs break-all">
-							{#if ref.storePath}
-								<a
-									href="{cacheHref}/paths/{ref.hash}"
-									class="text-foreground underline-offset-4 hover:underline"
-								>
-									{shortHash(ref.storePath)}
-								</a>
-							{:else}
-								{ref.hash}
-								<span class="ml-1 font-sans text-muted-foreground">not in this cache</span>
-							{/if}
-						</li>
-					{/each}
-				</ul>
-			{/if}
-		</section>
+	{#snippet pathTableHead()}
+		<thead class="border-b bg-muted text-left text-xs text-muted-foreground">
+			<tr>
+				<th class="px-4 py-2.5 font-medium">Store path</th>
+				<th class="w-32 px-4 py-2.5 font-medium">Added</th>
+				<th class="w-28 px-4 py-2.5 text-right font-medium">NAR size</th>
+			</tr>
+		</thead>
+	{/snippet}
 
-		<section class="rounded-lg border bg-card p-5">
-			<h2 class="text-sm font-medium">
-				Referrers
-				<span class="font-normal text-muted-foreground">({formatCount(data.referrers.total)})</span>
-			</h2>
-			<p class="mt-1 text-xs text-muted-foreground">
-				Paths in this cache that depend on this store path.
-			</p>
-			{#if data.referrers.rows.length === 0}
-				<p class="mt-4 text-sm text-muted-foreground">No referrers.</p>
-			{:else}
-				<ul class="mt-4 space-y-1.5">
-					{#each data.referrers.rows as referrer (referrer.hash)}
-						<li class="font-mono text-xs break-all">
-							<a
-								href="{cacheHref}/paths/{referrer.hash}"
-								class="text-foreground underline-offset-4 hover:underline"
-							>
-								{shortHash(referrer.storePath)}
-							</a>
-						</li>
-					{/each}
-				</ul>
-				{#if data.referrers.total > data.referrers.rows.length}
-					<p class="mt-3 text-xs text-muted-foreground">
-						and {formatCount(data.referrers.total - data.referrers.rows.length)} more…
-					</p>
-				{/if}
+	{#snippet pathRow(row: { hash: string; storePath: string; createdAt: string; narSize: number })}
+		<tr class="transition-colors hover:bg-muted/30">
+			<td class="px-4 py-2.5 font-mono text-xs break-all">
+				<a href="{cacheHref}/paths/{row.hash}" class="hover:text-primary hover:underline">
+					{shortHash(row.storePath)}
+				</a>
+			</td>
+			<td class="px-4 py-2.5 font-mono text-xs text-muted-foreground">
+				{row.createdAt ? row.createdAt.slice(0, 10) : '—'}
+			</td>
+			<td class="px-4 py-2.5 text-right font-mono">{formatBytes(row.narSize)}</td>
+		</tr>
+	{/snippet}
+
+	<section class="mb-8">
+		<h2 class="mb-1 text-sm font-medium">
+			References
+			<span class="font-normal text-muted-foreground">({formatCount(data.references.length)})</span
+			>
+		</h2>
+		<p class="mb-3 text-xs text-muted-foreground">Paths this store path depends on.</p>
+		{#if data.references.length === 0}
+			<div class="rounded-lg border border-dashed py-10 text-center">
+				<p class="text-sm text-muted-foreground">No references.</p>
+			</div>
+		{:else}
+			<div class="overflow-x-auto rounded-lg border">
+				<table class="w-full text-sm">
+					{@render pathTableHead()}
+					<tbody class="divide-y">
+						{#each data.references as ref (ref.hash)}
+							{#if ref.storePath && ref.createdAt != null && ref.narSize != null}
+								{@render pathRow({
+									hash: ref.hash,
+									storePath: ref.storePath,
+									createdAt: ref.createdAt,
+									narSize: ref.narSize
+								})}
+							{:else}
+								<tr class="transition-colors hover:bg-muted/30">
+									<td class="px-4 py-2.5 font-mono text-xs break-all text-muted-foreground">
+										{ref.hash}
+										<span class="ml-1 font-sans">not in this cache</span>
+									</td>
+									<td class="px-4 py-2.5 font-mono text-xs text-muted-foreground">—</td>
+									<td class="px-4 py-2.5 text-right font-mono text-muted-foreground">—</td>
+								</tr>
+							{/if}
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
+	</section>
+
+	<section class="mb-8">
+		<h2 class="mb-1 text-sm font-medium">
+			Referrers
+			<span class="font-normal text-muted-foreground">({formatCount(data.referrers.total)})</span>
+		</h2>
+		<p class="mb-3 text-xs text-muted-foreground">
+			Paths in this cache that depend on this store path.
+		</p>
+		{#if data.referrers.rows.length === 0}
+			<div class="rounded-lg border border-dashed py-10 text-center">
+				<p class="text-sm text-muted-foreground">No referrers.</p>
+			</div>
+		{:else}
+			<div class="overflow-x-auto rounded-lg border">
+				<table class="w-full text-sm">
+					{@render pathTableHead()}
+					<tbody class="divide-y">
+						{#each data.referrers.rows as referrer (referrer.hash)}
+							{@render pathRow(referrer)}
+						{/each}
+					</tbody>
+				</table>
+			</div>
+			{#if data.referrers.total > data.referrers.rows.length}
+				<p class="mt-2 text-xs text-muted-foreground">
+					and {formatCount(data.referrers.total - data.referrers.rows.length)} more…
+				</p>
 			{/if}
-		</section>
-	</div>
+		{/if}
+	</section>
 </div>
