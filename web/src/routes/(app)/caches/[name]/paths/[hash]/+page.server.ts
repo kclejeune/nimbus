@@ -1,5 +1,6 @@
 import { error } from '@sveltejs/kit';
 import { readSession, STORE_PATH_HASH_RE, findCache } from '$lib/server/cache/db';
+import { syncObjectRefs } from '$lib/server/cache/gc';
 import { canBrowseCache } from '$lib/server/auth/permissions';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
 import type { PageServerLoad } from './$types';
@@ -87,6 +88,14 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		throw error(403, 'Permission denied');
 	}
 
+	// References/referrers read object_ref, which is derived from object.refs
+	// by a watermark-incremental sync that otherwise only runs on the nightly
+	// GC — a path pushed since the last run would render empty. Sync inline
+	// (same pattern as detachClosure); when caught up this is one row read.
+	// The two object_ref queries below then read the primary, not the replica
+	// session, so they see what the sync just wrote.
+	await syncObjectRefs(db);
+
 	// Everything below keys off (cache_id, store_path_hash); nar_id / object_id
 	// are resolved by scalar subqueries so all reads run in parallel.
 	const [object, chunks, pins, refs, referrers] = await Promise.all([
@@ -133,7 +142,7 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		// in this cache (via child_id when linked, else by hash), each carrying
 		// its added date and NAR size through the object → nar join. Unresolved
 		// hashes keep NULL columns and render as bare hashes.
-		read
+		db
 			.prepare(
 				`SELECT r.ref_hash,
 				        COALESCE(oc.store_path, oh.store_path) AS store_path,
@@ -153,7 +162,7 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		// Reverse dependencies: objects in this cache that reference this hash.
 		// total rides on the rows as a window aggregate (computed before LIMIT),
 		// so the "and N more" count costs no second scan of the join.
-		read
+		db
 			.prepare(
 				`SELECT o.store_path_hash, o.store_path, o.created_at, n.nar_size,
 				        COUNT(*) OVER () AS total
