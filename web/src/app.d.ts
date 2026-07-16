@@ -59,6 +59,14 @@ declare global {
 				/** Colo-wide backstop for the unauthenticated CLI device-auth
 				 * endpoints (the only anonymous D1-primary writes). */
 				DEVICE_AUTH_LIMITER?: RateLimit;
+				/** Analytics Engine dataset for read-path traffic metrics
+				 * (narinfo/NAR hit/miss/upstream); unbound = metrics off. */
+				CACHE_METRICS?: AnalyticsEngineDataset;
+				/** Account id + API token (Account Analytics read) for querying
+				 * CACHE_METRICS from the dashboard via the Analytics Engine SQL
+				 * API; the monitoring traffic section hides when either is unset. */
+				CF_ACCOUNT_ID?: string;
+				CF_ANALYTICS_TOKEN?: string;
 			};
 			ctx: ExecutionContext;
 		}

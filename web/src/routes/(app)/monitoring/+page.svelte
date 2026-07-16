@@ -19,6 +19,33 @@
 		b.map((w) => ({ label: w.date, value: w.cumulativePaths, delta: w.paths }))
 	);
 
+	const traffic = $derived(data.traffic);
+	const trafficRequests = $derived(
+		traffic
+			? traffic.narinfo.hit +
+					traffic.narinfo.miss +
+					traffic.narinfo.upstream +
+					traffic.nar.hit +
+					traffic.nar.miss +
+					traffic.nar.upstream
+			: 0
+	);
+	// Hit rate over narinfo lookups: the request nix actually fans out, and the
+	// one that decides whether this cache was useful.
+	const narinfoLookups = $derived(
+		traffic ? traffic.narinfo.hit + traffic.narinfo.miss + traffic.narinfo.upstream : 0
+	);
+	const hitRate = $derived(
+		narinfoLookups > 0 ? Math.round((100 * traffic!.narinfo.hit) / narinfoLookups) : null
+	);
+	const trafficPoints = $derived(
+		(traffic?.days ?? []).map((d) => ({
+			label: d.date,
+			value: d.hit + d.miss + d.upstream,
+			delta: d.hit + d.miss + d.upstream
+		}))
+	);
+
 	const unitWord = $derived(
 		data.granularity === 'day' ? 'day' : data.granularity === 'month' ? 'month' : 'week'
 	);
@@ -124,6 +151,43 @@
 				deltaFormat={formatCount}
 				deltaLabel={perLabel}
 				ariaLabel="Cumulative store paths over time"
+			/>
+		</section>
+	{/if}
+
+	{#if traffic}
+		<div class="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-4">
+			{@render stat(
+				'Hit rate',
+				hitRate === null ? '—' : `${hitRate}%`,
+				'narinfo lookups answered locally'
+			)}
+			{@render stat('narinfo hits', formatCount(traffic.narinfo.hit), 'last 30 days')}
+			{@render stat(
+				'Misses',
+				formatCount(traffic.narinfo.miss + traffic.nar.miss),
+				'not local, not upstream'
+			)}
+			{@render stat(
+				'Upstream',
+				formatCount(traffic.narinfo.upstream + traffic.nar.upstream),
+				'answered via upstream caches'
+			)}
+		</div>
+
+		<section class="mt-8 rounded-lg border bg-card p-5">
+			<div class="mb-4 flex items-baseline justify-between">
+				<h2 class="text-sm font-medium">Read traffic</h2>
+				<span class="font-mono text-sm text-muted-foreground">
+					{formatCount(trafficRequests)} reads · 30 days
+				</span>
+			</div>
+			<AreaChart
+				points={trafficPoints}
+				format={formatCount}
+				deltaFormat={formatCount}
+				deltaLabel="this day"
+				ariaLabel="Read requests per day"
 			/>
 		</section>
 	{/if}

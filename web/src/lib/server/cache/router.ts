@@ -38,6 +38,7 @@ import {
 import { TtlMemo } from './ttl-memo';
 import { persistUpstreamPath } from './pullthrough';
 import { handleCacheList, handleDestroyPath, handleTokensApi } from './v1-admin';
+import { readEvent, recordRead, UNIFIED_LABEL } from './metrics';
 import { extractPublicKey } from '../attic/signing';
 import {
 	keyedNarinfoUrl,
@@ -256,6 +257,7 @@ async function handleNarInfo(
 		auth.cache.keypair
 	);
 	const response = await forwardToStore(new Request(keyed, request), env, ctx);
+	recordRead(env, 'narinfo', cacheName, readEvent(response.status));
 	return withCachePolicy(response, auth.cache.is_public === 1);
 }
 
@@ -293,9 +295,11 @@ async function handleNar(
 
 	if (response.status === 404) {
 		const upstreamUrl = await upstreamNarRedirect(env, ctx, auth.cache, filename);
+		recordRead(env, 'nar', cacheName, upstreamUrl ? 'upstream' : 'miss');
 		if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
 		return response;
 	}
+	recordRead(env, 'nar', cacheName, readEvent(response.status));
 	return withCachePolicy(
 		withVisibility(new Response(response.body, response), auth.cache.is_public === 1),
 		auth.cache.is_public === 1
@@ -353,8 +357,16 @@ async function handleProxyNarInfo(
 		// (nothing local for anyone) plus an upstream miss may record it.
 		if (response.status === 404) {
 			if (candidates.length === 0) recordAbsent(storePathHash);
+			recordRead(env, 'narinfo', UNIFIED_LABEL, 'miss');
 			return errorResponse(404, 'Not found', 'NoSuchObject');
 		}
+		// A 200 here is upstream content served through the union fallback.
+		recordRead(
+			env,
+			'narinfo',
+			UNIFIED_LABEL,
+			response.status === 200 ? 'upstream' : readEvent(response.status)
+		);
 		return withCachePolicy(response, true);
 	}
 
@@ -367,6 +379,7 @@ async function handleProxyNarInfo(
 		// keypair unavailable: serve unsigned/stored-sig variant unkeyed
 	}
 	const response = await forwardToStore(new Request(keyed, request), env, ctx);
+	recordRead(env, 'narinfo', UNIFIED_LABEL, readEvent(response.status));
 	return withCachePolicy(response, winner.is_public === 1);
 }
 
@@ -395,6 +408,7 @@ async function handleProxyNar(
 	};
 	if (!winner) {
 		const redirect = await upstreamRedirect();
+		recordRead(env, 'nar', UNIFIED_LABEL, redirect ? 'upstream' : 'miss');
 		return redirect ?? errorResponse(404, 'Not found', 'NoSuchObject');
 	}
 
@@ -412,8 +426,10 @@ async function handleProxyNar(
 		// Deletion race (GC reaped the NAR between resolution and read): the
 		// upstreams may still have it, same as the per-cache route.
 		const redirect = await upstreamRedirect();
+		recordRead(env, 'nar', UNIFIED_LABEL, redirect ? 'upstream' : 'miss');
 		return redirect ?? response;
 	}
+	recordRead(env, 'nar', UNIFIED_LABEL, readEvent(response.status));
 	return withCachePolicy(
 		withVisibility(new Response(response.body, response), winner.is_public === 1),
 		winner.is_public === 1

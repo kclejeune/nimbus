@@ -1,5 +1,6 @@
 import { dev } from '$app/environment';
 import { error } from '@sveltejs/kit';
+import { loadTraffic } from '$lib/server/traffic';
 import type { PageServerLoad } from './$types';
 
 interface BucketRow {
@@ -87,8 +88,11 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 	// Local preview without bindings: synthesize a plausible series.
 	if (!db) {
 		if (!dev) throw error(500, 'Database binding unavailable');
-		return { buckets: sampleBuckets(granularity), granularity, range };
+		return { buckets: sampleBuckets(granularity), granularity, range, traffic: null };
 	}
+
+	// Config-gated (returns null when unconfigured); runs alongside the D1 work.
+	const trafficPromise = platform?.env ? loadTraffic(platform.env) : Promise.resolve(null);
 
 	const now = Date.now();
 	const startMs = rangeStart(range, now);
@@ -132,7 +136,7 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 
 	// Nothing ever pushed and no window to draw → empty state.
 	if (rows.length === 0 && startDate === null) {
-		return { buckets: [], granularity, range };
+		return { buckets: [], granularity, range, traffic: await trafficPromise };
 	}
 
 	const byBucket = new Map(rows.map((r) => [r.bucket, r]));
@@ -161,7 +165,7 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 		});
 	}
 
-	return { buckets, granularity, range };
+	return { buckets, granularity, range, traffic: await trafficPromise };
 };
 
 function sampleBuckets(granularity: Granularity): Bucket[] {
