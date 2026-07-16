@@ -13,6 +13,16 @@
 		b.reduce((m, w) => (w.paths > m.paths ? w : m), { paths: 0, date: '' })
 	);
 
+	// Instance stats, shared with the Overview tiles.
+	const stats = $derived(data.stats);
+	const dedupBytes = $derived(Math.max(0, stats.logicalBytes - stats.storageBytes));
+	const dedupPct = $derived(
+		stats.logicalBytes > 0 ? Math.round((dedupBytes / stats.logicalBytes) * 100) : 0
+	);
+	const usagePct = $derived(
+		data.globalMaxBytes ? Math.round((stats.storageBytes / data.globalMaxBytes) * 100) : null
+	);
+
 	const storagePoints = $derived(
 		b.map((w) => ({ label: w.date, value: w.cumulativeBytes, delta: w.bytes }))
 	);
@@ -149,14 +159,29 @@
 			</div>
 		{:else}
 			<div class="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-3">
-				{@render stat('Total storage', formatBytes(totalBytes))}
-				{@render stat('Store paths', formatCount(totalPaths))}
+				{@render stat(
+					'Storage used',
+					formatBytes(stats.storageBytes),
+					data.globalMaxBytes
+						? `of a ${formatBytes(data.globalMaxBytes)} global limit · ${usagePct}%`
+						: 'no global limit set'
+				)}
+				{@render stat('Store paths', formatCount(stats.objects), 'across all caches')}
+				{@render stat('Caches', formatCount(stats.caches), 'isolated views into shared storage')}
+				{@render stat(
+					'NARs stored',
+					formatCount(stats.nars),
+					'store paths with identical content share one NAR'
+				)}
+				{@render stat(
+					'Deduplication',
+					dedupBytes > 0 ? `−${dedupPct}%` : '—',
+					dedupBytes > 0 ? `${formatBytes(dedupBytes)} saved` : 'nothing shared yet'
+				)}
 				{@render stat(
 					`Busiest ${unitWord}`,
 					formatCount(peakBucket.paths),
-					peakBucket.date ? `${peakBucket.date} · paths added` : undefined,
-					// Odd card out in the two-column mobile grid: span the full row.
-					'col-span-2 lg:col-span-1'
+					peakBucket.date ? `${peakBucket.date} · paths added` : undefined
 				)}
 			</div>
 

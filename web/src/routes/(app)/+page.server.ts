@@ -4,9 +4,8 @@ import { allLiveUpstreams } from '$lib/server/cache/missing-paths';
 import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { readSession } from '$lib/server/cache/db';
+import { instanceStats } from '$lib/server/cache/stats';
 import type { PageServerLoad } from './$types';
-
-type Count = { n: number };
 
 export const load: PageServerLoad = async ({ platform }) => {
 	const db = platform?.env.ATTIC_DB;
@@ -32,49 +31,22 @@ export const load: PageServerLoad = async ({ platform }) => {
 		)
 		.bind(ingestSince);
 
-	const [
-		caches,
-		objects,
-		nars,
-		storage,
-		logical,
-		globalLimit,
-		gcLastRun,
-		ingest,
-		proxyPublicKey,
-		proxyUpstreams
-	] = await Promise.all([
-		read.prepare('SELECT COUNT(*) AS n FROM cache WHERE deleted_at IS NULL').first<Count>(),
-		read
-			.prepare(
-				'SELECT COUNT(*) AS n FROM object o JOIN cache c ON c.id = o.cache_id WHERE c.deleted_at IS NULL'
-			)
-			.first<Count>(),
-		read.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'V'").first<Count>(),
-		read
-			.prepare("SELECT COALESCE(SUM(file_size), 0) AS n FROM chunk WHERE state = 'V'")
-			.first<Count>(),
-		// Logical bytes: every object's NAR counted once per reference. The
-		// excess over physical storage is what NAR- and chunk-level dedup saves.
-		read
-			.prepare(
-				'SELECT COALESCE(SUM(sz.bytes), 0) AS n FROM object o ' +
-					'JOIN (SELECT cr.nar_id, SUM(ch.file_size) AS bytes FROM chunkref cr ' +
-					'JOIN chunk ch ON ch.id = cr.chunk_id GROUP BY cr.nar_id) sz ON sz.nar_id = o.nar_id'
-			)
-			.first<Count>(),
-		read
-			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
-			.first<{ value: string }>(),
-		readGcLastRun(read),
-		ingestStmt.all<{ bucket: string; paths: number; bytes: number }>(),
-		platform?.env
-			? getProxyKeypair(platform.env)
-					.then(extractPublicKey)
-					.catch(() => null)
-			: null,
-		allLiveUpstreams(read)
-	]);
+	const [stats, globalLimit, gcLastRun, ingest, proxyPublicKey, proxyUpstreams] = await Promise.all(
+		[
+			instanceStats(read),
+			read
+				.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
+				.first<{ value: string }>(),
+			readGcLastRun(read),
+			ingestStmt.all<{ bucket: string; paths: number; bytes: number }>(),
+			platform?.env
+				? getProxyKeypair(platform.env)
+						.then(extractPublicKey)
+						.catch(() => null)
+				: null,
+			allLiveUpstreams(read)
+		]
+	);
 
 	// Zero-fill so the chart doesn't interpolate across idle days.
 	const byDay = new Map(ingest.results.map((r) => [r.bucket, r]));
@@ -86,13 +58,7 @@ export const load: PageServerLoad = async ({ platform }) => {
 	}
 
 	return {
-		stats: {
-			caches: caches?.n ?? 0,
-			objects: objects?.n ?? 0,
-			nars: nars?.n ?? 0,
-			storageBytes: storage?.n ?? 0,
-			logicalBytes: logical?.n ?? 0
-		},
+		stats,
 		globalMaxBytes: globalLimit ? Number(globalLimit.value) : null,
 		gcLastRun,
 		buckets,

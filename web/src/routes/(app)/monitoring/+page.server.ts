@@ -1,6 +1,7 @@
 import { dev } from '$app/environment';
 import { error } from '@sveltejs/kit';
 import { readSession } from '$lib/server/cache/db';
+import { instanceStats, type InstanceStats } from '$lib/server/cache/stats';
 import { loadTraffic } from '$lib/server/traffic';
 import type { PageServerLoad } from './$types';
 
@@ -89,7 +90,14 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 	// Local preview without bindings: synthesize a plausible series.
 	if (!db) {
 		if (!dev) throw error(500, 'Database binding unavailable');
-		return { buckets: sampleBuckets(granularity), granularity, range, traffic: null };
+		return {
+			buckets: sampleBuckets(granularity),
+			granularity,
+			range,
+			traffic: null,
+			stats: sampleStats(),
+			globalMaxBytes: null
+		};
 	}
 
 	// Config-gated (returns null when unconfigured); runs alongside the D1 work.
@@ -129,10 +137,15 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 				.bind(startDate)
 		: null;
 
-	const [seriesResult, baselineRow] = await Promise.all([
+	const [seriesResult, baselineRow, stats, globalLimit] = await Promise.all([
 		seriesStmt.all<BucketRow>(),
-		baselineStmt ? baselineStmt.first<{ paths: number; bytes: number }>() : Promise.resolve(null)
+		baselineStmt ? baselineStmt.first<{ paths: number; bytes: number }>() : Promise.resolve(null),
+		instanceStats(read),
+		read
+			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
+			.first<{ value: string }>()
 	]);
+	const globalMaxBytes = globalLimit ? Number(globalLimit.value) : null;
 
 	const rows = seriesResult.results;
 	const basePaths = baselineRow?.paths ?? 0;
@@ -140,7 +153,14 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 
 	// Nothing ever pushed and no window to draw → empty state.
 	if (rows.length === 0 && startDate === null) {
-		return { buckets: [], granularity, range, traffic: await trafficPromise };
+		return {
+			buckets: [],
+			granularity,
+			range,
+			traffic: await trafficPromise,
+			stats,
+			globalMaxBytes
+		};
 	}
 
 	const byBucket = new Map(rows.map((r) => [r.bucket, r]));
@@ -169,8 +189,12 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 		});
 	}
 
-	return { buckets, granularity, range, traffic: await trafficPromise };
+	return { buckets, granularity, range, traffic: await trafficPromise, stats, globalMaxBytes };
 };
+
+function sampleStats(): InstanceStats {
+	return { caches: 3, objects: 1180, nars: 990, storageBytes: 6.4e9, logicalBytes: 9.1e9 };
+}
 
 function sampleBuckets(granularity: Granularity): Bucket[] {
 	const out: Bucket[] = [];
