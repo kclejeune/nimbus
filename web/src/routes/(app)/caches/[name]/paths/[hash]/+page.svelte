@@ -18,8 +18,6 @@
 
 	// RFC3339 timestamp → "YYYY-MM-DD HH:MM" (UTC), matching the app's style.
 
-	const truncHash = (h: string) => (h.length > 23 ? `${h.slice(0, 20)}…` : h);
-
 	const isPinned = $derived(data.pins.anonymous !== null || data.pins.named.length > 0);
 	const cacheHref = $derived(`/caches/${encodeURIComponent(data.cache.name)}`);
 </script>
@@ -145,59 +143,6 @@
 	</section>
 
 	<section class="mb-8">
-		<h2 class="mb-3 text-sm font-medium">
-			Chunks
-			<span class="font-normal text-muted-foreground">({formatCount(data.chunks.length)})</span>
-		</h2>
-		{#if data.chunks.length === 0}
-			<div class="rounded-lg border border-dashed py-10 text-center">
-				<p class="text-sm text-muted-foreground">No chunks recorded for this NAR.</p>
-			</div>
-		{:else}
-			<div class="overflow-x-auto rounded-lg border">
-				<table class="w-full text-sm">
-					<thead class="border-b bg-muted text-left text-xs text-muted-foreground">
-						<tr>
-							<th class="w-14 px-4 py-2.5 font-medium">#</th>
-							<th class="px-4 py-2.5 font-medium">Chunk hash</th>
-							<th class="w-28 px-4 py-2.5 text-right font-medium">Size</th>
-							<th class="w-28 px-4 py-2.5 text-right font-medium">Stored</th>
-							<th class="w-24 px-4 py-2.5 font-medium">Codec</th>
-							<th class="w-48 px-4 py-2.5 font-medium">Dedup</th>
-						</tr>
-					</thead>
-					<tbody class="divide-y">
-						{#each data.chunks as chunk (chunk.seq)}
-							<tr class="transition-colors hover:bg-muted/30">
-								<td class="px-4 py-2.5 font-mono text-xs text-muted-foreground">{chunk.seq}</td>
-								<td class="px-4 py-2.5 font-mono text-xs" title={chunk.chunkHash}>
-									{truncHash(chunk.chunkHash)}
-								</td>
-								<td class="px-4 py-2.5 text-right font-mono text-xs">
-									{chunk.chunkSize != null ? formatBytes(chunk.chunkSize) : '—'}
-								</td>
-								<td class="px-4 py-2.5 text-right font-mono text-xs">
-									{chunk.fileSize != null ? formatBytes(chunk.fileSize) : '—'}
-								</td>
-								<td class="px-4 py-2.5 font-mono text-xs">{chunk.compression}</td>
-								<td class="px-4 py-2.5 text-xs text-muted-foreground">
-									{#if chunk.sharedNars > 0}
-										shared with {formatCount(chunk.sharedNars)} other NAR{chunk.sharedNars === 1
-											? ''
-											: 's'}
-									{:else}
-										unique to this NAR
-									{/if}
-								</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-		{/if}
-	</section>
-
-	<section class="mb-8">
 		<h2 class="mb-1 text-sm font-medium">
 			References
 			<span class="font-normal text-muted-foreground">({formatCount(data.references.length)})</span>
@@ -274,6 +219,59 @@
 					and {formatCount(data.referrers.total - data.referrers.rows.length)} more…
 				</p>
 			{/if}
+		{/if}
+	</section>
+
+	<section class="mb-8">
+		<h2 class="mb-3 text-sm font-medium">
+			Chunks
+			<span class="font-normal text-muted-foreground">({formatCount(data.chunks.length)})</span>
+		</h2>
+		{#if data.chunks.length === 0}
+			<div class="rounded-lg border border-dashed py-10 text-center">
+				<p class="text-sm text-muted-foreground">No chunks recorded for this NAR.</p>
+			</div>
+		{:else}
+			<div class="overflow-x-auto rounded-lg border">
+				<table class="w-full text-sm">
+					<thead class="border-b bg-muted text-left text-xs text-muted-foreground">
+						<tr>
+							<th class="w-14 px-4 py-2.5 font-medium">#</th>
+							<th class="px-4 py-2.5 font-medium">Chunk hash</th>
+							<th class="w-28 px-4 py-2.5 text-right font-medium">Size</th>
+							<th class="w-28 px-4 py-2.5 text-right font-medium">Stored</th>
+							<th class="w-24 px-4 py-2.5 font-medium">Codec</th>
+							<th class="w-48 px-4 py-2.5 font-medium">Dedup</th>
+						</tr>
+					</thead>
+					<tbody class="divide-y">
+						{#each data.chunks as chunk (chunk.seq)}
+							<tr class="transition-colors hover:bg-muted/30">
+								<td class="px-4 py-2.5 font-mono text-xs text-muted-foreground">{chunk.seq}</td>
+								<td class="px-4 py-2.5 font-mono text-xs break-all">
+									{chunk.chunkHash}
+								</td>
+								<td class="px-4 py-2.5 text-right font-mono text-xs">
+									{chunk.chunkSize != null ? formatBytes(chunk.chunkSize) : '—'}
+								</td>
+								<td class="px-4 py-2.5 text-right font-mono text-xs">
+									{chunk.fileSize != null ? formatBytes(chunk.fileSize) : '—'}
+								</td>
+								<td class="px-4 py-2.5 font-mono text-xs">{chunk.compression}</td>
+								<td class="px-4 py-2.5 text-xs text-muted-foreground">
+									{#if chunk.sharedNars > 0}
+										shared with {formatCount(chunk.sharedNars)} other NAR{chunk.sharedNars === 1
+											? ''
+											: 's'}
+									{:else}
+										unique to this NAR
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
 		{/if}
 	</section>
 </div>
