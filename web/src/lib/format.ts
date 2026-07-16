@@ -16,3 +16,20 @@ export function formatCount(n: number): string {
 export function formatDate(unix: number): string {
 	return new Date(unix * 1000).toISOString().slice(0, 10);
 }
+
+/** ISO timestamp to the minute (UTC) from unix seconds. */
+export function formatDateTime(unix: number): string {
+	return new Date(unix * 1000).toISOString().slice(0, 16).replace('T', ' ');
+}
+
+/** Coarse relative time ("3h ago") from an ISO timestamp; '' when unparsable. */
+export function formatRelativeTime(iso: string): string {
+	const ms = Date.now() - Date.parse(iso);
+	if (!Number.isFinite(ms)) return '';
+	const s = Math.max(0, Math.floor(ms / 1000));
+	if (s < 60) return 'just now';
+	if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+	if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+	const d = Math.floor(s / 86400);
+	return d === 1 ? 'yesterday' : `${d} days ago`;
+}

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { toastErrors } from '$lib/enhance';
-	import { formatBytes, formatCount } from '$lib/format';
+	import { formatBytes, formatCount, formatRelativeTime } from '$lib/format';
 	import IngestChart from '$lib/components/ingest-chart.svelte';
 	import UnifiedEndpointCard from '$lib/components/unified-endpoint-card.svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
@@ -9,7 +9,7 @@
 	import * as Card from '$lib/components/ui/card/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
-	import { Check, Trash2 } from '@lucide/svelte';
+	import { Check, Trash2, TriangleAlert } from '@lucide/svelte';
 
 	let { data, form } = $props();
 	const s = $derived(data.stats);
@@ -64,6 +64,16 @@
 		data.globalMaxBytes != null
 			? (data.globalMaxBytes / 2 ** 30).toFixed(1).replace(/\.0$/, '')
 			: ''
+	);
+	const lastRun = $derived(data.gcLastRun);
+	const lastRunReclaimed = $derived(
+		lastRun
+			? (lastRun.stats.abandoned_caches_reaped ?? 0) +
+					(lastRun.stats.detached_objects_reaped ?? 0) +
+					(lastRun.stats.expired_objects_reaped ?? 0) +
+					(lastRun.stats.size_evicted_objects ?? 0) +
+					(lastRun.stats.global_evicted_objects ?? 0)
+			: 0
 	);
 	const gcReclaimed = $derived(
 		form?.gcStats
@@ -191,6 +201,36 @@
 							</span>
 						{/if}
 					</form>
+
+					{#if lastRun}
+						<div class="flex flex-col gap-2 border-t pt-4 text-sm">
+							<p class="text-muted-foreground">
+								Last run <span title={lastRun.at}>{formatRelativeTime(lastRun.at)}</span> — removed {formatCount(
+									lastRunReclaimed
+								)} paths ({formatCount(lastRun.stats.expired_objects_reaped ?? 0)} expired, {formatCount(
+									(lastRun.stats.size_evicted_objects ?? 0) +
+										(lastRun.stats.global_evicted_objects ?? 0)
+								)} over size limits), reclaimed {formatCount(lastRun.stats.orphan_nars_reaped ?? 0)} NARs
+								and {formatCount(lastRun.stats.orphan_chunks_reaped ?? 0)} chunks.
+							</p>
+							{#if lastRun.integrity && lastRun.integrity.incompleteObjects > 0}
+								<details class="text-amber-600 dark:text-amber-400">
+									<summary class="inline-flex cursor-pointer items-center gap-1.5">
+										<TriangleAlert class="size-4" />
+										{formatCount(lastRun.integrity.incompleteObjects)}
+										{lastRun.integrity.incompleteObjects === 1 ? 'path has' : 'paths have'} references
+										neither stored locally nor covered by an upstream — Nix may fail to substitute their
+										closures.
+									</summary>
+									<ul class="mt-2 space-y-0.5 ps-6 font-mono text-xs">
+										{#each lastRun.integrity.examples as example (example)}
+											<li>{example}</li>
+										{/each}
+									</ul>
+								</details>
+							{/if}
+						</div>
+					{/if}
 
 					<dl class="grid grid-cols-3 gap-4 border-t pt-4 text-sm">
 						<div>

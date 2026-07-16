@@ -1,5 +1,5 @@
 import { error, fail } from '@sveltejs/kit';
-import { runGc } from '$lib/server/cache/gc';
+import { runGc, type GcLastRun } from '$lib/server/cache/gc';
 import { allLiveUpstreams } from '$lib/server/cache/missing-paths';
 import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
@@ -39,6 +39,7 @@ export const load: PageServerLoad = async ({ platform }) => {
 		orphanNars,
 		orphanChunks,
 		globalLimit,
+		gcLastRunRow,
 		ingest,
 		proxyPublicKey,
 		proxyUpstreams
@@ -76,6 +77,9 @@ export const load: PageServerLoad = async ({ platform }) => {
 		db
 			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
 			.first<{ value: string }>(),
+		db
+			.prepare("SELECT value FROM server_config WHERE key = 'gc_last_run'")
+			.first<{ value: string }>(),
 		ingestStmt.all<{ bucket: string; paths: number; bytes: number }>(),
 		platform?.env
 			? getProxyKeypair(platform.env)
@@ -84,6 +88,17 @@ export const load: PageServerLoad = async ({ platform }) => {
 			: null,
 		allLiveUpstreams(db)
 	]);
+
+	// Written by GC's persistLastRun; absent until the first real run, and a
+	// malformed value is treated the same rather than breaking the page.
+	let gcLastRun: GcLastRun | null = null;
+	if (gcLastRunRow) {
+		try {
+			gcLastRun = JSON.parse(gcLastRunRow.value) as GcLastRun;
+		} catch {
+			gcLastRun = null;
+		}
+	}
 
 	// Zero-fill so the chart doesn't interpolate across idle days.
 	const byDay = new Map(ingest.results.map((r) => [r.bucket, r]));
@@ -106,6 +121,7 @@ export const load: PageServerLoad = async ({ platform }) => {
 			orphanChunks: orphanChunks?.n ?? 0
 		},
 		globalMaxBytes: globalLimit ? Number(globalLimit.value) : null,
+		gcLastRun,
 		buckets,
 		cacheBaseUrl: platform?.env.CACHE_BASE_URL ?? null,
 		proxyPublicKey,

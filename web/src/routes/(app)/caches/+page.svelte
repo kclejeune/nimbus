@@ -32,7 +32,7 @@
 						<th class="px-4 py-2.5 font-medium">Name</th>
 						<th class="px-4 py-2.5 font-medium">Visibility</th>
 						<th class="px-4 py-2.5 text-right font-medium">Paths</th>
-						<th class="px-4 py-2.5 text-right font-medium">Storage</th>
+						<th class="px-4 py-2.5 text-right font-medium">Size</th>
 						<th class="px-4 py-2.5 font-medium">Compression</th>
 						<th class="px-4 py-2.5 text-right font-medium">Priority</th>
 						<th class="px-4 py-2.5 font-medium">Retention</th>
@@ -58,7 +58,27 @@
 								{/if}
 							</td>
 							<td class="px-4 py-3 text-right font-mono">{formatCount(cache.objects)}</td>
-							<td class="px-4 py-3 text-right font-mono">{formatBytes(cache.storageBytes)}</td>
+							<td class="px-4 py-3 text-right">
+								{#if cache.retentionMaxBytes}
+									{@const pct = (cache.storageBytes / cache.retentionMaxBytes) * 100}
+									<div class="flex flex-col items-end gap-1">
+										<span class="font-mono text-xs">
+											{formatBytes(cache.storageBytes)} of {formatBytes(cache.retentionMaxBytes)}
+										</span>
+										<div
+											class="h-1 w-24 overflow-hidden rounded-full bg-muted"
+											title="{Math.round(pct)}% of size budget"
+										>
+											<div
+												class="h-full rounded-full {pct >= 90 ? 'bg-amber-500' : 'bg-primary'}"
+												style="width: {Math.min(100, pct)}%"
+											></div>
+										</div>
+									</div>
+								{:else}
+									<span class="font-mono">{formatBytes(cache.storageBytes)}</span>
+								{/if}
+							</td>
 							<td class="px-4 py-3 font-mono text-muted-foreground">{cache.compression}</td>
 							<td class="px-4 py-3 text-right font-mono">{cache.priority}</td>
 							<td class="px-4 py-3 text-muted-foreground">

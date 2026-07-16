@@ -1,15 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import {
-		Boxes,
-		ChartLine,
-		CloudDownload,
-		KeyRound,
-		LayoutDashboard,
-		Settings,
-		Users,
-		UsersRound
-	} from '@lucide/svelte';
+	import { NAV_ITEMS } from '$lib/nav';
 	import Logo from './logo.svelte';
 	import NavUser from './nav-user.svelte';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
@@ -32,16 +23,10 @@
 	} & ComponentProps<typeof Sidebar.Root> = $props();
 
 	const nav = $derived(
-		[
-			{ title: 'Overview', url: '/', icon: LayoutDashboard },
-			{ title: 'Caches', url: '/caches', icon: Boxes },
-			{ title: 'Upstreams', url: '/upstreams', icon: CloudDownload, adminOnly: true },
-			{ title: 'Monitoring', url: '/monitoring', icon: ChartLine },
-			{ title: 'Tokens', url: '/tokens', icon: KeyRound },
-			{ title: 'Users', url: '/users', icon: Users, adminOnly: true, badge: pendingUsers },
-			{ title: 'Groups', url: '/groups', icon: UsersRound, adminOnly: true },
-			{ title: 'Settings', url: '/settings', icon: Settings }
-		].filter((item) => !item.adminOnly || user?.role === 'admin')
+		NAV_ITEMS.filter((item) => !item.adminOnly || user?.role === 'admin').map((item) => ({
+			...item,
+			badge: item.url === '/users' ? pendingUsers : 0
+		}))
 	);
 
 	function isActive(url: string): boolean {

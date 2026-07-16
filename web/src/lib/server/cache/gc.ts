@@ -57,6 +57,26 @@ export interface GcStats {
 	[key: string]: number;
 }
 
+/** Compact form of the closure-integrity report persisted for the dashboard. */
+export interface GcIntegritySummary {
+	/** Live objects with a Reference neither local nor upstream-covered. */
+	incompleteObjects: number;
+	/** Store paths of up to INTEGRITY_EXAMPLE_LIMIT affected objects. */
+	examples: string[];
+}
+
+/** Value of the gc_last_run server_config key. */
+export interface GcLastRun {
+	/** ISO timestamp of when the run finished. */
+	at: string;
+	stats: GcStats;
+	/** Null when the run skipped the integrity report (size-triggered GC). */
+	integrity: GcIntegritySummary | null;
+}
+
+const GC_LAST_RUN_KEY = 'gc_last_run';
+const INTEGRITY_EXAMPLE_LIMIT = 20;
+
 function emptyStats(): GcStats {
 	return {
 		abandoned_caches_reaped: 0,
@@ -150,8 +170,9 @@ async function runGcLocked(env: Env, opts: GcOptions): Promise<GcStats> {
 	await globalSizePass(env.ATTIC_DB, stats, dryRun, purgeTags);
 	// Advisory only, and the heaviest read of the run — size-triggered GC
 	// (upload hot path via waitUntil) opts out; cron and manual runs report.
+	let integrity: GcIntegritySummary | null = null;
 	if (opts.integrityReport ?? true) {
-		await closureIntegrityReport(env.ATTIC_DB, stats);
+		integrity = await closureIntegrityReport(env.ATTIC_DB, stats);
 	}
 	if (!dryRun) {
 		await reapOrphans(env, stats);
@@ -162,9 +183,27 @@ async function runGcLocked(env: Env, opts: GcOptions): Promise<GcStats> {
 		await pruneUpstreamChecks(env.ATTIC_DB);
 		await refreshAllGcRootStats(env.ATTIC_DB);
 		await purgeNarinfoTags(opts.ctx, purgeTags, stats);
+		await persistLastRun(env.ATTIC_DB, stats, integrity);
 	}
 
 	return stats;
+}
+
+/** Best-effort record of the run for the dashboard; never fails the sweep. */
+async function persistLastRun(
+	db: D1,
+	stats: GcStats,
+	integrity: GcIntegritySummary | null
+): Promise<void> {
+	const payload: GcLastRun = { at: new Date().toISOString(), stats, integrity };
+	await dbRun(
+		db
+			.prepare(
+				`INSERT INTO server_config (key, value) VALUES ('${GC_LAST_RUN_KEY}', ?1) ` +
+					'ON CONFLICT (key) DO UPDATE SET value = excluded.value'
+			)
+			.bind(JSON.stringify(payload))
+	).catch((e) => console.warn(`gc: last-run summary write failed: ${e}`));
 }
 
 /**
@@ -903,32 +942,45 @@ async function prunePinRevisions(db: D1, stats: GcStats): Promise<void> {
 	}
 }
 
+/** The incomplete-closure predicate shared by the count and example queries. */
+const INCOMPLETE_CLOSURE_WHERE =
+	'FROM object_ref r ' +
+	'JOIN object o ON o.id = r.object_id ' +
+	'WHERE r.child_id IS NULL AND o.detached_at IS NULL ' +
+	'AND NOT EXISTS (SELECT 1 FROM upstream_check uc ' +
+	'WHERE uc.store_path_hash = r.ref_hash AND uc.present <> 0)';
+
 /**
  * Advisory closure-completeness monitor (the cachix invariant, adapted to
  * the redirect design): count live objects with a Reference that is neither
  * resolved locally nor known to any upstream. These closures would fail to
- * substitute; the count surfaces in GC stats and the log, it does not block
- * serving.
+ * substitute; the count surfaces in GC stats, the log, and the persisted
+ * last-run summary — it does not block serving. Returns null on failure.
  */
-async function closureIntegrityReport(db: D1, stats: GcStats): Promise<void> {
+async function closureIntegrityReport(db: D1, stats: GcStats): Promise<GcIntegritySummary | null> {
 	try {
 		const row = await db
-			.prepare(
-				'SELECT COUNT(DISTINCT r.object_id) AS n FROM object_ref r ' +
-					'JOIN object o ON o.id = r.object_id ' +
-					'WHERE r.child_id IS NULL AND o.detached_at IS NULL ' +
-					'AND NOT EXISTS (SELECT 1 FROM upstream_check uc ' +
-					'WHERE uc.store_path_hash = r.ref_hash AND uc.present <> 0)'
-			)
+			.prepare(`SELECT COUNT(DISTINCT r.object_id) AS n ${INCOMPLETE_CLOSURE_WHERE}`)
 			.first<{ n: number }>();
 		stats.incomplete_closure_objects = row?.n ?? 0;
+		let examples: string[] = [];
 		if (stats.incomplete_closure_objects > 0) {
 			console.warn(
 				`gc: ${stats.incomplete_closure_objects} objects have references neither local nor upstream-covered`
 			);
+			examples = (
+				await db
+					.prepare(
+						`SELECT DISTINCT o.store_path AS p ${INCOMPLETE_CLOSURE_WHERE} ` +
+							`ORDER BY o.store_path LIMIT ${INTEGRITY_EXAMPLE_LIMIT}`
+					)
+					.all<{ p: string }>()
+			).results.map((r) => r.p);
 		}
+		return { incompleteObjects: stats.incomplete_closure_objects, examples };
 	} catch (e) {
 		console.warn(`gc: closure integrity report failed: ${e}`);
+		return null;
 	}
 }
 

@@ -5,16 +5,9 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Separator } from '$lib/components/ui/separator/index.js';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
+	import { sectionTitle } from '$lib/nav';
 
-	const sections: [string, string][] = [
-		['/caches', 'Caches'],
-		['/monitoring', 'Monitoring'],
-		['/tokens', 'Tokens'],
-		['/users', 'Users']
-	];
-	const title = $derived(
-		sections.find(([prefix]) => page.url.pathname.startsWith(prefix))?.[1] ?? 'Overview'
-	);
+	const title = $derived(sectionTitle(page.url.pathname));
 </script>
 
 <header
