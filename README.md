@@ -119,7 +119,7 @@ underneath for one that fits inside a Worker's constraints.
   </tr>
   <tr>
     <td><img src="docs/screenshots/paths.png" alt="Paths explorer: browse store paths across every readable cache"></td>
-    <td><img src="docs/screenshots/monitoring.png" alt="Monitoring: storage growth and push activity over time"></td>
+    <td><img src="docs/screenshots/monitoring.png" alt="Monitoring: storage growth and read traffic across all caches"></td>
   </tr>
   <tr>
     <td colspan="2"><img src="docs/screenshots/upstreams.png" alt="Upstream registry: enforced and optional upstream caches with trust keys, TTLs, and modes"></td>
