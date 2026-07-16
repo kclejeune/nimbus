@@ -66,7 +66,9 @@ function jsonStrings(raw: string): string[] {
 	}
 }
 
-const REFERRERS_LIMIT = 50;
+// High enough that client-side pagination sees the real set for all but the
+// most-depended-on paths; the windowed total still reports any truncation.
+const REFERRERS_LIMIT = 500;
 
 export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	const db = platform?.env.ATTIC_DB;

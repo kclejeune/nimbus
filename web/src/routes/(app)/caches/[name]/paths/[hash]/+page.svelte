@@ -3,7 +3,8 @@
 	import StorePathTable from '$lib/components/store-path-table.svelte';
 	import CopyField from '$lib/components/copy-field.svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
-	import { ArrowLeft, Pin } from '@lucide/svelte';
+	import { Button } from '$lib/components/ui/button/index.js';
+	import { ArrowLeft, ChevronDown, ChevronUp, Pin, Search } from '@lucide/svelte';
 
 	let { data } = $props();
 	const o = $derived(data.object);
@@ -17,6 +18,64 @@
 	}
 
 	// RFC3339 timestamp → "YYYY-MM-DD HH:MM" (UTC), matching the app's style.
+
+	// Chunk-table controls: client-side filter/sort/pagination (the rows are
+	// already fully loaded; MAX_NAR_CHUNKS bounds them at 2000).
+	const CHUNK_PAGE = 25;
+	type ChunkSortKey = 'seq' | 'hash' | 'size' | 'stored' | 'codec' | 'dedup';
+	let chunkQ = $state('');
+	let chunkSort = $state<ChunkSortKey>('seq');
+	let chunkAsc = $state(true);
+	let chunkPage = $state(1);
+	type ChunkRow = (typeof data.chunks)[number];
+	function chunkKey(c: ChunkRow, key: ChunkSortKey): string | number | null {
+		switch (key) {
+			case 'seq':
+				return c.seq;
+			case 'hash':
+				return c.chunkHash;
+			case 'size':
+				return c.chunkSize;
+			case 'stored':
+				return c.fileSize;
+			case 'codec':
+				return c.compression;
+			case 'dedup':
+				return c.sharedNars;
+		}
+	}
+	const chunksFiltered = $derived.by(() => {
+		const term = chunkQ.trim().toLowerCase();
+		if (!term) return data.chunks;
+		return data.chunks.filter((c) => c.chunkHash.toLowerCase().includes(term));
+	});
+	const chunksSorted = $derived.by(() => {
+		const flip = chunkAsc ? 1 : -1;
+		return [...chunksFiltered].sort((a, b) => {
+			const va = chunkKey(a, chunkSort);
+			const vb = chunkKey(b, chunkSort);
+			if (va === null && vb === null) return 0;
+			if (va === null) return 1;
+			if (vb === null) return -1;
+			const cmp =
+				typeof va === 'number' ? va - (vb as number) : String(va).localeCompare(String(vb));
+			return cmp * flip;
+		});
+	});
+	const chunkPages = $derived(Math.max(1, Math.ceil(chunksSorted.length / CHUNK_PAGE)));
+	const chunkCurrent = $derived(Math.min(chunkPage, chunkPages));
+	const chunksPaged = $derived(
+		chunksSorted.slice((chunkCurrent - 1) * CHUNK_PAGE, chunkCurrent * CHUNK_PAGE)
+	);
+	function toggleChunkSort(key: ChunkSortKey) {
+		if (chunkSort === key) {
+			chunkAsc = !chunkAsc;
+		} else {
+			chunkSort = key;
+			chunkAsc = true;
+		}
+		chunkPage = 1;
+	}
 
 	const isPinned = $derived(data.pins.anonymous !== null || data.pins.named.length > 0);
 	const cacheHref = $derived(`/caches/${encodeURIComponent(data.cache.name)}`);
@@ -154,6 +213,7 @@
 			</div>
 		{:else}
 			<StorePathTable
+				interactive
 				rows={data.references.map((ref) => {
 					if (ref.storePath) {
 						return {
@@ -206,6 +266,7 @@
 			</div>
 		{:else}
 			<StorePathTable
+				interactive
 				rows={data.referrers.rows.map((referrer) => ({
 					href: `${cacheHref}/paths/${referrer.hash}`,
 					storePath: referrer.storePath,
@@ -232,20 +293,39 @@
 				<p class="text-sm text-muted-foreground">No chunks recorded for this NAR.</p>
 			</div>
 		{:else}
+			{#if data.chunks.length > CHUNK_PAGE || chunkQ}
+				<div class="relative mb-3 max-w-xs">
+					<Search
+						class="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+						aria-hidden="true"
+					/>
+					<input
+						type="search"
+						placeholder="Filter by hash…"
+						class="h-8 w-full rounded-md border border-input bg-background pr-3 pl-8 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+						bind:value={chunkQ}
+						oninput={() => (chunkPage = 1)}
+					/>
+				</div>
+			{/if}
 			<div class="overflow-x-auto rounded-lg border">
 				<table class="w-full text-sm">
 					<thead class="border-b bg-muted text-left text-xs text-muted-foreground">
 						<tr>
-							<th class="w-14 px-4 py-2.5 font-medium">#</th>
-							<th class="px-4 py-2.5 font-medium">Chunk hash</th>
-							<th class="w-28 px-4 py-2.5 text-right font-medium">Size</th>
-							<th class="w-28 px-4 py-2.5 text-right font-medium">Stored</th>
-							<th class="w-24 px-4 py-2.5 font-medium">Codec</th>
-							<th class="w-48 px-4 py-2.5 font-medium">Dedup</th>
+							<th class="w-14 px-4 py-2.5 font-medium">{@render chunkHeader('seq', '#')}</th>
+							<th class="px-4 py-2.5 font-medium">{@render chunkHeader('hash', 'Chunk hash')}</th>
+							<th class="w-28 px-4 py-2.5 text-right font-medium">
+								{@render chunkHeader('size', 'Size')}
+							</th>
+							<th class="w-28 px-4 py-2.5 text-right font-medium">
+								{@render chunkHeader('stored', 'Stored')}
+							</th>
+							<th class="w-24 px-4 py-2.5 font-medium">{@render chunkHeader('codec', 'Codec')}</th>
+							<th class="w-48 px-4 py-2.5 font-medium">{@render chunkHeader('dedup', 'Dedup')}</th>
 						</tr>
 					</thead>
 					<tbody class="divide-y">
-						{#each data.chunks as chunk (chunk.seq)}
+						{#each chunksPaged as chunk (chunk.seq)}
 							<tr class="transition-colors hover:bg-muted/30">
 								<td class="px-4 py-2.5 font-mono text-xs text-muted-foreground">{chunk.seq}</td>
 								<td class="px-4 py-2.5 font-mono text-xs break-all">
@@ -271,7 +351,55 @@
 						{/each}
 					</tbody>
 				</table>
+
+				{#if chunksPaged.length === 0}
+					<p class="py-8 text-center text-sm text-muted-foreground">
+						No chunks match “{chunkQ}”.
+					</p>
+				{/if}
 			</div>
+
+			{#if chunksSorted.length > CHUNK_PAGE}
+				<div class="mt-3 flex items-center justify-between gap-3">
+					<p class="text-xs text-muted-foreground">
+						Showing {formatCount((chunkCurrent - 1) * CHUNK_PAGE + 1)}–{formatCount(
+							(chunkCurrent - 1) * CHUNK_PAGE + chunksPaged.length
+						)} of {formatCount(chunksSorted.length)}
+					</p>
+					<div class="flex items-center gap-2">
+						<Button
+							variant="outline"
+							size="sm"
+							disabled={chunkCurrent <= 1}
+							onclick={() => (chunkPage = chunkCurrent - 1)}
+						>
+							Previous
+						</Button>
+						<Button
+							variant="outline"
+							size="sm"
+							disabled={chunkCurrent >= chunkPages}
+							onclick={() => (chunkPage = chunkCurrent + 1)}
+						>
+							Next
+						</Button>
+					</div>
+				</div>
+			{/if}
 		{/if}
 	</section>
+
+	{#snippet chunkHeader(key: ChunkSortKey, label: string)}
+		<button
+			type="button"
+			class="inline-flex items-center gap-1 font-medium hover:text-foreground"
+			onclick={() => toggleChunkSort(key)}
+			aria-label="Sort by {label}"
+		>
+			{label}
+			{#if chunkSort === key}
+				{#if chunkAsc}<ChevronUp class="size-3" />{:else}<ChevronDown class="size-3" />{/if}
+			{/if}
+		</button>
+	{/snippet}
 </div>
