@@ -236,19 +236,14 @@
 					formatCount(traffic.narinfo.upstream + traffic.nar.upstream),
 					'answered via upstream caches'
 				)}
+				{@render stat('NARs served', formatCount(traffic.nar.hit), 'downloads from local storage')}
 				{@render stat('Paths pushed', formatCount(pushTotal), 'last 30 days')}
 				{@render stat(
 					'Push dedup',
 					pushDedupPct === null ? '—' : `${pushDedupPct}%`,
 					'pushes reusing an already-stored NAR'
 				)}
-				{@render stat(
-					'Pushed data',
-					formatBytes(traffic.push.bytes),
-					'NAR bytes before dedup',
-					// Odd card out in the two-column mobile grid: span the full row.
-					'col-span-2 lg:col-span-1'
-				)}
+				{@render stat('Pushed data', formatBytes(traffic.push.bytes), 'NAR bytes before dedup')}
 			</div>
 
 			<div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
