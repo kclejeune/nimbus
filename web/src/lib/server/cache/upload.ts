@@ -28,6 +28,7 @@ import {
 } from './compression';
 import { findCacheCached } from './cache-lookup';
 import * as db from './db';
+import { recordPush } from './metrics';
 import { bytesToHex } from '../attic/nix-base32';
 import { newDigestStream, readAll, type ExecutionContext } from './platform';
 import { warmNarinfoAfterUpload } from './store';
@@ -492,6 +493,9 @@ export async function handleUploadPath(
 		}
 	}
 	if (response.ok) {
+		// narLength is the raw NAR stream on the wire; a dedup push still
+		// transfers it (the possession proof), so it holds for both branches.
+		recordPush(env, info.cache, { deduplicated: !!existing, narBytes: narLength ?? 0 });
 		ctx?.waitUntil(
 			warmNarinfoAfterUpload(ctx, new URL(request.url).origin, cache, info.store_path_hash)
 		);
@@ -710,6 +714,7 @@ export async function handleCdcQuery(
 	const existing = await tryLockNarProbed(env, info.nar_hash);
 	if (existing) {
 		const response = await finishDeduplicated(env, info, cache.id, existing.id);
+		if (response.ok) recordPush(env, info.cache, { deduplicated: true, narBytes: body.nar_size });
 		ctx?.waitUntil(warmNarinfoAfterUpload(ctx, origin, cache, info.store_path_hash));
 		return response;
 	}
@@ -801,6 +806,7 @@ export async function handleCdcComplete(
 	const existingNar = await tryLockNarProbed(env, info.nar_hash);
 	if (existingNar) {
 		const response = await finishDeduplicated(env, info, cache.id, existingNar.id);
+		if (response.ok) recordPush(env, info.cache, { deduplicated: true, narBytes: body.nar_size });
 		warm();
 		return response;
 	}
@@ -851,6 +857,7 @@ export async function handleCdcComplete(
 		[...lockedByHash.values()],
 		body.nar_size
 	);
+	recordPush(env, info.cache, { deduplicated: false, narBytes: body.nar_size });
 	warm();
 	const fileSize = records.every((r) => r.fileSize != null)
 		? records.reduce((sum, r) => sum + (r.fileSize ?? 0), 0)

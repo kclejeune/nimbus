@@ -1,8 +1,10 @@
-// Read-path traffic metrics via Workers Analytics Engine. Points are written
-// in the gateway (router.ts), which runs on every request — edge-cache hits
+// Traffic metrics via Workers Analytics Engine. Read points are written in
+// the gateway (router.ts), which runs on every request — edge-cache hits
 // never reach the CachedStore entrypoint but do traverse the gateway, so the
-// counts are complete. Unbound (dev/tests) or failing writes never affect
-// serving.
+// counts are complete. Push points are written by the client-push entry
+// points in upload.ts (pull-through ingestion shares the inner helpers but is
+// deliberately not counted as push traffic). Unbound (dev/tests) or failing
+// writes never affect serving.
 //
 // Classification is by response status, so redirect-tier narinfo passthroughs
 // (200s whose content came from an upstream) count as hits; the upstream
@@ -43,5 +45,25 @@ export function recordRead(
 		});
 	} catch {
 		// Metrics must never fail a read.
+	}
+}
+
+/** Record one completed push: a store path landing in a cache, either by
+ *  storing a fresh NAR or by reusing content already present (NAR-level
+ *  dedup). `narBytes` is the logical NAR size, so byte totals line up with
+ *  the storage charts rather than wire compression. */
+export function recordPush(
+	env: Env,
+	cache: string,
+	outcome: { deduplicated: boolean; narBytes: number }
+): void {
+	try {
+		env.CACHE_METRICS?.writeDataPoint({
+			blobs: ['push', outcome.deduplicated ? 'deduplicated' : 'stored', cache],
+			doubles: [1, outcome.narBytes],
+			indexes: [cache]
+		});
+	} catch {
+		// Metrics must never fail a push.
 	}
 }

@@ -47,6 +47,19 @@
 		}))
 	);
 
+	const pushTotal = $derived(traffic ? traffic.push.stored + traffic.push.deduplicated : 0);
+	// Share of pushed paths that needed no new NAR — dedup working at push time.
+	const pushDedupPct = $derived(
+		pushTotal > 0 ? Math.round((100 * traffic!.push.deduplicated) / pushTotal) : null
+	);
+	const pushPoints = $derived(
+		(traffic?.pushDays ?? []).map((d) => ({
+			label: d.date,
+			value: d.stored + d.deduplicated,
+			delta: d.stored + d.deduplicated
+		}))
+	);
+
 	const unitWord = $derived(
 		data.granularity === 'day' ? 'day' : data.granularity === 'month' ? 'month' : 'week'
 	);
@@ -111,7 +124,7 @@
 	<header class="mb-8">
 		<h1 class="text-2xl font-semibold tracking-tight">Monitoring</h1>
 		<p class="mt-1 text-sm text-muted-foreground">
-			Storage growth and read traffic across all caches.
+			Storage growth and cache traffic across all caches.
 		</p>
 	</header>
 
@@ -176,7 +189,7 @@
 		<div class="mb-4">
 			<h2 class="text-base font-semibold tracking-tight">Traffic</h2>
 			<p class="mt-0.5 text-xs text-muted-foreground">
-				Read requests over the last 30 days, from Workers Analytics Engine.
+				Reads and pushes over the last 30 days, from Workers Analytics Engine.
 			</p>
 		</div>
 
@@ -198,25 +211,50 @@
 					formatCount(traffic.narinfo.upstream + traffic.nar.upstream),
 					'answered via upstream caches'
 				)}
+				{@render stat('Paths pushed', formatCount(pushTotal), 'last 30 days')}
+				{@render stat(
+					'Push dedup',
+					pushDedupPct === null ? '—' : `${pushDedupPct}%`,
+					'pushes reusing an already-stored NAR'
+				)}
+				{@render stat(
+					'Pushed data',
+					formatBytes(traffic.push.bytes),
+					'NAR bytes before dedup',
+					// Odd card out in the two-column mobile grid: span the full row.
+					'col-span-2 lg:col-span-1'
+				)}
 			</div>
 
-			<div class="rounded-lg border bg-card p-5">
-				{@render chartCard('Read traffic', `${formatCount(trafficRequests)} reads · 30 days`)}
-				<AreaChart
-					points={trafficPoints}
-					format={formatCount}
-					deltaFormat={formatCount}
-					deltaLabel="this day"
-					ariaLabel="Read requests per day"
-				/>
+			<div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
+				<div class="rounded-lg border bg-card p-5">
+					{@render chartCard('Read traffic', `${formatCount(trafficRequests)} reads · 30 days`)}
+					<AreaChart
+						points={trafficPoints}
+						format={formatCount}
+						deltaFormat={formatCount}
+						deltaLabel="this day"
+						ariaLabel="Read requests per day"
+					/>
+				</div>
+				<div class="rounded-lg border bg-card p-5">
+					{@render chartCard('Push traffic', `${formatCount(pushTotal)} paths · 30 days`)}
+					<AreaChart
+						points={pushPoints}
+						format={formatCount}
+						deltaFormat={formatCount}
+						deltaLabel="this day"
+						ariaLabel="Paths pushed per day"
+					/>
+				</div>
 			</div>
 		{:else}
 			<div class="rounded-lg border border-dashed px-6 py-12 text-center">
 				<p class="text-sm text-muted-foreground">Traffic metrics aren't connected.</p>
 				<p class="mx-auto mt-1 max-w-md text-xs text-muted-foreground">
 					Set the <code class="font-mono">CF_ACCOUNT_ID</code> and
-					<code class="font-mono">CF_ANALYTICS_TOKEN</code> secrets to chart cache reads, hit rate, and
-					upstream fetches here.
+					<code class="font-mono">CF_ANALYTICS_TOKEN</code> secrets to chart cache reads, pushes, hit
+					rate, and upstream fetches here.
 				</p>
 			</div>
 		{/if}

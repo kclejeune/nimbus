@@ -20,11 +20,28 @@ export interface TrafficDay extends TrafficTotals {
 	date: string;
 }
 
+export interface PushTotals {
+	/** Paths pushed with a fresh NAR upload. */
+	stored: number;
+	/** Paths pushed by reusing an already-stored NAR. */
+	deduplicated: number;
+	/** Logical NAR bytes across both, matching the storage charts' unit. */
+	bytes: number;
+}
+
+export interface PushDay extends PushTotals {
+	/** ISO date (UTC day). */
+	date: string;
+}
+
 export interface TrafficSummary {
 	/** Zero-filled last-30-days series, narinfo + NAR combined. */
 	days: TrafficDay[];
 	narinfo: TrafficTotals;
 	nar: TrafficTotals;
+	push: PushTotals;
+	/** Zero-filled last-30-days push series. */
+	pushDays: PushDay[];
 }
 
 interface SqlRow {
@@ -32,16 +49,20 @@ interface SqlRow {
 	kind: string;
 	event: string;
 	n: number | string;
+	bytes: number | string;
 }
 
 /** Last 30 days of read-path traffic, or null when unconfigured/unreachable. */
 export async function loadTraffic(env: Env): Promise<TrafficSummary | null> {
 	if (!env.CF_ACCOUNT_ID || !env.CF_ANALYTICS_TOKEN) return null;
 
-	// _sample_interval sums to the true event count under AE's sampling.
+	// _sample_interval sums to the true event count under AE's sampling; the
+	// same weighting recovers byte totals (double2, written by push points and
+	// zero on read points).
 	const sql = `
 		SELECT toStartOfDay(timestamp) AS day, blob1 AS kind, blob2 AS event,
-		       SUM(_sample_interval) AS n
+		       SUM(_sample_interval) AS n,
+		       SUM(_sample_interval * double2) AS bytes
 		FROM ${DATASET}
 		WHERE timestamp > NOW() - INTERVAL '30' DAY
 		GROUP BY day, kind, event
@@ -72,18 +93,35 @@ export async function loadTraffic(env: Env): Promise<TrafficSummary | null> {
 
 function summarize(rows: SqlRow[]): TrafficSummary {
 	const zero = (): TrafficTotals => ({ hit: 0, miss: 0, upstream: 0 });
+	const zeroPush = (): PushTotals => ({ stored: 0, deduplicated: 0, bytes: 0 });
 	const narinfo = zero();
 	const nar = zero();
+	const push = zeroPush();
 	const byDay = new Map<string, TrafficTotals>();
+	const pushByDay = new Map<string, PushTotals>();
 
 	for (const row of rows) {
 		const n = Number(row.n) || 0;
+		const date = row.day.slice(0, 10);
+
+		if (row.kind === 'push') {
+			const event = row.event as 'stored' | 'deduplicated';
+			if (event !== 'stored' && event !== 'deduplicated') continue;
+			const bytes = Number(row.bytes) || 0;
+			push[event] += n;
+			push.bytes += bytes;
+			const day = pushByDay.get(date) ?? zeroPush();
+			day[event] += n;
+			day.bytes += bytes;
+			pushByDay.set(date, day);
+			continue;
+		}
+
 		const event = row.event as keyof TrafficTotals;
 		if (!(event in narinfo)) continue; // 'other' stays out of the summary
 		const totals = row.kind === 'narinfo' ? narinfo : row.kind === 'nar' ? nar : null;
 		if (!totals) continue;
 		totals[event] += n;
-		const date = row.day.slice(0, 10);
 		const day = byDay.get(date) ?? zero();
 		day[event] += n;
 		byDay.set(date, day);
@@ -91,11 +129,13 @@ function summarize(rows: SqlRow[]): TrafficSummary {
 
 	// Zero-fill so idle days chart as zero instead of being skipped.
 	const days: TrafficDay[] = [];
+	const pushDays: PushDay[] = [];
 	const DAY_MS = 86_400_000;
 	const start = Date.now() - 29 * DAY_MS;
 	for (let i = 0; i < 30; i++) {
 		const date = new Date(start + i * DAY_MS).toISOString().slice(0, 10);
 		days.push({ date, ...(byDay.get(date) ?? zero()) });
+		pushDays.push({ date, ...(pushByDay.get(date) ?? zeroPush()) });
 	}
-	return { days, narinfo, nar };
+	return { days, narinfo, nar, push, pushDays };
 }
