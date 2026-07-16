@@ -10,17 +10,16 @@
 		narSize: number | null;
 		/** Present when the table shows its Cache column. */
 		cache?: { name: string; href: string };
+		/** Annotation after the path (e.g. where an unresolved reference
+		 *  actually lives); unlinked rows default to "not in this cache". */
+		note?: string;
 	}
 </script>
 
 <script lang="ts">
 	import { formatBytes, formatIsoDate, shortStorePath } from '$lib/format';
 
-	let {
-		rows,
-		showCache = false,
-		unresolvedNote = 'not in this cache'
-	}: { rows: StorePathTableRow[]; showCache?: boolean; unresolvedNote?: string } = $props();
+	let { rows, showCache = false }: { rows: StorePathTableRow[]; showCache?: boolean } = $props();
 </script>
 
 <div class="overflow-x-auto rounded-lg border">
@@ -43,11 +42,14 @@
 							<a href={row.href} class="hover:text-primary hover:underline">
 								{shortStorePath(row.storePath)}
 							</a>
+							{#if row.note}
+								<span class="ml-1 font-sans text-muted-foreground">{row.note}</span>
+							{/if}
 						</td>
 					{:else}
 						<td class="px-4 py-2.5 font-mono text-xs break-all text-muted-foreground">
 							{row.storePath ? shortStorePath(row.storePath) : row.hash}
-							<span class="ml-1 font-sans">{unresolvedNote}</span>
+							<span class="ml-1 font-sans">{row.note ?? 'not in this cache'}</span>
 						</td>
 					{/if}
 					{#if showCache}

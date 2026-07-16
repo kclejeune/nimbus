@@ -1,5 +1,5 @@
 import { error } from '@sveltejs/kit';
-import { readSession, STORE_PATH_HASH_RE, findCache } from '$lib/server/cache/db';
+import { PARAM_BATCH, readSession, STORE_PATH_HASH_RE, findCache } from '$lib/server/cache/db';
 import { syncObjectRefs } from '$lib/server/cache/gc';
 import { canBrowseCache } from '$lib/server/auth/permissions';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
@@ -179,6 +179,71 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 
 	if (!object) throw error(404, 'Store path not found in this cache');
 
+	// References with no object in this cache usually exist somewhere else:
+	// pushes skip paths an upstream already serves (get-missing-paths filters
+	// on cached verdicts), and closures can span caches. Resolve the gaps from
+	// data already on hand — other browsable caches first (linkable, with real
+	// metadata), then cached upstream verdicts — never by probing upstreams.
+	type Elsewhere =
+		| { kind: 'cache'; cache: string; storePath: string; createdAt: string; narSize: number }
+		| { kind: 'upstream'; host: string };
+	const elsewhere = new Map<string, Elsewhere>();
+	const unresolved = refs.results.filter((r) => !r.store_path).map((r) => r.ref_hash);
+	for (let i = 0; i < unresolved.length; i += PARAM_BATCH) {
+		const batch = unresolved.slice(i, i + PARAM_BATCH);
+		const marks = batch.map(() => '?').join(', ');
+		const [inCaches, inUpstreams] = await Promise.all([
+			read
+				.prepare(
+					`SELECT o.store_path_hash AS hash, o.store_path, o.created_at, n.nar_size,
+					        c.name AS cache_name, c.is_public
+					 FROM object o
+					 JOIN cache c ON c.id = o.cache_id
+					 JOIN nar n ON n.id = o.nar_id
+					 WHERE o.store_path_hash IN (${marks}) AND o.cache_id != ?
+					   AND c.deleted_at IS NULL
+					 ORDER BY c.priority ASC, c.name ASC`
+				)
+				.bind(...batch, cache.id)
+				.all<{
+					hash: string;
+					store_path: string;
+					created_at: string;
+					nar_size: number;
+					cache_name: string;
+					is_public: number;
+				}>(),
+			read
+				.prepare(
+					`SELECT uc.store_path_hash AS hash, u.url
+					 FROM upstream_check uc
+					 JOIN upstream u ON u.id = uc.upstream_id
+					 WHERE uc.present = 1 AND uc.store_path_hash IN (${marks})
+					 ORDER BY u.position ASC`
+				)
+				.bind(...batch)
+				.all<{ hash: string; url: string }>()
+		]);
+		for (const row of inCaches.results) {
+			if (elsewhere.has(row.hash)) continue;
+			if (!canBrowseCache(access, { name: row.cache_name, isPublic: row.is_public === 1 })) {
+				continue;
+			}
+			elsewhere.set(row.hash, {
+				kind: 'cache',
+				cache: row.cache_name,
+				storePath: row.store_path,
+				createdAt: row.created_at,
+				narSize: row.nar_size
+			});
+		}
+		for (const row of inUpstreams.results) {
+			if (!elsewhere.has(row.hash)) {
+				elsewhere.set(row.hash, { kind: 'upstream', host: new URL(row.url).host });
+			}
+		}
+	}
+
 	return {
 		cache: { name: cache.name },
 		object: {
@@ -223,7 +288,8 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 			hash: r.ref_hash,
 			storePath: r.store_path,
 			createdAt: r.created_at,
-			narSize: r.nar_size
+			narSize: r.nar_size,
+			elsewhere: r.store_path ? null : (elsewhere.get(r.ref_hash) ?? null)
 		})),
 		referrers: {
 			rows: referrers.results.map((r) => ({

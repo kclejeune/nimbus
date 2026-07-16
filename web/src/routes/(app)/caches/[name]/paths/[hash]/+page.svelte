@@ -209,13 +209,40 @@
 			</div>
 		{:else}
 			<StorePathTable
-				rows={data.references.map((ref) => ({
-					href: ref.storePath ? `${cacheHref}/paths/${ref.hash}` : null,
-					storePath: ref.storePath,
-					hash: ref.hash,
-					createdAt: ref.createdAt,
-					narSize: ref.narSize
-				}))}
+				rows={data.references.map((ref) => {
+					if (ref.storePath) {
+						return {
+							href: `${cacheHref}/paths/${ref.hash}`,
+							storePath: ref.storePath,
+							hash: ref.hash,
+							createdAt: ref.createdAt,
+							narSize: ref.narSize
+						};
+					}
+					// Not in this cache — say where it actually lives when known:
+					// another browsable cache (linked) or a cached upstream verdict.
+					if (ref.elsewhere?.kind === 'cache') {
+						return {
+							href: `/caches/${encodeURIComponent(ref.elsewhere.cache)}/paths/${ref.hash}`,
+							storePath: ref.elsewhere.storePath,
+							hash: ref.hash,
+							createdAt: ref.elsewhere.createdAt,
+							narSize: ref.elsewhere.narSize,
+							note: `in ${ref.elsewhere.cache}`
+						};
+					}
+					return {
+						href: null,
+						storePath: null,
+						hash: ref.hash,
+						createdAt: null,
+						narSize: null,
+						note:
+							ref.elsewhere?.kind === 'upstream'
+								? `available from ${ref.elsewhere.host}`
+								: undefined
+					};
+				})}
 			/>
 		{/if}
 	</section>
