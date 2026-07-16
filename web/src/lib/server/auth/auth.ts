@@ -28,7 +28,7 @@ export function createAuth(env: Env) {
 		baseURL: env.APP_URL,
 		trustedOrigins: env.APP_URL ? [env.APP_URL] : undefined,
 		// One user, many provider accounts. Providers can disagree on email
-		// (e.g. the OIDC IdP vs GitHub), so explicit linking from /settings is
+		// (e.g. the OIDC IdP vs GitHub), so explicit linking from /account is
 		// allowed across emails — identity is anchored to the signed-in
 		// session, not the address the provider reports.
 		account: {

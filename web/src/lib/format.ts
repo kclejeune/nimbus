@@ -17,6 +17,23 @@ export function formatDate(unix: number): string {
 	return new Date(unix * 1000).toISOString().slice(0, 10);
 }
 
+/** GiB value for a size-limit input from stored bytes; '' when unset. */
+export function gibInputValue(bytes: number | null | undefined): string {
+	return bytes != null ? (bytes / 2 ** 30).toFixed(1).replace(/\.0$/, '') : '';
+}
+
+/**
+ * Bytes from a GiB size-limit form field: '' means no limit (null), anything
+ * that isn't a positive number is invalid (undefined, caller rejects).
+ */
+export function gibFieldToBytes(raw: FormDataEntryValue | null): number | null | undefined {
+	const trimmed = String(raw ?? '').trim();
+	if (trimmed === '') return null;
+	const gib = Number(trimmed);
+	if (!Number.isFinite(gib) || gib <= 0) return undefined;
+	return Math.round(gib * 2 ** 30);
+}
+
 /** "YYYY-MM-DD HH:MM" (UTC) from an ISO string; em dash when absent. */
 export function formatIsoDateTime(iso: string | null | undefined): string {
 	return iso ? iso.slice(0, 16).replace('T', ' ') : '—';

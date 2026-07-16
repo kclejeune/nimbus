@@ -206,6 +206,21 @@ async function persistLastRun(
 	).catch((e) => console.warn(`gc: last-run summary write failed: ${e}`));
 }
 
+/** Counterpart reader for the dashboards: the last persisted run, or null
+ * before the first real run (a malformed value is treated the same rather
+ * than breaking the page). */
+export async function readGcLastRun(db: D1): Promise<GcLastRun | null> {
+	const row = await db
+		.prepare(`SELECT value FROM server_config WHERE key = '${GC_LAST_RUN_KEY}'`)
+		.first<{ value: string }>();
+	if (!row) return null;
+	try {
+		return JSON.parse(row.value) as GcLastRun;
+	} catch {
+		return null;
+	}
+}
+
 /**
  * Evict the narinfo of reaped objects from the edge cache. Purges are scoped
  * to the entrypoint that issues them, so this goes through the CachedStore

@@ -1,22 +1,15 @@
 <script lang="ts">
-	import { enhance } from '$app/forms';
-	import { toastErrors } from '$lib/enhance';
 	import { formatBytes, formatCount, formatRelativeTime } from '$lib/format';
 	import IngestChart from '$lib/components/ingest-chart.svelte';
 	import UnifiedEndpointCard from '$lib/components/unified-endpoint-card.svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
-	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Card from '$lib/components/ui/card/index.js';
-	import { Input } from '$lib/components/ui/input/index.js';
-	import { Label } from '$lib/components/ui/label/index.js';
-	import { Check, Trash2, TriangleAlert } from '@lucide/svelte';
+	import { TriangleAlert } from '@lucide/svelte';
 
-	let { data, form } = $props();
+	let { data } = $props();
 	const s = $derived(data.stats);
-	// GC and the global storage limit are admin-only concerns.
+	// GC status is admin-only; the controls themselves live on /settings.
 	const isAdmin = $derived(data.user?.role === 'admin');
-	let running = $state(false);
-	let savingLimit = $state(false);
 
 	const usagePct = $derived(
 		data.globalMaxBytes ? Math.round((s.storageBytes / data.globalMaxBytes) * 100) : null
@@ -59,32 +52,8 @@
 		}
 	]);
 
-	const reclaimable = $derived(s.pendingNars + s.orphanNars + s.orphanChunks);
-	const globalMaxGib = $derived(
-		data.globalMaxBytes != null
-			? (data.globalMaxBytes / 2 ** 30).toFixed(1).replace(/\.0$/, '')
-			: ''
-	);
 	const lastRun = $derived(data.gcLastRun);
-	const lastRunReclaimed = $derived(
-		lastRun
-			? (lastRun.stats.abandoned_caches_reaped ?? 0) +
-					(lastRun.stats.detached_objects_reaped ?? 0) +
-					(lastRun.stats.expired_objects_reaped ?? 0) +
-					(lastRun.stats.size_evicted_objects ?? 0) +
-					(lastRun.stats.global_evicted_objects ?? 0)
-			: 0
-	);
-	const gcReclaimed = $derived(
-		form?.gcStats
-			? (form.gcStats.abandoned_caches_reaped ?? 0) +
-					(form.gcStats.expired_objects_reaped ?? 0) +
-					(form.gcStats.size_evicted_objects ?? 0) +
-					(form.gcStats.global_evicted_objects ?? 0) +
-					(form.gcStats.orphan_nars_reaped ?? 0) +
-					(form.gcStats.orphan_chunks_reaped ?? 0)
-			: 0
-	);
+	const gcIntegrityIssues = $derived(lastRun?.integrity?.incompleteObjects ?? 0);
 </script>
 
 <div
@@ -124,150 +93,22 @@
 	<IngestChart buckets={data.buckets} />
 
 	{#if isAdmin}
-		<Card.Root>
-			<Card.Header>
-				<Card.Title>Garbage collection</Card.Title>
-				<Card.Description>
-					Runs nightly. Reaps abandoned uploads and soft-deleted caches, retention-expired paths,
-					and unreferenced NARs and chunks.
-				</Card.Description>
-				<Card.Action>
-					<form
-						method="POST"
-						action="?/gc"
-						class="flex items-center gap-2"
-						use:enhance={toastErrors(() => {
-							running = true;
-							return async ({ update }) => {
-								await update();
-								running = false;
-							};
-						})}
-					>
-						<Button type="submit" name="dry_run" value="1" variant="ghost" disabled={running}>
-							Preview
-						</Button>
-						<Button type="submit" variant="outline" disabled={running}>
-							<Trash2 class="size-4" />
-							{running ? 'Running…' : 'Run now'}
-						</Button>
-					</form>
-				</Card.Action>
-			</Card.Header>
-			<Card.Content class="flex flex-col gap-4">
-				<form
-					method="POST"
-					action="?/saveLimit"
-					class="flex flex-wrap items-end gap-3 border-t pt-4"
-					use:enhance={toastErrors(() => {
-						savingLimit = true;
-						return async ({ update }) => {
-							await update({ reset: false });
-							savingLimit = false;
-						};
-					})}
-				>
-					<div class="space-y-1">
-						<Label for="global_max_gib" class="text-xs text-muted-foreground">
-							Global storage limit (GiB)
-						</Label>
-						<Input
-							id="global_max_gib"
-							name="global_max_gib"
-							type="number"
-							step="0.1"
-							min="0"
-							placeholder="No limit"
-							value={globalMaxGib}
-							class="w-40"
-						/>
-					</div>
-					<Button type="submit" variant="outline" size="sm" disabled={savingLimit}>
-						{savingLimit ? 'Saving…' : 'Save limit'}
-					</Button>
-					<p class="basis-full text-xs text-muted-foreground">
-						Physical (deduplicated) bytes across all caches. When exceeded — checked after every
-						push and nightly — least-recently-used closures are evicted from any cache until under
-						the limit; pinned closures are never touched.
-					</p>
-					{#if form?.limitError}
-						<p class="text-sm text-destructive">{form.limitError}</p>
-					{:else if form?.limitSaved}
-						<span class="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
-							<Check class="size-4" /> Saved
-						</span>
-					{/if}
-				</form>
-
-				{#if lastRun}
-					<div class="flex flex-col gap-2 border-t pt-4 text-sm">
-						<p class="text-muted-foreground">
-							Last run <span title={lastRun.at}>{formatRelativeTime(lastRun.at)}</span> — removed {formatCount(
-								lastRunReclaimed
-							)} paths ({formatCount(lastRun.stats.expired_objects_reaped ?? 0)} expired, {formatCount(
-								(lastRun.stats.size_evicted_objects ?? 0) +
-									(lastRun.stats.global_evicted_objects ?? 0)
-							)} over size limits), reclaimed {formatCount(lastRun.stats.orphan_nars_reaped ?? 0)} NARs
-							and {formatCount(lastRun.stats.orphan_chunks_reaped ?? 0)} chunks.
-						</p>
-						{#if lastRun.integrity && lastRun.integrity.incompleteObjects > 0}
-							<details class="text-amber-600 dark:text-amber-400">
-								<summary class="inline-flex cursor-pointer items-center gap-1.5">
-									<TriangleAlert class="size-4" />
-									{formatCount(lastRun.integrity.incompleteObjects)}
-									{lastRun.integrity.incompleteObjects === 1 ? 'path has' : 'paths have'} references neither
-									stored locally nor covered by an upstream — Nix may fail to substitute their closures.
-								</summary>
-								<ul class="mt-2 space-y-0.5 ps-6 font-mono text-xs">
-									{#each lastRun.integrity.examples as example (example)}
-										<li>{example}</li>
-									{/each}
-								</ul>
-							</details>
-						{/if}
-					</div>
+		<!-- Status only; the GC and storage-limit controls live on /settings. -->
+		<p class="flex flex-wrap items-center gap-x-1.5 text-sm text-muted-foreground">
+			{#if lastRun}
+				Garbage collection last ran
+				<span title={lastRun.at}>{formatRelativeTime(lastRun.at)}</span>
+				{#if gcIntegrityIssues > 0}
+					<span class="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+						<TriangleAlert class="size-3.5" />
+						{formatCount(gcIntegrityIssues)} incomplete
+						{gcIntegrityIssues === 1 ? 'closure' : 'closures'}
+					</span>
 				{/if}
-
-				<dl class="grid grid-cols-3 gap-4 border-t pt-4 text-sm">
-					<div>
-						<dt class="text-xs text-muted-foreground">Pending uploads</dt>
-						<dd class="mt-0.5 font-mono">{formatCount(s.pendingNars)}</dd>
-					</div>
-					<div>
-						<dt class="text-xs text-muted-foreground">Orphan NARs</dt>
-						<dd class="mt-0.5 font-mono">{formatCount(s.orphanNars)}</dd>
-					</div>
-					<div>
-						<dt class="text-xs text-muted-foreground">Orphan chunks</dt>
-						<dd class="mt-0.5 font-mono">{formatCount(s.orphanChunks)}</dd>
-					</div>
-				</dl>
-
-				{#if form?.gcError}
-					<p class="text-sm text-destructive">{form.gcError}</p>
-				{:else if form?.gcStats && form?.dryRun}
-					<p class="text-sm text-muted-foreground">
-						Preview: {formatCount(
-							(form.gcStats.expired_objects_reaped ?? 0) +
-								(form.gcStats.size_evicted_objects ?? 0) +
-								(form.gcStats.global_evicted_objects ?? 0)
-						)} paths would be removed by retention ({formatCount(
-							form.gcStats.expired_objects_reaped ?? 0
-						)} expired, {formatCount(form.gcStats.size_evicted_objects ?? 0)} over cache limits, {formatCount(
-							form.gcStats.global_evicted_objects ?? 0
-						)} over the global limit). Nothing was deleted.
-					</p>
-				{:else if form?.gcStats}
-					<p class="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
-						<Check class="size-4 text-primary" />
-						Reclaimed {formatCount(gcReclaimed)} items ({formatCount(
-							form.gcStats.orphan_chunks_reaped ?? 0
-						)} chunks freed from storage).
-					</p>
-				{:else if reclaimable === 0}
-					<p class="text-sm text-muted-foreground">Nothing to reclaim right now.</p>
-				{/if}
-			</Card.Content>
-		</Card.Root>
+			{:else}
+				Garbage collection hasn't run yet
+			{/if}
+			· <a href="/settings" class="text-foreground hover:underline">manage in Settings</a>
+		</p>
 	{/if}
 </div>

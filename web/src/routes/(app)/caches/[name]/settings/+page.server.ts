@@ -16,6 +16,7 @@ import { decodeSubject, encodeSubject, insertGrant, removeGrantRow } from '$lib/
 import { effectiveAccessOf, requireAdmin, requireCachePermission } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
 import { formatDuration } from '$lib/duration';
+import { gibFieldToBytes } from '$lib/format';
 import { type UpstreamMode } from '$lib/server/cache/missing-paths';
 import {
 	cacheUpstreamOverrides,
@@ -242,12 +243,10 @@ export const actions: Actions = {
 			return fail(403, { error: 'Only admins can change cache visibility.' });
 		}
 
-		const maxGibRaw = String(form.get('retention_max_gib') ?? '').trim();
-		const maxGib = maxGibRaw === '' ? null : Number(maxGibRaw);
-		if (maxGib !== null && (!Number.isFinite(maxGib) || maxGib <= 0)) {
+		const maxBytes = gibFieldToBytes(form.get('retention_max_gib'));
+		if (maxBytes === undefined) {
 			return fail(400, { error: 'Size limit must be a positive number of GiB.' });
 		}
-		const maxBytes = maxGib === null ? null : Math.round(maxGib * 2 ** 30);
 
 		// Upstream mode picker: one field per registry entry. Enforced entries
 		// cannot be turned off (resolve-time clamping makes 'off' harmless, but

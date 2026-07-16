@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { confirmFirst, toastErrors } from '$lib/enhance';
-	import { formatBytes, formatCount } from '$lib/format';
+	import { formatBytes, formatCount, gibInputValue } from '$lib/format';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
@@ -39,11 +39,7 @@
 	});
 	const anonRoots = $derived(data.roots.filter((r) => !r.pinName));
 
-	const maxGib = $derived(
-		c.retentionMaxBytes != null
-			? (c.retentionMaxBytes / 2 ** 30).toFixed(1).replace(/\.0$/, '')
-			: ''
-	);
+	const maxGib = $derived(gibInputValue(c.retentionMaxBytes));
 </script>
 
 <div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
