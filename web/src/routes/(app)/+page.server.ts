@@ -5,6 +5,7 @@ import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { requireAdmin } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
+import { readSession } from '$lib/server/cache/db';
 import type { PageServerLoad, Actions } from './$types';
 
 type Count = { n: number };
@@ -13,10 +14,15 @@ export const load: PageServerLoad = async ({ platform }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
+	// The heavy aggregations read a replica session; the two server_config
+	// keys stay on the primary because this page's own actions write them
+	// (the reloaded value must reflect a just-saved limit / just-run GC).
+	const read = readSession(db);
+
 	// Daily ingest series for the chart: last 90 days, zero-filled below.
 	const DAY_MS = 86400_000;
 	const ingestSince = new Date(Date.now() - 90 * DAY_MS).toISOString().slice(0, 10);
-	const ingestStmt = db
+	const ingestStmt = read
 		.prepare(
 			`SELECT date(o.created_at) AS bucket, COUNT(*) AS paths,
 			        COALESCE(SUM(ch.file_size), 0) AS bytes
@@ -44,32 +50,32 @@ export const load: PageServerLoad = async ({ platform }) => {
 		proxyPublicKey,
 		proxyUpstreams
 	] = await Promise.all([
-		db.prepare('SELECT COUNT(*) AS n FROM cache WHERE deleted_at IS NULL').first<Count>(),
-		db
+		read.prepare('SELECT COUNT(*) AS n FROM cache WHERE deleted_at IS NULL').first<Count>(),
+		read
 			.prepare(
 				'SELECT COUNT(*) AS n FROM object o JOIN cache c ON c.id = o.cache_id WHERE c.deleted_at IS NULL'
 			)
 			.first<Count>(),
-		db.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'V'").first<Count>(),
-		db
+		read.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'V'").first<Count>(),
+		read
 			.prepare("SELECT COALESCE(SUM(file_size), 0) AS n FROM chunk WHERE state = 'V'")
 			.first<Count>(),
 		// Logical bytes: every object's NAR counted once per reference. The
 		// excess over physical storage is what NAR- and chunk-level dedup saves.
-		db
+		read
 			.prepare(
 				'SELECT COALESCE(SUM(sz.bytes), 0) AS n FROM object o ' +
 					'JOIN (SELECT cr.nar_id, SUM(ch.file_size) AS bytes FROM chunkref cr ' +
 					'JOIN chunk ch ON ch.id = cr.chunk_id GROUP BY cr.nar_id) sz ON sz.nar_id = o.nar_id'
 			)
 			.first<Count>(),
-		db.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'P'").first<Count>(),
-		db
+		read.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'P'").first<Count>(),
+		read
 			.prepare(
 				'SELECT COUNT(*) AS n FROM nar n WHERE NOT EXISTS (SELECT 1 FROM object o WHERE o.nar_id = n.id)'
 			)
 			.first<Count>(),
-		db
+		read
 			.prepare(
 				'SELECT COUNT(*) AS n FROM chunk WHERE NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id)'
 			)
@@ -86,7 +92,7 @@ export const load: PageServerLoad = async ({ platform }) => {
 					.then(extractPublicKey)
 					.catch(() => null)
 			: null,
-		allLiveUpstreams(db)
+		allLiveUpstreams(read)
 	]);
 
 	// Written by GC's persistLastRun; absent until the first real run, and a

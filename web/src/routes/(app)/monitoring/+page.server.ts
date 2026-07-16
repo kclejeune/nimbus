@@ -1,5 +1,6 @@
 import { dev } from '$app/environment';
 import { error } from '@sveltejs/kit';
+import { readSession } from '$lib/server/cache/db';
 import { loadTraffic } from '$lib/server/traffic';
 import type { PageServerLoad } from './$types';
 
@@ -94,6 +95,9 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 	// Config-gated (returns null when unconfigured); runs alongside the D1 work.
 	const trafficPromise = platform?.env ? loadTraffic(platform.env) : Promise.resolve(null);
 
+	// Read-only aggregation page: the heavy scans stay off the write primary.
+	const read = readSession(db);
+
 	const now = Date.now();
 	const startMs = rangeStart(range, now);
 	const startDate = startMs === null ? null : iso(bucketStart(startMs, granularity));
@@ -101,7 +105,7 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 	// The bucketed series and the pre-range baseline are independent — run them
 	// together.
 	const seriesStmt = startDate
-		? db
+		? read
 				.prepare(
 					`SELECT ${bucketExpr(granularity)} AS bucket, COUNT(*) AS paths,
 					        COALESCE(SUM(ch.file_size), 0) AS bytes
@@ -110,7 +114,7 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 					 GROUP BY bucket ORDER BY bucket`
 				)
 				.bind(startDate)
-		: db.prepare(
+		: read.prepare(
 				`SELECT ${bucketExpr(granularity)} AS bucket, COUNT(*) AS paths,
 				        COALESCE(SUM(ch.file_size), 0) AS bytes
 				 ${NAR_BYTES_JOIN}
@@ -118,7 +122,7 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 			);
 	// Cumulative series should include everything added before the range starts.
 	const baselineStmt = startDate
-		? db
+		? read
 				.prepare(
 					`SELECT COUNT(*) AS paths, COALESCE(SUM(ch.file_size), 0) AS bytes ${NAR_BYTES_JOIN} WHERE o.created_at < ?1`
 				)

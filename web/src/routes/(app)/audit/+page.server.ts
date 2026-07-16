@@ -1,5 +1,6 @@
 import { error } from '@sveltejs/kit';
 import { requireAdmin } from '$lib/server/auth/guard';
+import { readSession } from '$lib/server/cache/db';
 import type { PageServerLoad } from './$types';
 
 import { parseLimit, parsePage } from '$lib/pagination';
@@ -21,11 +22,13 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 
 	const page = parsePage(url.searchParams.get('page'));
 	const limit = parseLimit(url.searchParams.get('limit'));
+	// Read-only viewer; an entry lagging one replica tick is fine.
+	const read = readSession(db);
 
 	// One row past the page detects "next" without a second scan per request;
 	// the total drives the "X–Y of N" footer.
 	const [{ results }, total] = await Promise.all([
-		db
+		read
 			.prepare(
 				`SELECT a.id, a.action, a.target, a.detail, a.created_at,
 				        u.name AS user_name, u.email AS user_email
@@ -36,7 +39,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 			)
 			.bind(limit + 1, (page - 1) * limit)
 			.all<AuditRow>(),
-		db.prepare('SELECT COUNT(*) AS n FROM audit_log').first<{ n: number }>()
+		read.prepare('SELECT COUNT(*) AS n FROM audit_log').first<{ n: number }>()
 	]);
 
 	return {

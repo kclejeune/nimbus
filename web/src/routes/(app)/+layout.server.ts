@@ -1,4 +1,5 @@
 import { redirect } from '@sveltejs/kit';
+import { readSession } from '$lib/server/cache/db';
 import type { LayoutServerLoad } from './$types';
 
 // Non-active users never get this far: hooks.server.ts walls them off to
@@ -14,7 +15,9 @@ export const load: LayoutServerLoad = async ({ locals, url, platform }) => {
 	let pendingUsers = 0;
 	const db = platform?.env.ATTIC_DB;
 	if (db && locals.user.role === 'admin') {
-		const row = await db
+		// Runs on every app navigation; a replica read keeps it off the primary
+		// (a just-activated user's badge lagging one navigation is fine).
+		const row = await readSession(db)
 			.prepare("SELECT count(*) AS n FROM user WHERE status = 'pending'")
 			.first<{ n: number }>();
 		pendingUsers = row?.n ?? 0;
