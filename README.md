@@ -18,11 +18,10 @@ nimbus push mycache ./result
 nimbus use mycache                            # wires up nix.conf (+ netrc if private)
 ```
 
-Deploying the server is one Worker: `cd web && npm run build && npx wrangler
-deploy` — see [Deploy](#deploy). The [CLI](#cli) section covers the full
-command set.
+Deploying the server is one Worker: `cd web && npm run deploy` — see
+[Deploy](#deploy). The [CLI](#cli) section covers the full command set.
 
-![Overview dashboard: storage stats, ingest activity, and garbage collection controls](docs/screenshots/overview.png)
+![Overview dashboard: storage and dedup stats, the unified cache endpoint, and ingest activity](docs/screenshots/overview.png)
 
 ## Motivation
 
@@ -52,11 +51,15 @@ underneath for one that fits inside a Worker's constraints.
 
 - **Attic-compatible protocol** — the full binary-cache surface (narinfo/NAR
   serving with managed Ed25519 signing, `nix-cache-info`, ranges) plus the
-  `/_api/v1` API (get-missing-paths, upload-path, cache-config). Existing
-  attic clients work unmodified for everything but >100 MB pushes.
+  `/_api/v1` API (get-missing-paths, upload-path, cache-config), extended with
+  nimbus endpoints for cache rename, pins/GC roots, server GC, and chunked
+  uploads. Existing attic clients work unmodified for everything but > 100 MB
+  pushes (the Workers request-body limit), which need the nimbus CLI.
 - **Multi-tenant caches, global dedup** — public or private caches share one
-  content-addressed store; NARs dedup whole and, for uploads ≥ 8 MiB, by
-  FastCDC content-defined chunks that dedup individually across caches.
+  content-addressed store; NARs dedup whole and by FastCDC content-defined
+  chunks that dedup individually across caches. Uploads ≥ 8 MiB are chunked
+  server-side; > 100 MB NARs are cut client-side by the nimbus CLI with
+  boundary-identical FastCDC, so only chunks the server lacks are uploaded.
 - **Fine-grained access control** — per-user and per-group permission grants
   using attic's bit vocabulary over cache-name patterns (`ci-*`), managed from
   the dashboard (per subject or per cache), with OIDC group-claim sync into
@@ -73,11 +76,14 @@ underneath for one that fits inside a Worker's constraints.
   brotli/xz NARs from older imports remain readable.
 - **Upstream registry** — upstream trust (URL + public key + TTL) lives in a
   server-wide, admin-managed registry (one row per URL, so key conflicts are
-  unrepresentable); caches subscribe per-entry as off/redirect/persist, and
-  enforced entries apply to every cache. `get-missing-paths` filters against
-  enabled upstreams with cached verdicts so already-public paths are never
-  pushed, narinfo/NAR reads pass through, and persist-mode entries are
-  ingested (re-signed) into the cache in the background.
+  unrepresentable); caches subscribe per-entry as off/redirect/persist,
+  enforced entries apply to every cache, and entries already in Nix's default
+  config can be flagged so generated snippets omit them. `get-missing-paths`
+  filters against enabled upstreams with cached verdicts so already-public
+  paths are never pushed, narinfo reads pass through, NAR reads redirect to
+  the upstream, and persist-mode entries are ingested (re-signed) into the
+  cache in the background. Every trust card ships a copyable `nix.conf`
+  snippet with toggles for including upstream keys and substituters.
 - **Closure-aware GC** — retention keeps _full closures_ of fresh objects and
   pinned roots (never a broken closure), with per-cache size budgets, a global
   storage ceiling, size-triggered eviction after pushes, abandoned-upload
@@ -87,18 +93,26 @@ underneath for one that fits inside a Worker's constraints.
   revision history (`--keep-revisions` / `--keep-days`).
 - **Admin UI** — cache management with per-cache access lists, store-path
   browsing/search, pin/prune, scoped token issuance with revocation,
-  users/groups/grants, user activation, ingest monitoring, and an audit log
-  of privileged actions.
+  users/groups/grants, user activation, upstream registry management, and
+  ingest monitoring; privileged actions are recorded to an audit log.
 - **Flexible auth** — OIDC or Cloudflare Access for the dashboard (with OIDC
   group sync and pending-user approval); HS256/RS256 attic JWTs for the
   protocol; browser-loopback and RFC 8628 device-code flows for CLI login.
+- **Built for the edge** — narinfo/NAR reads are edge-cached (tag-purged by
+  GC), hot paths read from D1 replica sessions instead of the write primary,
+  and speculative reference prefetch warms the edge cache behind strict
+  rate-limit guardrails.
 - **Go CLI** — `login`, `use`, `push` (parallel, closure-aware, `--stdin`),
-  `watch-store`, `watch-exec`, `gc`, and full cache administration.
+  `watch-store`, `watch-exec` (batched with idle flushing), `gc`, and full
+  cache administration.
 
 <table>
   <tr>
-    <td><img src="docs/screenshots/cache-detail.png" alt="Cache detail: trust configuration and store path browser"></td>
+    <td><img src="docs/screenshots/cache-detail.png" alt="Cache detail: trust configuration, unified endpoint, and store path browser"></td>
     <td><img src="docs/screenshots/monitoring.png" alt="Monitoring: storage growth and push activity over time"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/screenshots/upstreams.png" alt="Upstream registry: enforced and optional upstream caches with trust keys, TTLs, and modes"></td>
   </tr>
 </table>
 
@@ -109,34 +123,39 @@ underneath for one that fits inside a Worker's constraints.
 | Runtime            | Rust daemon (`atticd`) on a server you operate | Cloudflare Worker, scales to zero                                                                                 |
 | Database           | PostgreSQL or SQLite                           | D1 (SQLite; schema is portable)                                                                                   |
 | Storage            | S3-compatible or local disk                    | R2 (zero-egress)                                                                                                  |
-| Deduplication      | whole-NAR + FastCDC chunks                     | whole-NAR + FastCDC chunks (≥ 8 MiB uploads; larger 2/8/16 MiB boundaries)                                        |
+| Deduplication      | whole-NAR + FastCDC chunks (16/64/256 KiB)     | whole-NAR + FastCDC chunks (2/8/16 MiB); > 100 MB NARs chunked client-side with identical boundaries              |
 | Compression        | server-wide zstd/brotli/xz                     | per-cache zstd/gzip/none                                                                                          |
 | Garbage collection | per-object LRU (can orphan closure members)    | closure-aware retention, pins, per-cache budgets, global ceiling                                                  |
+| Upstream caches    | client-side skip via signing-key names         | server-side registry: redirect/persist pull-through, enforced entries, cached verdicts, generated nix.conf        |
 | Tokens             | static JWTs via `atticadm make-token`          | dashboard-issued, scoped, revocable (`jti` + hashed storage), bounded by the issuer's grants                      |
 | Access control     | per-token JWT permission bits                  | user/group grants (same bit vocabulary) + OIDC group sync, enforced in the UI and API; per-token bits on the wire |
 | Substituter config | one URL + key per cache                        | per-cache, or one unified endpoint + proxy key for all readable caches                                            |
 | CLI auth           | paste a token                                  | browser loopback, device code, or paste a token                                                                   |
 | Admin interface    | CLI only                                       | web dashboard + CLI                                                                                               |
-| NAR downloads      | can 307 to presigned S3 URLs                   | always proxied through the Worker                                                                                 |
+| NAR downloads      | can 307 to presigned S3 URLs                   | local NARs proxied through the Worker; upstream paths 302 to the upstream                                         |
 
 ### Gaps and differences
 
 Honest accounting of where nimbus trails or diverges from the reference:
 
-- **>100 MB NARs dedup only at NAR granularity.** The Workers request-body
-  limit forces a chunked upload transport with client-side zstd, so the server
-  can't cut content-defined boundaries; those NARs are stored whole. A
-  client-side FastCDC protocol is designed but not yet implemented.
+- **> 100 MB pushes need the nimbus CLI.** The Workers request-body limit
+  rules out attic's single-PUT upload for large NARs; nimbus replaces it with
+  a chunked protocol (client-side FastCDC + zstd, dedup per chunk) that stock
+  attic clients don't speak.
 - **Chunk boundaries are self-consistent, not attic's.** nimbus uses larger
   FastCDC parameters (every chunk is an R2 subrequest), so a store migrated
-  from attic won't share chunk identities with it.
+  from attic won't share chunk identities with it. The CLI's client-side
+  cutter is bit-identical to the server's, so client- and server-chunked NARs
+  do dedup against each other.
 - **RS256 is verify-only** — the dashboard mints HS256 tokens; attic can also
   sign RS256.
-- **No presigned-URL redirect** — every NAR byte proxies through the Worker.
+- **No presigned-URL downloads** — locally-stored NAR bytes always proxy
+  through the Worker (upstream-cached paths do redirect); R2's zero egress
+  makes this cheaper than it would be on S3.
 - **No per-path destroy API** (`attic destroy` equivalent); the dashboard's
   prune action covers it interactively.
 - **No headless token minting** (`atticadm make-token` equivalent) — tokens
-  come from the dashboard.
+  come from the dashboard or an authenticated CLI login.
 - **`retention_period` is expressed in days** (`null` = unlimited) rather
   than attic's seconds with a global default.
 
@@ -144,12 +163,16 @@ Honest accounting of where nimbus trails or diverges from the reference:
 
 ```bash
 nimbus login prod https://cache.example.com <token>    # non-interactive: paste a token
-nimbus cache create mycache --public --compression zstd
+nimbus login prod https://cache.example.com --device   # force device-code flow (--web forces browser)
+nimbus cache create mycache --public --compression zstd --priority 40
+nimbus cache configure mycache --retention-days 30 --retention-max-bytes 50000000000
 nimbus use mycache                                     # wire up nix.conf (+ netrc if private)
 nimbus push mycache ./result /nix/store/...            # closures, parallel, chunked >100MB
 nimbus push mycache --stdin < paths.txt                # read paths from stdin
+nimbus push mycache --no-closure --jobs 10 ...         # exact paths, more parallelism
 nimbus watch-store mycache                             # push new store paths as they appear
 nimbus watch-exec mycache -- nix build ...             # watch during a command, flush on exit
+nimbus watch-exec mycache --batch-idle 30s -- ...      # also flush during long build stalls
 nimbus gc --dry-run                                    # trigger/preview garbage collection
 nimbus cache info|configure|rename|pin|unpin|destroy mycache
 nimbus cache pin mycache v1.7 /nix/store/... --keep-revisions 5   # named pin with history
@@ -157,18 +180,23 @@ nimbus cache unpin mycache v1.7                        # drop the pin and all it
 ```
 
 Caches are addressed as `[server:]cache`; the first login becomes the default
-server. Config lives at `~/.config/nimbus/config.toml` (XDG respected).
+server. Config lives at `~/.config/nimbus/config.toml` (XDG respected), and
+CI can skip config entirely with `NIMBUS_ENDPOINT` + `NIMBUS_AUTH_TOKEN`.
 
 Pushes query the closure via `nix path-info`, skip paths the server already
-has (or can fetch from its upstreams), and upload raw NARs for the server to
-compress — except >100MB NARs, which are zstd-compressed client-side and
-uploaded through the chunked protocol.
+has (or can fetch from its upstreams — `--ignore-upstream-cache-filter`
+overrides), and upload raw NARs for the server to compress — except >100MB
+NARs, which are cut with the same FastCDC boundaries as the server,
+zstd-compressed client-side, and uploaded chunk-by-chunk (only the chunks the
+server is missing). `watch-exec` batches everything into one closure-deduped
+push on exit by default, flushing early whenever the store goes idle for
+`--batch-idle` (15s default); `--batch=false` streams paths as they settle.
 
 ## Layout
 
 ```
 cmd/nimbus/  Go CLI client (cobra + fang)
-internal/    CLI internals: config, API client, nix interop, push engine
+internal/    CLI internals: config, API client, nix interop, push engine, FastCDC chunker
 web/         SvelteKit app: the admin UI and the binary-cache API server (one Worker)
 ```
 
@@ -196,14 +224,15 @@ npx wrangler dev --host localhost:8788   # --host defeats the custom-domain Host
 ```
 
 Local secrets live in `web/.dev.vars` (gitignored). The attic-table schema and
-its migrations are in `web/schema/`; the admin-table (users, groups, grants,
-tokens) migrations are drizzle-generated in `web/drizzle/`. Apply both with
-`wrangler d1 execute <db> --file=...`.
+its migrations are in `web/schema/` (wired to `wrangler d1 migrations`); the
+admin-table (users, groups, grants, tokens) migrations are drizzle-generated
+in `web/drizzle/`. For a local database, apply `schema/schema.sql` and the
+drizzle files with `wrangler d1 execute attic --local --file=...`.
 
 ## Deploy
 
 ```bash
-cd web && npm run build && npx wrangler deploy
+cd web && npm run deploy   # applies pending D1 migrations, builds, deploys
 ```
 
 Custom domains and the nightly GC cron are declared in `web/wrangler.jsonc` —
