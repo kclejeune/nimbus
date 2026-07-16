@@ -2,7 +2,7 @@ import { error } from '@sveltejs/kit';
 import { requireAdmin } from '$lib/server/auth/guard';
 import type { PageServerLoad } from './$types';
 
-const PAGE_SIZE = 50;
+import { parseLimit } from './page-size';
 
 interface AuditRow {
 	id: string;
@@ -20,6 +20,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	if (!db) throw error(500, 'Database binding unavailable');
 
 	const page = Math.max(1, Math.floor(Number(url.searchParams.get('page'))) || 1);
+	const limit = parseLimit(url.searchParams.get('limit'));
 
 	// One row past the page detects "next" without a second scan per request;
 	// the total drives the "X–Y of N" footer.
@@ -33,17 +34,17 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 				 ORDER BY a.created_at DESC, a.id DESC
 				 LIMIT ?1 OFFSET ?2`
 			)
-			.bind(PAGE_SIZE + 1, (page - 1) * PAGE_SIZE)
+			.bind(limit + 1, (page - 1) * limit)
 			.all<AuditRow>(),
 		db.prepare('SELECT COUNT(*) AS n FROM audit_log').first<{ n: number }>()
 	]);
 
 	return {
 		page,
-		pageSize: PAGE_SIZE,
+		pageSize: limit,
 		total: total?.n ?? 0,
-		hasMore: results.length > PAGE_SIZE,
-		entries: results.slice(0, PAGE_SIZE).map((r) => ({
+		hasMore: results.length > limit,
+		entries: results.slice(0, limit).map((r) => ({
 			id: r.id,
 			action: r.action,
 			target: r.target,
