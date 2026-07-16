@@ -163,8 +163,8 @@
 					'Storage used',
 					formatBytes(stats.storageBytes),
 					data.globalMaxBytes
-						? `of a ${formatBytes(data.globalMaxBytes)} global limit · ${usagePct}%`
-						: 'no global limit set'
+						? `physical bytes after dedup · ${usagePct}% of the ${formatBytes(data.globalMaxBytes)} limit`
+						: 'physical bytes after dedup · no global limit set'
 				)}
 				{@render stat('Store paths', formatCount(stats.objects), 'across all caches')}
 				{@render stat('Caches', formatCount(stats.caches), 'isolated views into shared storage')}

@@ -32,7 +32,12 @@
 						<th class="px-4 py-2.5 font-medium">Name</th>
 						<th class="px-4 py-2.5 font-medium">Visibility</th>
 						<th class="px-4 py-2.5 text-right font-medium">Paths</th>
-						<th class="px-4 py-2.5 text-right font-medium">Size</th>
+						<th
+							class="px-4 py-2.5 text-right font-medium"
+							title="NAR bytes attributed to this cache; content shared with other NARs or caches counts in each"
+						>
+							Size
+						</th>
 						<th class="px-4 py-2.5 font-medium">Compression</th>
 						<th class="px-4 py-2.5 text-right font-medium">Priority</th>
 						<th class="px-4 py-2.5 font-medium">Retention</th>
@@ -89,5 +94,10 @@
 				</tbody>
 			</table>
 		</div>
+		<p class="mt-2 text-xs text-muted-foreground">
+			Size is each cache's deduplicated NAR bytes. Chunks shared between NARs — or with other caches
+			— count toward every cache that references them, so these sizes can total more than the
+			instance's physical storage.
+		</p>
 	{/if}
 </div>

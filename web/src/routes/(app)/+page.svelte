@@ -46,8 +46,8 @@
 			label: 'Storage used',
 			value: formatBytes(s.storageBytes),
 			foot: data.globalMaxBytes
-				? `of a ${formatBytes(data.globalMaxBytes)} global limit`
-				: 'No global limit set',
+				? `Physical bytes after dedup, of a ${formatBytes(data.globalMaxBytes)} global limit`
+				: 'Physical bytes after dedup · no global limit set',
 			badge: usagePct != null ? `${usagePct}%` : null
 		}
 	]);
