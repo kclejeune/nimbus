@@ -42,7 +42,7 @@
 	}
 </script>
 
-<div class="mx-auto max-w-6xl px-8 py-8">
+<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
 	<header class="mb-8">
 		<h1 class="text-2xl font-semibold tracking-tight">Paths</h1>
 		<p class="mt-1 text-sm text-muted-foreground">
@@ -109,7 +109,7 @@
 			/>
 		{/if}
 
-		<div class="mt-3 flex items-center justify-between gap-3">
+		<div class="mt-3 flex flex-wrap items-center justify-between gap-3">
 			<p class="text-xs text-muted-foreground">
 				{#if data.paths.length > 0}
 					Showing {formatCount(first)}–{formatCount(last)} of {formatCount(data.total)}

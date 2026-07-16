@@ -13,7 +13,7 @@
 
 <!-- Page frame matches the app-wide max-w-6xl; the form itself stays slim
      (max-w-xl below) so inputs keep a sensible width. -->
-<div class="mx-auto max-w-6xl px-8 py-8">
+<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
 	<a
 		href="/caches"
 		class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"

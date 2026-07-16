@@ -10,6 +10,8 @@ interface AuditRow {
 	action: string;
 	target: string | null;
 	detail: string | null;
+	/** Unix seconds; surfaced to the page as an ISO string like every other
+	 *  timestamp so the UI shares one set of date formatters. */
 	created_at: number;
 	user_name: string | null;
 	user_email: string | null;
@@ -52,7 +54,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 			action: r.action,
 			target: r.target,
 			detail: r.detail,
-			createdAt: r.created_at,
+			createdAt: new Date(r.created_at * 1000).toISOString(),
 			// Null for system-initiated actions and unresolvable user ids alike.
 			user: r.user_name || r.user_email || null
 		}))

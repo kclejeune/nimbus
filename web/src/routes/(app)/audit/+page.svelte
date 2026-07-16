@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { formatCount, formatDateTime } from '$lib/format';
+	import { formatCount, formatIsoDateTime } from '$lib/format';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { goto } from '$app/navigation';
 	import { page as pageState } from '$app/state';
@@ -41,7 +41,7 @@
 	});
 </script>
 
-<div class="mx-auto max-w-6xl px-8 py-8">
+<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
 	<header class="mb-8">
 		<h1 class="text-2xl font-semibold tracking-tight">Audit log</h1>
 		<p class="mt-1 text-sm text-muted-foreground">
@@ -69,7 +69,7 @@
 					{#each data.entries as entry (entry.id)}
 						<tr class="transition-colors hover:bg-muted/30">
 							<td class="px-4 py-3 font-mono text-xs whitespace-nowrap text-muted-foreground">
-								{formatDateTime(entry.createdAt)}
+								{formatIsoDateTime(entry.createdAt)}
 							</td>
 							<td class="px-4 py-3">
 								{#if entry.user}
@@ -100,11 +100,11 @@
 			</table>
 		</div>
 
-		<div class="mt-3 flex items-center justify-between gap-3">
+		<div class="mt-3 flex flex-wrap items-center justify-between gap-3">
 			<p class="text-xs text-muted-foreground">
 				Showing {formatCount(first)}–{formatCount(last)} of {formatCount(data.total)}
 			</p>
-			<div class="flex items-center gap-4">
+			<div class="flex flex-wrap items-center gap-x-4 gap-y-2">
 				<div class="flex items-center gap-2">
 					<span class="text-xs text-muted-foreground">Rows</span>
 					<!-- Changing the page size resets to page 1: the old offset is

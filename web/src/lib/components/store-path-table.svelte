@@ -140,7 +140,7 @@
 
 <div class="overflow-x-auto rounded-lg border">
 	<table class="w-full text-sm">
-		<thead class="border-b bg-muted text-left text-xs text-muted-foreground">
+		<thead class="border-b bg-muted/40 text-left text-xs text-muted-foreground">
 			<tr>
 				<th class="px-4 py-2.5 font-medium">{@render sortableHeader('path', 'Store path')}</th>
 				{#if showCache}
@@ -194,7 +194,7 @@
 </div>
 
 {#if interactive && sorted.length > pageSize}
-	<div class="mt-3 flex items-center justify-between gap-3">
+	<div class="mt-3 flex flex-wrap items-center justify-between gap-3">
 		<p class="text-xs text-muted-foreground">
 			Showing {formatCount(first)}–{formatCount(last)} of {formatCount(sorted.length)}
 		</p>

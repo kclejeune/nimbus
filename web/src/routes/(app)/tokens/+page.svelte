@@ -12,7 +12,7 @@
 	let issuing = $state(false);
 </script>
 
-<div class="mx-auto max-w-6xl px-8 py-8">
+<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
 	<header class="mb-8">
 		<h1 class="text-2xl font-semibold tracking-tight">Tokens</h1>
 		<p class="mt-1 text-sm text-muted-foreground">

@@ -81,7 +81,7 @@
 	const cacheHref = $derived(`/caches/${encodeURIComponent(data.cache.name)}`);
 </script>
 
-<div class="mx-auto max-w-6xl px-8 py-8">
+<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
 	<a
 		href={cacheHref}
 		class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
@@ -310,7 +310,7 @@
 			{/if}
 			<div class="overflow-x-auto rounded-lg border">
 				<table class="w-full text-sm">
-					<thead class="border-b bg-muted text-left text-xs text-muted-foreground">
+					<thead class="border-b bg-muted/40 text-left text-xs text-muted-foreground">
 						<tr>
 							<th class="w-14 px-4 py-2.5 font-medium">{@render chunkHeader('seq', '#')}</th>
 							<th class="px-4 py-2.5 font-medium">{@render chunkHeader('hash', 'Chunk hash')}</th>
@@ -360,7 +360,7 @@
 			</div>
 
 			{#if chunksSorted.length > CHUNK_PAGE}
-				<div class="mt-3 flex items-center justify-between gap-3">
+				<div class="mt-3 flex flex-wrap items-center justify-between gap-3">
 					<p class="text-xs text-muted-foreground">
 						Showing {formatCount((chunkCurrent - 1) * CHUNK_PAGE + 1)}–{formatCount(
 							(chunkCurrent - 1) * CHUNK_PAGE + chunksPaged.length
