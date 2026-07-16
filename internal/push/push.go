@@ -164,7 +164,7 @@ func (p *Pusher) uploadOne(ctx context.Context, info nix.PathInfo) error {
 	}
 
 	speed := float64(info.NarSize) / max(time.Since(start).Seconds(), 0.001)
-	suffix := fmt.Sprintf("(%s/s)", formatBytes(int64(speed)))
+	suffix := fmt.Sprintf("(%s/s)", FormatBytes(int64(speed)))
 	if result.Kind == "deduplicated" {
 		suffix = "(deduplicated)"
 	}
@@ -378,7 +378,8 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func formatBytes(n int64) string {
+// FormatBytes renders a byte count with 1024-based units, e.g. "50.0 GiB".
+func FormatBytes(n int64) string {
 	const unit = 1024
 	if n < unit {
 		return fmt.Sprintf("%d B", n)

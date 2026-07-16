@@ -33,6 +33,17 @@ export async function effectiveAccessOf(
 	return locals.effectiveAccess;
 }
 
+/** The signed-in user as a boundTokenScope minter (every mint route). */
+export async function tokenMinter(
+	locals: App.Locals,
+	db: D1Database
+): Promise<{ access: EffectiveAccess; isAdmin: boolean }> {
+	return {
+		access: await effectiveAccessOf(locals, db),
+		isAdmin: locals.user?.role === 'admin'
+	};
+}
+
 export async function requireCachePermission(
 	locals: App.Locals,
 	db: D1Database,

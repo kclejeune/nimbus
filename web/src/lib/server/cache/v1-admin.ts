@@ -6,6 +6,7 @@
 // wrangler bundles this tree without SvelteKit's resolver.
 
 import { errorResponse, jsonResponse } from '../attic/http';
+import type { CachePermission } from '../attic-token';
 import { NO_PERMISSION, permissionForCache, type VerifiedToken } from '../attic/token';
 import { isActiveUser } from '../auth/types';
 import { loadEffectiveAccess } from '../auth/permissions';
@@ -148,30 +149,35 @@ export async function handleTokensApi(
 		if (!name || name.length > 100)
 			return errorResponse(400, 'Token name is required (≤100 chars)');
 
-		// Re-encode the JSON body as the token-issue form so boundTokenScope —
-		// the single mint-bounding rule shared with the dashboard — applies.
-		const form = new FormData();
-		form.set('cache', body.cache ?? '*');
-		const knownFields = new Set(PERMISSION_BIT_FIELDS.map((f) => f.field));
+		// Wire permission names are the token-issue form field names, mapped to
+		// bits here; boundTokenScope — the single mint-bounding rule shared
+		// with the dashboard — takes it from there.
+		const bits: CachePermission = {};
 		for (const field of body.permissions ?? []) {
-			if (!knownFields.has(field)) {
-				return errorResponse(400, `Unknown permission "${field}"`);
-			}
-			form.set(field, 'on');
+			const known = PERMISSION_BIT_FIELDS.find((f) => f.field === field);
+			if (!known) return errorResponse(400, `Unknown permission "${field}"`);
+			bits[known.bit] = 1;
 		}
-		if (body.gc) form.set('gc', 'on');
-		if (body.ct) form.set('ct', 'on');
-		if (body.expiry_days !== undefined) {
-			if (!Number.isInteger(body.expiry_days) || body.expiry_days < 1) {
-				return errorResponse(400, 'expiry_days must be a positive integer');
-			}
-			form.set('expiry_days', String(body.expiry_days));
+		if (
+			body.expiry_days !== undefined &&
+			(!Number.isInteger(body.expiry_days) || body.expiry_days < 1)
+		) {
+			return errorResponse(400, 'expiry_days must be a positive integer');
 		}
 
-		const bound = boundTokenScope(form, {
-			access: await loadEffectiveAccess(env.ATTIC_DB, minter),
-			isAdmin: minter.role === 'admin'
-		});
+		const bound = boundTokenScope(
+			{
+				cacheScope: body.cache ?? '*',
+				bits,
+				gc: !!body.gc,
+				ct: !!body.ct,
+				days: body.expiry_days ?? 90
+			},
+			{
+				access: await loadEffectiveAccess(env.ATTIC_DB, minter),
+				isAdmin: minter.role === 'admin'
+			}
+		);
 		if (!bound.ok) return errorResponse(403, bound.denial);
 
 		// Minting signs HS256; verify-only (RS256 pubkey) deployments can't.

@@ -19,7 +19,12 @@ export function formatDate(unix: number): string {
 
 /** ISO timestamp to the minute (UTC) from unix seconds. */
 export function formatDateTime(unix: number): string {
-	return new Date(unix * 1000).toISOString().slice(0, 16).replace('T', ' ');
+	return formatIsoDateTime(new Date(unix * 1000).toISOString());
+}
+
+/** "YYYY-MM-DD HH:MM" (UTC) from an ISO string; em dash when absent. */
+export function formatIsoDateTime(iso: string | null | undefined): string {
+	return iso ? iso.slice(0, 16).replace('T', ' ') : '—';
 }
 
 /** Coarse relative time ("3h ago") from an ISO timestamp; '' when unparsable. */

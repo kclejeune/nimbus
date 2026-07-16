@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { formatBytes, formatCount } from '$lib/format';
+	import { formatBytes, formatCount, formatIsoDateTime } from '$lib/format';
 	import CopyField from '$lib/components/copy-field.svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { ArrowLeft, Pin } from '@lucide/svelte';
@@ -21,7 +21,6 @@
 	}
 
 	// RFC3339 timestamp → "YYYY-MM-DD HH:MM" (UTC), matching the app's style.
-	const fmtDateTime = (s: string | null) => (s ? s.slice(0, 16).replace('T', ' ') : '—');
 
 	const truncHash = (h: string) => (h.length > 23 ? `${h.slice(0, 20)}…` : h);
 
@@ -53,7 +52,7 @@
 			{#if o.detachedAt}
 				<Badge
 					variant="destructive"
-					title="Removed {fmtDateTime(o.detachedAt)}; kept while other paths reference it"
+					title="Removed {formatIsoDateTime(o.detachedAt)}; kept while other paths reference it"
 				>
 					detached
 				</Badge>
@@ -85,11 +84,11 @@
 			</div>
 			<div>
 				<dt class="text-xs text-muted-foreground">Created</dt>
-				<dd class="mt-0.5 font-mono text-xs">{fmtDateTime(o.createdAt)}</dd>
+				<dd class="mt-0.5 font-mono text-xs">{formatIsoDateTime(o.createdAt)}</dd>
 			</div>
 			<div>
 				<dt class="text-xs text-muted-foreground">Last accessed</dt>
-				<dd class="mt-0.5 font-mono text-xs">{fmtDateTime(o.lastAccessedAt)}</dd>
+				<dd class="mt-0.5 font-mono text-xs">{formatIsoDateTime(o.lastAccessedAt)}</dd>
 			</div>
 			<div>
 				<dt class="text-xs text-muted-foreground">Deriver</dt>
@@ -126,7 +125,7 @@
 					{#if data.pins.anonymous}
 						<li class="flex flex-wrap items-center gap-2">
 							<Pin class="size-3.5 text-primary" />
-							<span>Pinned {fmtDateTime(data.pins.anonymous.createdAt)}</span>
+							<span>Pinned {formatIsoDateTime(data.pins.anonymous.createdAt)}</span>
 							{#if data.pins.anonymous.note}
 								<span class="text-muted-foreground">— {data.pins.anonymous.note}</span>
 							{/if}
@@ -136,7 +135,9 @@
 						<li class="flex flex-wrap items-center gap-2">
 							<Pin class="size-3.5 text-primary" />
 							<span class="font-mono text-xs">{pin.name}</span>
-							<span class="text-muted-foreground">revision of {fmtDateTime(pin.createdAt)}</span>
+							<span class="text-muted-foreground"
+								>revision of {formatIsoDateTime(pin.createdAt)}</span
+							>
 							{#if pin.note}
 								<span class="text-muted-foreground">— {pin.note}</span>
 							{/if}

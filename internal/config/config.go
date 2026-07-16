@@ -132,17 +132,16 @@ func splitEnvName(name string) []string {
 		return []string{"default-server"}
 	}
 	parts := strings.Split(name, "_")
-	// NIMBUS_SERVERS_<NAME>_ENDPOINT|TOKEN|TOKEN_FILE; underscores inside
-	// <NAME> are kept (server names cannot contain the field being set anyway).
-	if len(parts) >= 4 && parts[0] == "SERVERS" &&
-		parts[len(parts)-2] == "TOKEN" && parts[len(parts)-1] == "FILE" {
-		server := strings.ToLower(strings.Join(parts[1:len(parts)-2], "_"))
-		return []string{"servers", server, "token_file"}
-	}
+	// NIMBUS_SERVERS_<NAME>_<FIELD>; underscores inside <NAME> are kept, so
+	// the field is recognized by its tail, longest field first — TOKEN_FILE
+	// must win over a trailing TOKEN.
 	if len(parts) >= 3 && parts[0] == "SERVERS" {
-		field := strings.ToLower(parts[len(parts)-1])
-		if field == "endpoint" || field == "token" {
-			server := strings.ToLower(strings.Join(parts[1:len(parts)-1], "_"))
+		for _, field := range []string{"token_file", "endpoint", "token"} {
+			head := len(parts) - (strings.Count(field, "_") + 1)
+			if head < 2 || !strings.EqualFold(strings.Join(parts[head:], "_"), field) {
+				continue
+			}
+			server := strings.ToLower(strings.Join(parts[1:head], "_"))
 			return []string{"servers", server, field}
 		}
 	}

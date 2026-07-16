@@ -4,10 +4,11 @@ import {
 	boundTokenScope,
 	listUserTokens,
 	mintAndStore,
-	revokeUserToken
+	revokeUserToken,
+	parseTokenForm
 } from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
-import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { effectiveAccessOf, tokenMinter } from '$lib/server/auth/guard';
 import { tokenScopeOptions } from '$lib/server/auth/permissions';
 import type { PageServerLoad, Actions } from './$types';
 
@@ -42,10 +43,7 @@ export const actions: Actions = {
 		if (!name) return fail(400, { error: 'Give the token a name.' });
 
 		// Mint-time bounding: a token may only carry what its creator holds.
-		const bound = boundTokenScope(form, {
-			access: await effectiveAccessOf(locals, env.ATTIC_DB),
-			isAdmin: locals.user?.role === 'admin'
-		});
+		const bound = boundTokenScope(parseTokenForm(form), await tokenMinter(locals, env.ATTIC_DB));
 		if (!bound.ok) return fail(403, { error: bound.denial });
 
 		// The plaintext token is returned exactly once; only its hash is stored.

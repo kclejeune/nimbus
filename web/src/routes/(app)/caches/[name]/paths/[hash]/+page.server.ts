@@ -1,5 +1,5 @@
 import { error } from '@sveltejs/kit';
-import { readSession, STORE_PATH_HASH_RE } from '$lib/server/cache/db';
+import { readSession, STORE_PATH_HASH_RE, findCache } from '$lib/server/cache/db';
 import { canSeeCache } from '$lib/server/auth/permissions';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
 import type { PageServerLoad } from './$types';
@@ -73,10 +73,7 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	const read = readSession(db);
 
 	const [cache, access] = await Promise.all([
-		read
-			.prepare('SELECT id, name FROM cache WHERE name = ?1 AND deleted_at IS NULL')
-			.bind(params.name)
-			.first<{ id: number; name: string }>(),
+		findCache(read, params.name),
 		effectiveAccessOf(locals, db)
 	]);
 
@@ -87,7 +84,7 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 
 	// Everything below keys off (cache_id, store_path_hash); nar_id / object_id
 	// are resolved by scalar subqueries so all reads run in parallel.
-	const [object, chunks, pins, refs, referrers, referrerCount] = await Promise.all([
+	const [object, chunks, pins, refs, referrers] = await Promise.all([
 		read
 			.prepare(
 				`SELECT o.id, o.nar_id, o.store_path, o.refs, o.sigs, o.ca, o.deriver, o.system,
@@ -142,9 +139,11 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 			.bind(cache.id, params.hash)
 			.all<RefRow>(),
 		// Reverse dependencies: objects in this cache that reference this hash.
+		// total rides on the rows as a window aggregate (computed before LIMIT),
+		// so the "and N more" count costs no second scan of the join.
 		read
 			.prepare(
-				`SELECT o.store_path_hash, o.store_path, o.created_at
+				`SELECT o.store_path_hash, o.store_path, o.created_at, COUNT(*) OVER () AS total
 				 FROM object_ref r
 				 JOIN object o ON o.id = r.object_id
 				 WHERE r.ref_hash = ?2 AND o.cache_id = ?1
@@ -152,16 +151,7 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 				 LIMIT ${REFERRERS_LIMIT}`
 			)
 			.bind(cache.id, params.hash)
-			.all<ReferrerRow>(),
-		read
-			.prepare(
-				`SELECT COUNT(*) AS n
-				 FROM object_ref r
-				 JOIN object o ON o.id = r.object_id
-				 WHERE r.ref_hash = ?2 AND o.cache_id = ?1`
-			)
-			.bind(cache.id, params.hash)
-			.first<{ n: number }>()
+			.all<ReferrerRow & { total: number }>()
 	]);
 
 	if (!object) throw error(404, 'Store path not found in this cache');
@@ -213,7 +203,7 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 				storePath: r.store_path,
 				createdAt: r.created_at
 			})),
-			total: referrerCount?.n ?? 0
+			total: referrers.results[0]?.total ?? 0
 		}
 	};
 };

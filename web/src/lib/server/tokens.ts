@@ -89,25 +89,43 @@ export async function sha256hex(s: string): Promise<string> {
 	return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+/** A mint request in transport-neutral shape (see parseTokenForm for the
+ *  HTML-form decoding; the JSON token API builds one directly). */
+export interface TokenRequest {
+	cacheScope: string;
+	bits: CachePermission;
+	gc: boolean;
+	ct: boolean;
+	days: number;
+}
+
+/** Token-issue form -> TokenRequest (the tokens page and both CLI flows). */
+export function parseTokenForm(form: FormData): TokenRequest {
+	return {
+		cacheScope: String(form.get('cache') ?? '*'),
+		bits: parseTokenBits(form),
+		gc: form.get('gc') === 'on',
+		ct: form.get('ct') === 'on',
+		days: Number(form.get('expiry_days') ?? 90)
+	};
+}
+
 /**
- * Parse a token-issue form (shared by the tokens page and both CLI flows) and
- * bound it by the minting user's effective access. Returns the scope to mint,
- * or the user-facing denial. Takes the resolved access rather than locals so
- * the cache worker's token API (v1-admin.ts) can share the bounding rule.
+ * Bound a mint request by the minting user's effective access. Returns the
+ * scope to mint, or the user-facing denial. Transport-agnostic (structured
+ * request + resolved access, not FormData/locals) so the cache worker's token
+ * API (v1-admin.ts) shares the exact bounding rule with the dashboard.
  */
 export function boundTokenScope(
-	form: FormData,
+	request: TokenRequest,
 	minter: { access: EffectiveAccess; isAdmin: boolean }
 ): { ok: true; scope: TokenScope } | { ok: false; denial: string } {
-	const bits = parseTokenBits(form);
-	const cacheScope = String(form.get('cache') ?? '*');
+	const { cacheScope, bits, gc, ct } = request;
 
 	// The nimbus global claims are deliberately not per-cache grant bits: they
 	// can only be minted into a token, and only by an admin. gc triggers
 	// storage-wide garbage collection; ct unlocks trust-affecting cache
 	// settings (keypair, visibility) over the API.
-	const gc = form.get('gc') === 'on';
-	const ct = form.get('ct') === 'on';
 	if ((gc || ct) && !minter.isAdmin) {
 		return { ok: false, denial: 'gc / trust-admin tokens are admin-only.' };
 	}
@@ -116,16 +134,8 @@ export function boundTokenScope(
 		const denial = scopeDenial(minter.access, { pattern: cacheScope, bits });
 		if (denial) return { ok: false, denial };
 	}
-	return {
-		ok: true,
-		scope: {
-			cacheScope,
-			bits,
-			gc,
-			ct,
-			days: Math.max(1, Math.min(3650, Number(form.get('expiry_days') ?? 90)))
-		}
-	};
+	const days = Number.isFinite(request.days) ? Math.max(1, Math.min(3650, request.days)) : 90;
+	return { ok: true, scope: { cacheScope, bits, gc, ct, days } };
 }
 
 /** The audit entry every mint route writes. */

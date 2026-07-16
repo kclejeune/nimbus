@@ -11,6 +11,7 @@ import (
 
 	"github.com/kclejeune/nimbus/internal/api"
 	"github.com/kclejeune/nimbus/internal/nix"
+	"github.com/kclejeune/nimbus/internal/push"
 )
 
 func cacheCmd() *cobra.Command {
@@ -169,7 +170,7 @@ func retentionDesc(days, maxBytes *int64) string {
 		parts = append(parts, fmt.Sprintf("%dd", *days))
 	}
 	if maxBytes != nil {
-		parts = append(parts, formatBytes(*maxBytes))
+		parts = append(parts, push.FormatBytes(*maxBytes))
 	}
 	if len(parts) == 0 {
 		return "none"
@@ -203,20 +204,6 @@ func accessDesc(p api.CachePermissions) string {
 		return "-"
 	}
 	return strings.Join(verbs, ",")
-}
-
-// formatBytes renders a byte count with 1024-based units, e.g. "50.0 GiB".
-func formatBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit; m /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func cacheCreateCmd() *cobra.Command {

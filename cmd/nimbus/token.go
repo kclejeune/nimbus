@@ -102,7 +102,7 @@ and trust-affecting cache settings).`,
 			if err != nil {
 				return err
 			}
-			expires := time.Unix(created.ExpiresAt, 0).Local().Format("2006-01-02")
+			expires := dateDesc(created.ExpiresAt)
 			fmt.Fprintf(
 				os.Stderr,
 				"✅ Created token %q (id %s) on %q, expires %s.\n",

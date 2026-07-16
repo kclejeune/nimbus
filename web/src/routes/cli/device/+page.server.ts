@@ -3,10 +3,11 @@ import {
 	auditTokenIssue,
 	boundTokenScope,
 	insertApiToken,
-	mintScopedToken
+	mintScopedToken,
+	parseTokenForm
 } from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
-import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { effectiveAccessOf, tokenMinter } from '$lib/server/auth/guard';
 import { tokenScopeOptions } from '$lib/server/auth/permissions';
 import type { PageServerLoad, Actions } from './$types';
 
@@ -72,10 +73,7 @@ export const actions: Actions = {
 		if (row.expires_at < Math.floor(Date.now() / 1000)) {
 			return fail(400, { error: 'This code has expired — start login again.' });
 		}
-		const bound = boundTokenScope(form, {
-			access: await effectiveAccessOf(locals, env.ATTIC_DB),
-			isAdmin: locals.user?.role === 'admin'
-		});
+		const bound = boundTokenScope(parseTokenForm(form), await tokenMinter(locals, env.ATTIC_DB));
 		if (!bound.ok) return fail(403, { error: bound.denial });
 
 		const minted = await mintScopedToken(env.JWT_HS256_SECRET_BASE64, locals.user.id, bound.scope);

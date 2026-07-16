@@ -1,7 +1,7 @@
 import { error, fail, redirect } from '@sveltejs/kit';
-import { auditTokenIssue, boundTokenScope, mintAndStore } from '$lib/server/tokens';
+import { auditTokenIssue, boundTokenScope, mintAndStore, parseTokenForm } from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
-import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { effectiveAccessOf, tokenMinter } from '$lib/server/auth/guard';
 import { tokenScopeOptions } from '$lib/server/auth/permissions';
 import type { PageServerLoad, Actions } from './$types';
 
@@ -47,10 +47,7 @@ export const actions: Actions = {
 		const state = String(form.get('state') ?? '');
 		if (port === null || !state) return fail(400, { error: 'Invalid request.' });
 
-		const bound = boundTokenScope(form, {
-			access: await effectiveAccessOf(locals, env.ATTIC_DB),
-			isAdmin: locals.user?.role === 'admin'
-		});
+		const bound = boundTokenScope(parseTokenForm(form), await tokenMinter(locals, env.ATTIC_DB));
 		if (!bound.ok) return fail(403, { error: bound.denial });
 
 		const minted = await mintAndStore(

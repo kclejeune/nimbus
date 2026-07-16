@@ -18,17 +18,26 @@ export type ReadEvent = 'hit' | 'miss' | 'upstream' | 'other';
  *  cache names must start alphanumeric). */
 export const UNIFIED_LABEL = '_unified';
 
-export function readEvent(status: number): ReadEvent {
+function readEvent(status: number, viaUpstream: boolean): ReadEvent {
+	if (viaUpstream) return 'upstream';
 	if (status === 200 || status === 206 || status === 304) return 'hit';
 	if (status === 404) return 'miss';
 	if (status >= 300 && status < 400) return 'upstream';
 	return 'other';
 }
 
-export function recordRead(env: Env, kind: ReadKind, cache: string, event: ReadEvent): void {
+/** Record one gateway read. `viaUpstream` marks responses whose content came
+ *  from an upstream regardless of status (a redirect about to be issued, or a
+ *  200 served through the union-of-upstreams fallback). */
+export function recordRead(
+	env: Env,
+	kind: ReadKind,
+	cache: string,
+	outcome: { status: number; viaUpstream?: boolean }
+): void {
 	try {
 		env.CACHE_METRICS?.writeDataPoint({
-			blobs: [kind, event, cache],
+			blobs: [kind, readEvent(outcome.status, outcome.viaUpstream ?? false), cache],
 			doubles: [1],
 			indexes: [cache]
 		});
