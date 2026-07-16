@@ -1,0 +1,219 @@
+import { error } from '@sveltejs/kit';
+import { readSession, STORE_PATH_HASH_RE } from '$lib/server/cache/db';
+import { canSeeCache } from '$lib/server/auth/permissions';
+import { effectiveAccessOf } from '$lib/server/auth/guard';
+import type { PageServerLoad } from './$types';
+
+interface ObjectNarRow {
+	id: number;
+	nar_id: number;
+	store_path: string;
+	refs: string;
+	sigs: string;
+	ca: string | null;
+	deriver: string | null;
+	system: string | null;
+	created_at: string;
+	last_accessed_at: string | null;
+	created_by: string | null;
+	source: string | null;
+	detached_at: string | null;
+	nar_hash: string;
+	nar_size: number;
+	nar_compression: string;
+	num_chunks: number;
+	nar_state: string;
+}
+
+interface ChunkListRow {
+	seq: number;
+	chunk_hash: string;
+	chunk_size: number | null;
+	file_size: number | null;
+	compression: string;
+	shared_nars: number;
+}
+
+interface PinRow {
+	pin_id: number | null;
+	note: string | null;
+	created_at: string;
+	pin_name: string | null;
+}
+
+interface RefRow {
+	ref_hash: string;
+	store_path: string | null;
+}
+
+interface ReferrerRow {
+	store_path_hash: string;
+	store_path: string;
+	created_at: string;
+}
+
+/** Parse a JSON string-array column; malformed data degrades to []. */
+function jsonStrings(raw: string): string[] {
+	try {
+		const parsed = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+	} catch {
+		return [];
+	}
+}
+
+const REFERRERS_LIMIT = 50;
+
+export const load: PageServerLoad = async ({ platform, params, locals }) => {
+	const db = platform?.env.ATTIC_DB;
+	if (!db) throw error(500, 'Database binding unavailable');
+	if (!STORE_PATH_HASH_RE.test(params.hash)) {
+		throw error(404, 'Store path not found');
+	}
+	const read = readSession(db);
+
+	const [cache, access] = await Promise.all([
+		read
+			.prepare('SELECT id, name FROM cache WHERE name = ?1 AND deleted_at IS NULL')
+			.bind(params.name)
+			.first<{ id: number; name: string }>(),
+		effectiveAccessOf(locals, db)
+	]);
+
+	if (!cache) throw error(404, `Cache "${params.name}" not found`);
+	if (!canSeeCache(access, params.name)) {
+		throw error(403, 'Permission denied');
+	}
+
+	// Everything below keys off (cache_id, store_path_hash); nar_id / object_id
+	// are resolved by scalar subqueries so all reads run in parallel.
+	const [object, chunks, pins, refs, referrers, referrerCount] = await Promise.all([
+		read
+			.prepare(
+				`SELECT o.id, o.nar_id, o.store_path, o.refs, o.sigs, o.ca, o.deriver, o.system,
+				        o.created_at, o.last_accessed_at, o.created_by, o.source, o.detached_at,
+				        n.nar_hash, n.nar_size, n.compression AS nar_compression,
+				        n.num_chunks, n.state AS nar_state
+				 FROM object o
+				 JOIN nar n ON n.id = o.nar_id
+				 WHERE o.cache_id = ?1 AND o.store_path_hash = ?2`
+			)
+			.bind(cache.id, params.hash)
+			.first<ObjectNarRow>(),
+		// Chunks in NAR order, each with how many OTHER NARs share it (dedup
+		// indicator). One grouped join, not a per-chunk count.
+		read
+			.prepare(
+				`SELECT cr.seq, cr.chunk_hash, ch.chunk_size, ch.file_size, cr.compression,
+				        COUNT(DISTINCT cr2.nar_id) AS shared_nars
+				 FROM chunkref cr
+				 LEFT JOIN chunk ch ON ch.id = cr.chunk_id
+				 LEFT JOIN chunkref cr2 ON cr2.chunk_id = cr.chunk_id AND cr2.nar_id != cr.nar_id
+				 WHERE cr.nar_id = (SELECT nar_id FROM object
+				                    WHERE cache_id = ?1 AND store_path_hash = ?2)
+				 GROUP BY cr.id
+				 ORDER BY cr.seq`
+			)
+			.bind(cache.id, params.hash)
+			.all<ChunkListRow>(),
+		// Anonymous pin (pin_id NULL) and/or named-pin revisions.
+		read
+			.prepare(
+				`SELECT g.pin_id, g.note, g.created_at, p.name AS pin_name
+				 FROM gc_root g
+				 LEFT JOIN pin p ON p.id = g.pin_id
+				 WHERE g.cache_id = ?1 AND g.store_path_hash = ?2
+				 ORDER BY g.created_at DESC`
+			)
+			.bind(cache.id, params.hash)
+			.all<PinRow>(),
+		// References, resolved to a store path when the referenced object exists
+		// in this cache (via child_id when linked, else by hash).
+		read
+			.prepare(
+				`SELECT r.ref_hash, COALESCE(oc.store_path, oh.store_path) AS store_path
+				 FROM object_ref r
+				 LEFT JOIN object oc ON oc.id = r.child_id AND oc.cache_id = ?1
+				 LEFT JOIN object oh ON oh.cache_id = ?1 AND oh.store_path_hash = r.ref_hash
+				 WHERE r.object_id = (SELECT id FROM object
+				                      WHERE cache_id = ?1 AND store_path_hash = ?2)
+				 ORDER BY COALESCE(oc.store_path, oh.store_path, r.ref_hash)`
+			)
+			.bind(cache.id, params.hash)
+			.all<RefRow>(),
+		// Reverse dependencies: objects in this cache that reference this hash.
+		read
+			.prepare(
+				`SELECT o.store_path_hash, o.store_path, o.created_at
+				 FROM object_ref r
+				 JOIN object o ON o.id = r.object_id
+				 WHERE r.ref_hash = ?2 AND o.cache_id = ?1
+				 ORDER BY o.store_path ASC
+				 LIMIT ${REFERRERS_LIMIT}`
+			)
+			.bind(cache.id, params.hash)
+			.all<ReferrerRow>(),
+		read
+			.prepare(
+				`SELECT COUNT(*) AS n
+				 FROM object_ref r
+				 JOIN object o ON o.id = r.object_id
+				 WHERE r.ref_hash = ?2 AND o.cache_id = ?1`
+			)
+			.bind(cache.id, params.hash)
+			.first<{ n: number }>()
+	]);
+
+	if (!object) throw error(404, 'Store path not found in this cache');
+
+	return {
+		cache: { name: cache.name },
+		object: {
+			hash: params.hash,
+			storePath: object.store_path,
+			refs: jsonStrings(object.refs),
+			sigs: jsonStrings(object.sigs),
+			ca: object.ca,
+			deriver: object.deriver,
+			system: object.system,
+			createdAt: object.created_at,
+			lastAccessedAt: object.last_accessed_at,
+			createdBy: object.created_by,
+			source: object.source,
+			detachedAt: object.detached_at
+		},
+		nar: {
+			narHash: object.nar_hash,
+			narSize: object.nar_size,
+			compression: object.nar_compression,
+			numChunks: object.num_chunks,
+			state: object.nar_state
+		},
+		chunks: chunks.results.map((c) => ({
+			seq: c.seq,
+			chunkHash: c.chunk_hash,
+			chunkSize: c.chunk_size,
+			fileSize: c.file_size,
+			compression: c.compression,
+			sharedNars: c.shared_nars
+		})),
+		pins: {
+			anonymous: (() => {
+				const anon = pins.results.find((p) => p.pin_id === null);
+				return anon ? { note: anon.note, createdAt: anon.created_at } : null;
+			})(),
+			named: pins.results
+				.filter((p) => p.pin_id !== null)
+				.map((p) => ({ name: p.pin_name ?? `#${p.pin_id}`, note: p.note, createdAt: p.created_at }))
+		},
+		references: refs.results.map((r) => ({ hash: r.ref_hash, storePath: r.store_path })),
+		referrers: {
+			rows: referrers.results.map((r) => ({
+				hash: r.store_path_hash,
+				storePath: r.store_path,
+				createdAt: r.created_at
+			})),
+			total: referrerCount?.n ?? 0
+		}
+	};
+};
