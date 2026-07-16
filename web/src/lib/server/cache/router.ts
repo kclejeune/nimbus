@@ -37,6 +37,7 @@ import {
 } from './proxy';
 import { TtlMemo } from './ttl-memo';
 import { persistUpstreamPath } from './pullthrough';
+import { handleCacheList, handleDestroyPath, handleTokensApi } from './v1-admin';
 import { extractPublicKey } from '../attic/signing';
 import {
 	keyedNarinfoUrl,
@@ -393,7 +394,8 @@ async function handleProxyNar(
 		return url ? Response.redirect(url, 302) : null;
 	};
 	if (!winner) {
-		return (await upstreamRedirect()) ?? errorResponse(404, 'Not found', 'NoSuchObject');
+		const redirect = await upstreamRedirect();
+		return redirect ?? errorResponse(404, 'Not found', 'NoSuchObject');
 	}
 
 	// Download-driven retention, attributed to the winning cache (see handleNar).
@@ -409,7 +411,8 @@ async function handleProxyNar(
 	if (response.status === 404) {
 		// Deletion race (GC reaped the NAR between resolution and read): the
 		// upstreams may still have it, same as the per-cache route.
-		return (await upstreamRedirect()) ?? response;
+		const redirect = await upstreamRedirect();
+		return redirect ?? response;
 	}
 	return withCachePolicy(
 		withVisibility(new Response(response.body, response), winner.is_public === 1),
@@ -599,6 +602,17 @@ async function handleV1(
 	if (method === 'GET' && route === 'cache-config' && segments.length === 4) {
 		return handleCacheInfo(request, env, segments[3], apiBase(env, url));
 	}
+	if (method === 'GET' && route === 'caches' && segments.length === 3) {
+		// Optional auth, like the read path: an invalid token degrades to
+		// anonymous (public caches only) rather than failing the request.
+		let token: VerifiedToken | null = null;
+		try {
+			token = await verifyRequestToken(request, env);
+		} catch {
+			token = null;
+		}
+		return handleCacheList(env, token);
+	}
 
 	if (method === 'POST' && route === 'get-missing-paths' && segments.length === 3) {
 		return handleGetMissingPaths(request, env);
@@ -612,6 +626,18 @@ async function handleV1(
 	if ('response' in auth) return auth.response;
 	const token = auth.token;
 	const canPush = (cacheName: string) => permissionForCache(token, cacheName).push;
+
+	// nimbus extension: token self-service (mint/list/revoke as the user
+	// behind the presented token's jti).
+	if (route === 'tokens' && (segments.length === 3 || segments.length === 4)) {
+		return handleTokensApi(request, env, token);
+	}
+
+	// nimbus extension: closure-safe per-path destroy (the API face of the
+	// dashboard's prune action).
+	if (method === 'DELETE' && route === 'path' && segments.length === 5) {
+		return handleDestroyPath(env, ctx, segments[3], decodeURIComponent(segments[4]), token);
+	}
 
 	if (route === 'upload-path') {
 		// The CDC endpoints are stateless, so authorization rides along on each

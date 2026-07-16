@@ -72,7 +72,10 @@ export const actions: Actions = {
 		if (row.expires_at < Math.floor(Date.now() / 1000)) {
 			return fail(400, { error: 'This code has expired — start login again.' });
 		}
-		const bound = await boundTokenScope(form, locals, env.ATTIC_DB);
+		const bound = boundTokenScope(form, {
+			access: await effectiveAccessOf(locals, env.ATTIC_DB),
+			isAdmin: locals.user?.role === 'admin'
+		});
 		if (!bound.ok) return fail(403, { error: bound.denial });
 
 		const minted = await mintScopedToken(env.JWT_HS256_SECRET_BASE64, locals.user.id, bound.scope);

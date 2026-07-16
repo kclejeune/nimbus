@@ -4,14 +4,14 @@
 // rule, which still governs token *claims* (permissionForCache) unchanged.
 
 import type { D1Database } from '@cloudflare/workers-types';
-import type { CacheAccess, CachePermission } from '$lib/server/attic-token';
-import { patternMatches } from '$lib/server/attic/token';
+import type { CacheAccess, CachePermission } from '../attic-token';
+import { patternMatches } from '../attic/token';
 import { isActiveUser } from './types';
 import {
 	ALL_PERMISSION_BITS,
 	PERMISSION_BIT_FIELDS,
 	type PermissionBit
-} from '$lib/permission-bits';
+} from '../../permission-bits';
 
 export type { PermissionBit };
 const ALL_BITS: CachePermission = { r: 1, w: 1, d: 1, cc: 1, cr: 1, cq: 1, cd: 1 };

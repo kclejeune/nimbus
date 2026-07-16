@@ -42,7 +42,10 @@ export const actions: Actions = {
 		if (!name) return fail(400, { error: 'Give the token a name.' });
 
 		// Mint-time bounding: a token may only carry what its creator holds.
-		const bound = await boundTokenScope(form, locals, env.ATTIC_DB);
+		const bound = boundTokenScope(form, {
+			access: await effectiveAccessOf(locals, env.ATTIC_DB),
+			isAdmin: locals.user?.role === 'admin'
+		});
 		if (!bound.ok) return fail(403, { error: bound.denial });
 
 		// The plaintext token is returned exactly once; only its hash is stored.

@@ -1,5 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import { getDb, schema } from '$lib/server/db';
+import { getDb, schema } from './db';
 
 /** Best-effort audit trail write; failures are logged, never surfaced. */
 export async function writeAudit(

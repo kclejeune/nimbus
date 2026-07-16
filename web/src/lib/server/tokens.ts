@@ -1,7 +1,6 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import { mintAtticToken, type CacheAccess, type CachePermission } from './attic-token';
-import { effectiveAccessOf } from './auth/guard';
-import { parseTokenBits, scopeDenial } from './auth/permissions';
+import { parseTokenBits, scopeDenial, type EffectiveAccess } from './auth/permissions';
 import { writeAudit } from './audit';
 
 export interface TokenScope {
@@ -93,13 +92,13 @@ export async function sha256hex(s: string): Promise<string> {
 /**
  * Parse a token-issue form (shared by the tokens page and both CLI flows) and
  * bound it by the minting user's effective access. Returns the scope to mint,
- * or the user-facing denial.
+ * or the user-facing denial. Takes the resolved access rather than locals so
+ * the cache worker's token API (v1-admin.ts) can share the bounding rule.
  */
-export async function boundTokenScope(
+export function boundTokenScope(
 	form: FormData,
-	locals: App.Locals,
-	db: D1Database
-): Promise<{ ok: true; scope: TokenScope } | { ok: false; denial: string }> {
+	minter: { access: EffectiveAccess; isAdmin: boolean }
+): { ok: true; scope: TokenScope } | { ok: false; denial: string } {
 	const bits = parseTokenBits(form);
 	const cacheScope = String(form.get('cache') ?? '*');
 
@@ -109,12 +108,12 @@ export async function boundTokenScope(
 	// settings (keypair, visibility) over the API.
 	const gc = form.get('gc') === 'on';
 	const ct = form.get('ct') === 'on';
-	if ((gc || ct) && locals.user?.role !== 'admin') {
+	if ((gc || ct) && !minter.isAdmin) {
 		return { ok: false, denial: 'gc / trust-admin tokens are admin-only.' };
 	}
 
 	if (!(gc || ct) || Object.keys(bits).length > 0) {
-		const denial = scopeDenial(await effectiveAccessOf(locals, db), { pattern: cacheScope, bits });
+		const denial = scopeDenial(minter.access, { pattern: cacheScope, bits });
 		if (denial) return { ok: false, denial };
 	}
 	return {

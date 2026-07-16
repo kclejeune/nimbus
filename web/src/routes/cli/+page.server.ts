@@ -47,7 +47,10 @@ export const actions: Actions = {
 		const state = String(form.get('state') ?? '');
 		if (port === null || !state) return fail(400, { error: 'Invalid request.' });
 
-		const bound = await boundTokenScope(form, locals, env.ATTIC_DB);
+		const bound = boundTokenScope(form, {
+			access: await effectiveAccessOf(locals, env.ATTIC_DB),
+			isAdmin: locals.user?.role === 'admin'
+		});
 		if (!bound.ok) return fail(403, { error: bound.denial });
 
 		const minted = await mintAndStore(
