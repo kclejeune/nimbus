@@ -75,7 +75,11 @@
 		// OIDC ID-token claim carrying group names; enables group→permission sync.
 		"OIDC_GROUPS_CLAIM": "groups",
 		// Groups-claim value that auto-activates pending users at login.
-		"OIDC_ACTIVATION_GROUP": "nimbus_user"
+		"OIDC_ACTIVATION_GROUP": "nimbus_user",
+		// Account owning the CACHE_METRICS dataset; pairs with the
+		// CF_ANALYTICS_TOKEN secret (Account Analytics: Read) to enable the
+		// monitoring page's read-traffic section.
+		"CF_ACCOUNT_ID": "14613cda02f216f5620eca979a286eaf"
 	},
 
 	// Read-path traffic metrics (narinfo/NAR hit/miss/upstream), written by
