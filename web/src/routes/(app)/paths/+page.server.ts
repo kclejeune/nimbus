@@ -1,6 +1,7 @@
 import { error } from '@sveltejs/kit';
 import { canBrowseCache } from '$lib/server/auth/permissions';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { readSession } from '$lib/server/cache/db';
 import { likeTerm } from '$lib/server/store-paths';
 import { parsePage } from '$lib/pagination';
 import type { PageServerLoad } from './$types';
@@ -24,9 +25,12 @@ interface PathRow {
 export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
+	// Browse-only page: every query reads a replica session, keeping search
+	// keystrokes (debounced client-side) off the write primary.
+	const read = readSession(db);
 
 	const [{ results: caches }, access] = await Promise.all([
-		db
+		read
 			.prepare('SELECT id, name, is_public FROM cache WHERE deleted_at IS NULL ORDER BY name')
 			.all<CacheRow>(),
 		effectiveAccessOf(locals, db)
@@ -61,7 +65,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 		const hasQ = q.length > 0;
 		const where = `WHERE o.cache_id IN (${inList})${hasQ ? ` AND o.store_path LIKE ? ESCAPE '\\'` : ''}`;
 		const filterBinds = hasQ ? [...ids, likeTerm(q)] : ids;
-		({ results } = await db
+		({ results } = await read
 			.prepare(
 				`SELECT o.store_path, o.store_path_hash, o.created_at, n.nar_size,
 				        c.name AS cache_name, COUNT(*) OVER () AS total
