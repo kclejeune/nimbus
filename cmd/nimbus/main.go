@@ -31,9 +31,11 @@ func main() {
 
 Servers come from the config file (nimbus login), overlaid with environment
 variables mirroring its shape: NIMBUS_DEFAULT_SERVER,
-NIMBUS_SERVERS_<NAME>_ENDPOINT, and NIMBUS_SERVERS_<NAME>_TOKEN. For CI,
-the shortcuts NIMBUS_ENDPOINT (server when none is named) and
-NIMBUS_AUTH_TOKEN (token override) skip naming a server entirely.`,
+NIMBUS_SERVERS_<NAME>_ENDPOINT, NIMBUS_SERVERS_<NAME>_TOKEN, and
+NIMBUS_SERVERS_<NAME>_TOKEN_FILE (a file holding the token, e.g. a secret
+path). For CI, the shortcuts NIMBUS_ENDPOINT (server when none is named) and
+NIMBUS_AUTH_TOKEN or NIMBUS_AUTH_TOKEN_FILE (token override) skip naming a
+server entirely.`,
 		SilenceUsage: true,
 	}
 
@@ -41,6 +43,8 @@ NIMBUS_AUTH_TOKEN (token override) skip naming a server entirely.`,
 		StringVarP(&cfgFile, "config", "c", "", "config file (default: ~/.config/nimbus/config.toml)")
 
 	root.AddCommand(loginCmd())
+	root.AddCommand(whoamiCmd())
+	root.AddCommand(tokenCmd())
 	root.AddCommand(useCmd())
 	root.AddCommand(pushCmd())
 	root.AddCommand(cacheCmd())

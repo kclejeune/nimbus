@@ -21,7 +21,7 @@ import (
 )
 
 func loginCmd() *cobra.Command {
-	var web, device bool
+	var web, device, setDefault bool
 
 	cmd := &cobra.Command{
 		Use:   "login NAME ENDPOINT [TOKEN]",
@@ -29,7 +29,10 @@ func loginCmd() *cobra.Command {
 		Long: `Saves a server under NAME. With a TOKEN argument it is stored as-is;
 otherwise nimbus authenticates interactively — via the browser when one is
 available (local graphical session), or the device-code flow when not
-(SSH, headless). Force a flow with --web or --device.`,
+(SSH, headless). Force a flow with --web or --device.
+
+The first configured server becomes the default; --set-default makes this
+one the default even when others already exist.`,
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
@@ -53,8 +56,11 @@ available (local graphical session), or the device-code flow when not
 			if err != nil {
 				return err
 			}
+			// A fresh login supersedes a token_file entry: the new token is
+			// written and token_file dropped (login never writes token_file).
+			replacedTokenFile := cfg.Servers[name].TokenFile
 			cfg.Servers[name] = config.Server{Endpoint: endpoint, Token: token}
-			if cfg.DefaultServer == "" {
+			if cfg.DefaultServer == "" || setDefault {
 				cfg.DefaultServer = name
 			}
 			if err := cfg.Save(cfgFile); err != nil {
@@ -62,12 +68,20 @@ available (local graphical session), or the device-code flow when not
 			}
 
 			fmt.Printf("✅ Logged in to %q (%s)\n", name, endpoint)
+			if replacedTokenFile != "" {
+				fmt.Printf(
+					"   note: replaced the token_file entry (%s) with the new token\n",
+					replacedTokenFile,
+				)
+			}
 			return nil
 		},
 	}
 
 	cmd.Flags().BoolVar(&web, "web", false, "authenticate in a local browser")
 	cmd.Flags().BoolVar(&device, "device", false, "authenticate with a device code (headless)")
+	cmd.Flags().
+		BoolVar(&setDefault, "set-default", false, "make this server the default even when others exist")
 	cmd.MarkFlagsMutuallyExclusive("web", "device")
 	return cmd
 }

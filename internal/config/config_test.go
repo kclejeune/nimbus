@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestNormalizeEndpoint(t *testing.T) {
 	cases := map[string]string{
@@ -135,5 +140,122 @@ func TestLoadEnvLayers(t *testing.T) {
 	}
 	if _, ok := onDisk.Servers["ci"]; ok {
 		t.Error("env-defined server leaked into file layer")
+	}
+}
+
+func writeTokenFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestResolveServerTokenFile(t *testing.T) {
+	tokenPath := writeTokenFile(t, "file-token\n")
+	cfg := &Config{
+		DefaultServer: "prod",
+		Servers: map[string]Server{
+			"prod": {Endpoint: "cache.kclj.io", TokenFile: tokenPath},
+		},
+	}
+
+	// token_file is read with trailing whitespace trimmed.
+	_, server, err := cfg.ResolveServer("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.Token != "file-token" {
+		t.Errorf("Token = %q, want %q", server.Token, "file-token")
+	}
+
+	// NIMBUS_AUTH_TOKEN still overrides a token_file-configured server.
+	t.Setenv(TokenEnv, "env-token")
+	if _, server, err = cfg.ResolveServer(""); err != nil || server.Token != "env-token" {
+		t.Errorf("TokenEnv override: %q, %v", server.Token, err)
+	}
+	t.Setenv(TokenEnv, "")
+
+	// NIMBUS_AUTH_TOKEN_FILE overrides via a file.
+	t.Setenv(TokenFileEnv, writeTokenFile(t, "shortcut-token\t\n"))
+	if _, server, err = cfg.ResolveServer(""); err != nil || server.Token != "shortcut-token" {
+		t.Errorf("TokenFileEnv override: %q, %v", server.Token, err)
+	}
+}
+
+func TestResolveServerTokenFileErrors(t *testing.T) {
+	// Both token and token_file set is a config error.
+	both := &Config{
+		DefaultServer: "prod",
+		Servers: map[string]Server{
+			"prod": {Endpoint: "cache.kclj.io", Token: "x", TokenFile: "/some/file"},
+		},
+	}
+	if _, _, err := both.ResolveServer(""); err == nil ||
+		!strings.Contains(err.Error(), "both token and token_file") {
+		t.Errorf("both set: err = %v, want both-set error", err)
+	}
+
+	// An unreadable token file reports its path.
+	missing := filepath.Join(t.TempDir(), "nope")
+	unreadable := &Config{
+		DefaultServer: "prod",
+		Servers: map[string]Server{
+			"prod": {Endpoint: "cache.kclj.io", TokenFile: missing},
+		},
+	}
+	if _, _, err := unreadable.ResolveServer(""); err == nil ||
+		!strings.Contains(err.Error(), missing) {
+		t.Errorf("unreadable file: err = %v, want error naming %s", err, missing)
+	}
+}
+
+func TestLoadTokenFileEnvLayers(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.toml"
+	fileCfg := &Config{
+		DefaultServer: "prod",
+		Servers: map[string]Server{
+			"prod": {Endpoint: "https://cache.kclj.io"},
+		},
+	}
+	if err := fileCfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	tokenPath := writeTokenFile(t, "env-file-token\n")
+	t.Setenv("NIMBUS_SERVERS_PROD_TOKEN_FILE", tokenPath)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Servers["prod"].TokenFile; got != tokenPath {
+		t.Fatalf("TokenFile = %q, want %q", got, tokenPath)
+	}
+	if _, server, err := cfg.ResolveServer(""); err != nil || server.Token != "env-file-token" {
+		t.Errorf("resolution: %q, %v", server.Token, err)
+	}
+}
+
+func TestTokenFileRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.toml"
+	saved := &Config{
+		DefaultServer: "prod",
+		Servers: map[string]Server{
+			"prod": {Endpoint: "https://cache.kclj.io", TokenFile: "/run/secrets/nimbus"},
+		},
+	}
+	if err := saved.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Servers["prod"]; got.TokenFile != "/run/secrets/nimbus" || got.Token != "" {
+		t.Errorf("round trip: %+v", got)
 	}
 }

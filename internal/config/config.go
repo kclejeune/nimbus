@@ -19,22 +19,28 @@ import (
 // Environment configuration. Any config field can be set or overridden with
 // NIMBUS_-prefixed variables mirroring the file's shape:
 //
-//	NIMBUS_DEFAULT_SERVER            default-server
-//	NIMBUS_SERVERS_<NAME>_ENDPOINT   servers.<name>.endpoint
-//	NIMBUS_SERVERS_<NAME>_TOKEN      servers.<name>.token
+//	NIMBUS_DEFAULT_SERVER              default-server
+//	NIMBUS_SERVERS_<NAME>_ENDPOINT     servers.<name>.endpoint
+//	NIMBUS_SERVERS_<NAME>_TOKEN        servers.<name>.token
+//	NIMBUS_SERVERS_<NAME>_TOKEN_FILE   servers.<name>.token_file
 //
-// Two shortcuts cover the common CI case without naming a server: EndpointEnv
+// Shortcuts cover the common CI case without naming a server: EndpointEnv
 // defines the server whenever the cache reference does not name one
-// explicitly, and TokenEnv overrides whichever token resolution found.
+// explicitly, and TokenEnv (or TokenFileEnv, pointing at a file holding the
+// token) overrides whichever token resolution found.
 const (
-	EndpointEnv = "NIMBUS_ENDPOINT"
-	TokenEnv    = "NIMBUS_AUTH_TOKEN"
-	envPrefix   = "NIMBUS_"
+	EndpointEnv  = "NIMBUS_ENDPOINT"
+	TokenEnv     = "NIMBUS_AUTH_TOKEN"
+	TokenFileEnv = "NIMBUS_AUTH_TOKEN_FILE"
+	envPrefix    = "NIMBUS_"
 )
 
 type Server struct {
 	Endpoint string `toml:"endpoint"        konf:"endpoint"`
 	Token    string `toml:"token,omitempty" konf:"token"`
+	// TokenFile holds the token out of the config file (e.g. an agenix/sops
+	// secret path). Mutually exclusive with Token.
+	TokenFile string `toml:"token_file,omitempty" konf:"token_file"`
 }
 
 // NormalizeEndpoint accepts a full http(s) URL or a bare host[:port] (which
@@ -126,8 +132,13 @@ func splitEnvName(name string) []string {
 		return []string{"default-server"}
 	}
 	parts := strings.Split(name, "_")
-	// NIMBUS_SERVERS_<NAME>_ENDPOINT|TOKEN; underscores inside <NAME> are
-	// kept (server names cannot contain the field being set anyway).
+	// NIMBUS_SERVERS_<NAME>_ENDPOINT|TOKEN|TOKEN_FILE; underscores inside
+	// <NAME> are kept (server names cannot contain the field being set anyway).
+	if len(parts) >= 4 && parts[0] == "SERVERS" &&
+		parts[len(parts)-2] == "TOKEN" && parts[len(parts)-1] == "FILE" {
+		server := strings.ToLower(strings.Join(parts[1:len(parts)-2], "_"))
+		return []string{"servers", server, "token_file"}
+	}
 	if len(parts) >= 3 && parts[0] == "SERVERS" {
 		field := strings.ToLower(parts[len(parts)-1])
 		if field == "endpoint" || field == "token" {
@@ -202,9 +213,20 @@ type CacheRef struct {
 	Cache      string
 }
 
+// readTokenFile returns the file's contents with trailing whitespace trimmed
+// (secret files conventionally end with a newline).
+func readTokenFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading token file %s: %w", path, err)
+	}
+	return strings.TrimRight(string(data), " \t\r\n"), nil
+}
+
 // ResolveServer returns the named server, falling back to NIMBUS_ENDPOINT,
 // then the default (or only) configured server when name is empty. A set
-// NIMBUS_AUTH_TOKEN overrides the resolved token either way.
+// NIMBUS_AUTH_TOKEN (or NIMBUS_AUTH_TOKEN_FILE) overrides the resolved token
+// either way; otherwise a server's token_file is read in place of token.
 func (c *Config) ResolveServer(name string) (string, Server, error) {
 	var server Server
 	if name == "" && os.Getenv(EndpointEnv) != "" {
@@ -240,7 +262,25 @@ func (c *Config) ResolveServer(name string) (string, Server, error) {
 		return "", Server{}, fmt.Errorf("server %q: %w", name, err)
 	}
 	server.Endpoint = endpoint
+	if server.Token != "" && server.TokenFile != "" {
+		return "", Server{}, fmt.Errorf(
+			"server %q sets both token and token_file; remove one", name,
+		)
+	}
+	if server.Token == "" && server.TokenFile != "" {
+		token, err := readTokenFile(server.TokenFile)
+		if err != nil {
+			return "", Server{}, fmt.Errorf("server %q: %w", name, err)
+		}
+		server.Token = token
+	}
 	if token := os.Getenv(TokenEnv); token != "" {
+		server.Token = token
+	} else if file := os.Getenv(TokenFileEnv); file != "" {
+		token, err := readTokenFile(file)
+		if err != nil {
+			return "", Server{}, fmt.Errorf("%s: %w", TokenFileEnv, err)
+		}
 		server.Token = token
 	}
 	return name, server, nil

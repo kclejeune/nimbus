@@ -62,13 +62,22 @@ func (c *Client) newRequest(
 func decodeOrError(res *http.Response, out any) error {
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		// The server's error shape is {code, error: <kind>, message: <detail>};
+		// prefer the human-readable message, falling back to the kind (which is
+		// also where bare device-flow codes like authorization_pending live).
 		var apiErr struct {
-			Error string `json:"error"`
+			Error   string `json:"error"`
+			Message string `json:"message"`
 		}
 		data, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 		message := strings.TrimSpace(string(data))
-		if json.Unmarshal(data, &apiErr) == nil && apiErr.Error != "" {
-			message = apiErr.Error
+		if json.Unmarshal(data, &apiErr) == nil {
+			switch {
+			case apiErr.Message != "":
+				message = apiErr.Message
+			case apiErr.Error != "":
+				message = apiErr.Error
+			}
 		}
 		return &Error{Status: res.StatusCode, Message: message}
 	}
@@ -377,6 +386,32 @@ func (c *Client) PinNamed(
 	return c.doJSON(ctx, http.MethodPost, "/_api/v1/pin/"+cache, body, nil)
 }
 
+// PinRevision is one entry of a named pin's history, newest first.
+type PinRevision struct {
+	Hash      string  `json:"hash"`
+	CreatedAt string  `json:"createdAt"`
+	Note      *string `json:"note"`
+}
+
+// Pin mirrors the server's PinInfo listing shape.
+type Pin struct {
+	Name          string        `json:"name"`
+	KeepRevisions *int          `json:"keepRevisions"`
+	KeepDays      *int          `json:"keepDays"`
+	Revisions     []PinRevision `json:"revisions"`
+}
+
+// ListPins returns the cache's pins with their revision histories.
+func (c *Client) ListPins(ctx context.Context, cache string) ([]Pin, error) {
+	var out struct {
+		Pins []Pin `json:"pins"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/_api/v1/pin/"+cache, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Pins, nil
+}
+
 // UnpinNamed removes a named pin and all its revisions.
 func (c *Client) UnpinNamed(ctx context.Context, cache, name string) error {
 	return c.doJSON(
@@ -386,6 +421,135 @@ func (c *Client) UnpinNamed(ctx context.Context, cache, name string) error {
 		nil,
 		nil,
 	)
+}
+
+// CachePermissions is the caller's effective access to a listed cache.
+type CachePermissions struct {
+	Pull                    bool `json:"pull"`
+	Push                    bool `json:"push"`
+	Delete                  bool `json:"delete"`
+	ConfigureCache          bool `json:"configure_cache"`
+	ConfigureCacheRetention bool `json:"configure_cache_retention"`
+	DestroyCache            bool `json:"destroy_cache"`
+}
+
+// CacheListEntry is one row of the server's cache listing.
+type CacheListEntry struct {
+	Name        string `json:"name"`
+	Public      bool   `json:"public"`
+	Priority    int    `json:"priority"`
+	Compression string `json:"compression"`
+	// RetentionPeriod is in days; nil means no age-based retention.
+	RetentionPeriod *int64 `json:"retention_period"`
+	// RetentionMaxBytes caps compressed storage; nil means no size budget.
+	RetentionMaxBytes *int64           `json:"retention_max_bytes"`
+	Permissions       CachePermissions `json:"permissions"`
+}
+
+// ListCaches returns the caches the caller may discover: public ones plus,
+// when a token is configured, any it carries an explicit bit for.
+func (c *Client) ListCaches(ctx context.Context) ([]CacheListEntry, error) {
+	var out struct {
+		Caches []CacheListEntry `json:"caches"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/_api/v1/caches", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Caches, nil
+}
+
+// TokenCreateRequest asks the server to mint a scoped API token. Permissions
+// take the server's form-field names: pull, push, delete, configure_cache,
+// destroy_cache. GC and CT are the admin-only server-wide claims.
+type TokenCreateRequest struct {
+	Name        string   `json:"name"`
+	Cache       string   `json:"cache,omitempty"`
+	Permissions []string `json:"permissions,omitempty"`
+	GC          bool     `json:"gc,omitempty"`
+	CT          bool     `json:"ct,omitempty"`
+	ExpiryDays  int      `json:"expiry_days,omitempty"`
+}
+
+// CreatedToken carries the plaintext JWT, which the server shows only once.
+type CreatedToken struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Token     string `json:"token"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+func (c *Client) CreateToken(
+	ctx context.Context,
+	req *TokenCreateRequest,
+) (*CreatedToken, error) {
+	created := &CreatedToken{}
+	if err := c.doJSON(ctx, http.MethodPost, "/_api/v1/tokens", req, created); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+// TokenInfo is one issued token as presented by the server (plaintext is
+// never available after minting). Scope is the JSON-encoded snapshot of the
+// token's cache access, {pattern: {bit: 1, ...}}.
+type TokenInfo struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+	CreatedAt int64  `json:"createdAt"`
+	ExpiresAt *int64 `json:"expiresAt"`
+	Status    string `json:"status"` // active | expired | revoked
+}
+
+// ListTokens returns the tokens issued to the calling token's user.
+func (c *Client) ListTokens(ctx context.Context) ([]TokenInfo, error) {
+	var out struct {
+		Tokens []TokenInfo `json:"tokens"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/_api/v1/tokens", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Tokens, nil
+}
+
+// RevokeToken revokes one of the calling user's tokens by id.
+func (c *Client) RevokeToken(ctx context.Context, id string) error {
+	return c.doJSON(
+		ctx,
+		http.MethodDelete,
+		"/_api/v1/tokens/"+url.PathEscape(id),
+		nil,
+		nil,
+	)
+}
+
+// DestroyPathResult reports a per-path removal: detached is how many closure
+// members stopped anchoring retention, reaped how many became unreachable and
+// were deleted outright.
+type DestroyPathResult struct {
+	Destroyed string `json:"destroyed"`
+	Detached  int    `json:"detached"`
+	Reaped    int    `json:"reaped"`
+}
+
+// DestroyPath removes a store path from a cache. The server is closure-safe:
+// dependencies shared with other paths survive until their last dependent is
+// removed.
+func (c *Client) DestroyPath(
+	ctx context.Context,
+	cache, storePathHash string,
+) (*DestroyPathResult, error) {
+	result := &DestroyPathResult{}
+	if err := c.doJSON(
+		ctx,
+		http.MethodDelete,
+		"/_api/v1/path/"+cache+"/"+storePathHash,
+		nil,
+		result,
+	); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // RunGc triggers a server-side garbage collection pass and returns the
