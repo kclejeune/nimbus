@@ -2,6 +2,7 @@
 	import { formatBytes, formatCount } from '$lib/format';
 	import { goto } from '$app/navigation';
 	import AreaChart from '$lib/components/charts/area-chart.svelte';
+	import * as ToggleGroup from '$lib/components/ui/toggle-group/index.js';
 
 	let { data } = $props();
 	const b = $derived(data.buckets);
@@ -76,119 +77,148 @@
 </script>
 
 {#snippet segmented(options: [string, string][], active: string, pick: (v: string) => void)}
-	<div class="inline-flex rounded-md border border-input p-0.5 text-xs">
+	<!-- Single-select toggle groups deselect on a second click; ignore the
+	     resulting empty value so one option is always active. -->
+	<ToggleGroup.Root
+		type="single"
+		value={active}
+		onValueChange={(v) => v && pick(v)}
+		variant="outline"
+		size="sm"
+	>
 		{#each options as [val, label] (val)}
-			<button
-				type="button"
-				onclick={() => pick(val)}
-				class="rounded px-2.5 py-1 transition-colors {active === val
-					? 'bg-muted font-medium text-foreground'
-					: 'text-muted-foreground hover:text-foreground'}"
-			>
-				{label}
-			</button>
+			<ToggleGroup.Item value={val} class="!px-3 text-xs">{label}</ToggleGroup.Item>
 		{/each}
-	</div>
+	</ToggleGroup.Root>
 {/snippet}
 
-{#snippet stat(label: string, value: string, sub?: string)}
-	<div class="rounded-lg border bg-card p-5">
+{#snippet stat(label: string, value: string, sub?: string, cls?: string)}
+	<div class="rounded-lg border bg-card p-5 {cls ?? ''}">
 		<div class="text-xs text-muted-foreground">{label}</div>
 		<div class="mt-1 font-mono text-2xl font-semibold tracking-tight">{value}</div>
 		{#if sub}<div class="mt-0.5 text-xs text-muted-foreground">{sub}</div>{/if}
 	</div>
 {/snippet}
 
-<div class="mx-auto max-w-6xl px-8 py-8">
-	<header class="mb-8 flex flex-wrap items-end justify-between gap-4">
-		<div>
-			<h1 class="text-2xl font-semibold tracking-tight">Monitoring</h1>
-			<p class="mt-1 text-sm text-muted-foreground">Storage and push activity over time.</p>
-		</div>
-		<div class="flex flex-wrap items-center gap-2">
-			{@render segmented(RANGES, data.range, (v) => setParam({ range: v }))}
-			{@render segmented(GRANULARITIES, data.granularity, (v) => setParam({ granularity: v }))}
-		</div>
+{#snippet chartCard(title: string, total: string)}
+	<div class="mb-4 flex items-baseline justify-between gap-3">
+		<h3 class="text-sm font-medium">{title}</h3>
+		<span class="font-mono text-sm whitespace-nowrap text-muted-foreground">{total}</span>
+	</div>
+{/snippet}
+
+<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+	<header class="mb-8">
+		<h1 class="text-2xl font-semibold tracking-tight">Monitoring</h1>
+		<p class="mt-1 text-sm text-muted-foreground">
+			Storage growth and read traffic across all caches.
+		</p>
 	</header>
 
-	{#if b.length === 0}
-		<div class="rounded-lg border border-dashed py-16 text-center">
-			<p class="text-sm text-muted-foreground">No activity to chart yet.</p>
-		</div>
-	{:else}
-		<div class="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
-			{@render stat('Total storage', formatBytes(totalBytes))}
-			{@render stat('Store paths', formatCount(totalPaths))}
-			{@render stat(
-				`Busiest ${unitWord}`,
-				formatCount(peakBucket.paths),
-				peakBucket.date ? `${peakBucket.date} · paths added` : undefined
-			)}
-		</div>
-
-		<section class="mb-8 rounded-lg border bg-card p-5">
-			<div class="mb-4 flex items-baseline justify-between">
-				<h2 class="text-sm font-medium">Storage growth</h2>
-				<span class="font-mono text-sm text-muted-foreground">{formatBytes(totalBytes)} total</span>
+	<!-- Each section is a header, a stat-card grid, and a chart grid; a new
+	     metric is one more card flowing into its grid, not a longer page. -->
+	<section class="mb-10">
+		<div class="mb-4 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+			<div>
+				<h2 class="text-base font-semibold tracking-tight">Storage</h2>
+				<p class="mt-0.5 text-xs text-muted-foreground">Paths pushed and bytes stored over time.</p>
 			</div>
-			<AreaChart
-				points={storagePoints}
-				format={formatBytes}
-				deltaFormat={formatBytes}
-				deltaLabel={perLabel}
-				ariaLabel="Cumulative storage over time"
-			/>
-		</section>
-
-		<section class="rounded-lg border bg-card p-5">
-			<div class="mb-4 flex items-baseline justify-between">
-				<h2 class="text-sm font-medium">Store paths</h2>
-				<span class="font-mono text-sm text-muted-foreground">{formatCount(totalPaths)} total</span>
+			<!-- Scoped here: these controls window the storage series only. -->
+			<div class="flex flex-wrap items-center gap-2">
+				{@render segmented(RANGES, data.range, (v) => setParam({ range: v }))}
+				{@render segmented(GRANULARITIES, data.granularity, (v) => setParam({ granularity: v }))}
 			</div>
-			<AreaChart
-				points={pathPoints}
-				format={formatCount}
-				deltaFormat={formatCount}
-				deltaLabel={perLabel}
-				ariaLabel="Cumulative store paths over time"
-			/>
-		</section>
-	{/if}
-
-	{#if traffic}
-		<div class="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-4">
-			{@render stat(
-				'Hit rate',
-				hitRate === null ? '—' : `${hitRate}%`,
-				'narinfo lookups answered locally'
-			)}
-			{@render stat('narinfo hits', formatCount(traffic.narinfo.hit), 'last 30 days')}
-			{@render stat(
-				'Misses',
-				formatCount(traffic.narinfo.miss + traffic.nar.miss),
-				'not local, not upstream'
-			)}
-			{@render stat(
-				'Upstream',
-				formatCount(traffic.narinfo.upstream + traffic.nar.upstream),
-				'answered via upstream caches'
-			)}
 		</div>
 
-		<section class="mt-8 rounded-lg border bg-card p-5">
-			<div class="mb-4 flex items-baseline justify-between">
-				<h2 class="text-sm font-medium">Read traffic</h2>
-				<span class="font-mono text-sm text-muted-foreground">
-					{formatCount(trafficRequests)} reads · 30 days
-				</span>
+		{#if b.length === 0}
+			<div class="rounded-lg border border-dashed py-16 text-center">
+				<p class="text-sm text-muted-foreground">No activity to chart yet.</p>
 			</div>
-			<AreaChart
-				points={trafficPoints}
-				format={formatCount}
-				deltaFormat={formatCount}
-				deltaLabel="this day"
-				ariaLabel="Read requests per day"
-			/>
-		</section>
-	{/if}
+		{:else}
+			<div class="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-3">
+				{@render stat('Total storage', formatBytes(totalBytes))}
+				{@render stat('Store paths', formatCount(totalPaths))}
+				{@render stat(
+					`Busiest ${unitWord}`,
+					formatCount(peakBucket.paths),
+					peakBucket.date ? `${peakBucket.date} · paths added` : undefined,
+					// Odd card out in the two-column mobile grid: span the full row.
+					'col-span-2 lg:col-span-1'
+				)}
+			</div>
+
+			<div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
+				<div class="rounded-lg border bg-card p-5">
+					{@render chartCard('Storage growth', `${formatBytes(totalBytes)} total`)}
+					<AreaChart
+						points={storagePoints}
+						format={formatBytes}
+						deltaFormat={formatBytes}
+						deltaLabel={perLabel}
+						ariaLabel="Cumulative storage over time"
+					/>
+				</div>
+				<div class="rounded-lg border bg-card p-5">
+					{@render chartCard('Store paths', `${formatCount(totalPaths)} total`)}
+					<AreaChart
+						points={pathPoints}
+						format={formatCount}
+						deltaFormat={formatCount}
+						deltaLabel={perLabel}
+						ariaLabel="Cumulative store paths over time"
+					/>
+				</div>
+			</div>
+		{/if}
+	</section>
+
+	<section>
+		<div class="mb-4">
+			<h2 class="text-base font-semibold tracking-tight">Traffic</h2>
+			<p class="mt-0.5 text-xs text-muted-foreground">
+				Read requests over the last 30 days, from Workers Analytics Engine.
+			</p>
+		</div>
+
+		{#if traffic}
+			<div class="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
+				{@render stat(
+					'Hit rate',
+					hitRate === null ? '—' : `${hitRate}%`,
+					'narinfo lookups answered locally'
+				)}
+				{@render stat('narinfo hits', formatCount(traffic.narinfo.hit), 'last 30 days')}
+				{@render stat(
+					'Misses',
+					formatCount(traffic.narinfo.miss + traffic.nar.miss),
+					'not local, not upstream'
+				)}
+				{@render stat(
+					'Upstream',
+					formatCount(traffic.narinfo.upstream + traffic.nar.upstream),
+					'answered via upstream caches'
+				)}
+			</div>
+
+			<div class="rounded-lg border bg-card p-5">
+				{@render chartCard('Read traffic', `${formatCount(trafficRequests)} reads · 30 days`)}
+				<AreaChart
+					points={trafficPoints}
+					format={formatCount}
+					deltaFormat={formatCount}
+					deltaLabel="this day"
+					ariaLabel="Read requests per day"
+				/>
+			</div>
+		{:else}
+			<div class="rounded-lg border border-dashed px-6 py-12 text-center">
+				<p class="text-sm text-muted-foreground">Traffic metrics aren't connected.</p>
+				<p class="mx-auto mt-1 max-w-md text-xs text-muted-foreground">
+					Set the <code class="font-mono">CF_ACCOUNT_ID</code> and
+					<code class="font-mono">CF_ANALYTICS_TOKEN</code> secrets to chart cache reads, hit rate, and
+					upstream fetches here.
+				</p>
+			</div>
+		{/if}
+	</section>
 </div>
