@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { afterNavigate } from '$app/navigation';
 	import { page } from '$app/state';
 	import { NAV_ITEMS } from '$lib/nav';
 	import Logo from './logo.svelte';
@@ -32,6 +33,11 @@
 	function isActive(url: string): boolean {
 		return url === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(url);
 	}
+
+	// On small screens the sidebar is a sheet overlaying the page; client-side
+	// navigation doesn't unmount it, so close it whenever a link lands.
+	const sidebar = Sidebar.useSidebar();
+	afterNavigate(() => sidebar.setOpenMobile(false));
 </script>
 
 <Sidebar.Root collapsible="offcanvas" {...restProps}>
