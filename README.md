@@ -91,10 +91,13 @@ underneath for one that fits inside a Worker's constraints.
   shared dependencies stay until their last dependent goes. Pins come in two
   flavors — quick single-path pins, and cachix-style **named pins** with
   revision history (`--keep-revisions` / `--keep-days`).
-- **Admin UI** — cache management with per-cache access lists, store-path
-  browsing/search, pin/prune, scoped token issuance with revocation,
-  users/groups/grants, user activation, upstream registry management, and
-  ingest monitoring; privileged actions are recorded to an audit log.
+- **Admin UI** — cache management with per-cache access lists and size-budget
+  meters, store-path browsing/search with per-path detail (references,
+  referrers, NAR/chunk breakdown), pin/prune, scoped token issuance with
+  revocation, users/groups/grants, user activation, upstream registry
+  management, ingest monitoring (plus read-traffic hit/miss stats via
+  Analytics Engine when configured), GC run reports with closure-integrity
+  warnings, and an audit log of privileged actions.
 - **Flexible auth** — OIDC or Cloudflare Access for the dashboard (with OIDC
   group sync and pending-user approval); HS256/RS256 attic JWTs for the
   protocol; browser-loopback and RFC 8628 device-code flows for CLI login.
@@ -103,8 +106,10 @@ underneath for one that fits inside a Worker's constraints.
   and speculative reference prefetch warms the edge cache behind strict
   rate-limit guardrails.
 - **Go CLI** — `login`, `use`, `push` (parallel, closure-aware, `--stdin`),
-  `watch-store`, `watch-exec` (batched with idle flushing), `gc`, and full
-  cache administration.
+  `watch-store`, `watch-exec` (batched with idle flushing), `gc`, `whoami`,
+  headless token management (`token create|list|revoke`), and full cache
+  administration (`list`, `create`, `configure`, `rename`, `pin(s)`, `rm`,
+  `destroy`).
 
 <table>
   <tr>
@@ -152,10 +157,10 @@ Honest accounting of where nimbus trails or diverges from the reference:
 - **No presigned-URL downloads** — locally-stored NAR bytes always proxy
   through the Worker (upstream-cached paths do redirect); R2's zero egress
   makes this cheaper than it would be on S3.
-- **No per-path destroy API** (`attic destroy` equivalent); the dashboard's
-  prune action covers it interactively.
-- **No headless token minting** (`atticadm make-token` equivalent) — tokens
-  come from the dashboard or an authenticated CLI login.
+- **Token minting needs a bootstrap identity** — `nimbus token create` mints
+  scoped tokens headlessly, but it acts as the user behind a dashboard- or
+  CLI-login-issued token; there is no config-file-secret path to mint from
+  nothing like `atticadm make-token`.
 - **`retention_period` is expressed in days** (`null` = unlimited) rather
   than attic's seconds with a global default.
 
@@ -174,14 +179,23 @@ nimbus watch-store mycache                             # push new store paths as
 nimbus watch-exec mycache -- nix build ...             # watch during a command, flush on exit
 nimbus watch-exec mycache --batch-idle 30s -- ...      # also flush during long build stalls
 nimbus gc --dry-run                                    # trigger/preview garbage collection
+nimbus whoami                                          # inspect the configured token (scopes, expiry)
+nimbus cache list                                      # caches you can see, with your access bits
 nimbus cache info|configure|rename|pin|unpin|destroy mycache
 nimbus cache pin mycache v1.7 /nix/store/... --keep-revisions 5   # named pin with history
+nimbus cache pins mycache                              # list pins and their revisions
 nimbus cache unpin mycache v1.7                        # drop the pin and all its revisions
+nimbus cache rm mycache /nix/store/...                 # closure-safe path removal
+nimbus use mycache --remove                            # unwind nix.conf/netrc edits
+nimbus token create ci --cache 'ci-*' --pull --push --expiry-days 90   # headless scoped tokens
+nimbus token list|revoke                               # inspect and revoke issued tokens
 ```
 
 Caches are addressed as `[server:]cache`; the first login becomes the default
-server. Config lives at `~/.config/nimbus/config.toml` (XDG respected), and
-CI can skip config entirely with `NIMBUS_ENDPOINT` + `NIMBUS_AUTH_TOKEN`.
+server (`--set-default` overrides later). Config lives at
+`~/.config/nimbus/config.toml` (XDG respected) — a server's token can live in
+a separate file via `token_file` — and CI can skip config entirely with
+`NIMBUS_ENDPOINT` + `NIMBUS_AUTH_TOKEN` (or `NIMBUS_AUTH_TOKEN_FILE`).
 
 Pushes query the closure via `nix path-info`, skip paths the server already
 has (or can fetch from its upstreams — `--ignore-upstream-cache-filter`
