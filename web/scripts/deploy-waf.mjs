@@ -137,31 +137,22 @@ const ALLOWED_CONTINENTS = ['NA', 'SA', 'EU'];
 
 const customRules = [
 	{
-		description: 'cache: block query strings on read paths (cache-busting)',
-		expression: `(http.host eq "${cacheHost}" and not starts_with(http.request.uri.path, "/_api/") and http.request.uri.query ne "")`,
-		action: 'block',
-		enabled: true
-	},
-	{
-		description: 'cache: restrict methods to the binary-cache/attic protocol',
-		expression: `(http.host eq "${cacheHost}" and not http.request.method in {"GET" "HEAD" "PUT" "POST" "DELETE" "PATCH"})`,
-		action: 'block',
-		enabled: true
-	},
-	{
-		// Legit paths are a 32-char hash plus short fixed affixes; deep fake
-		// nar paths are deflected before reaching the worker's own 256-char
-		// verdict guard.
-		description: 'cache: block oversized paths (fake nar-path shapes)',
-		expression: `(http.host eq "${cacheHost}" and len(http.request.uri.path) > 300)`,
-		action: 'block',
-		enabled: true
-	},
-	{
-		// Crawlers have no business indexing a binary cache, and every crawl
-		// is a billed worker request. Nix/attic clients are not verified bots.
-		description: 'cache: block known bots/crawlers',
-		expression: `(http.host eq "${cacheHost}" and cf.client.bot)`,
+		// One slot for every always-block junk shape — same action, so the
+		// clauses OR-combine losslessly: query strings on read paths
+		// (cache-busting), non-protocol methods, oversized paths (fake
+		// nar-path shapes die before the worker's 256-char verdict guard),
+		// and known crawlers (never nix clients; every crawl is a billed
+		// request). Kept separate from the geo gate below so Security >
+		// Events can distinguish shape junk from geography when hunting
+		// false positives — geography is the only clause a legit user could
+		// ever trip.
+		description: 'cache: junk shapes (query-string, method, oversized path, bots)',
+		expression:
+			`(http.host eq "${cacheHost}" and (` +
+			`(not starts_with(http.request.uri.path, "/_api/") and http.request.uri.query ne "") or ` +
+			`not http.request.method in {"GET" "HEAD" "PUT" "POST" "DELETE" "PATCH"} or ` +
+			`len(http.request.uri.path) > 300 or ` +
+			`cf.client.bot))`,
 		action: 'block',
 		enabled: true
 	}
