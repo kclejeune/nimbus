@@ -5,6 +5,7 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
+		"dev:worker": "wrangler dev --host localhost:8788 $(test -f wrangler.local.jsonc && echo --config=wrangler.local.jsonc)",
 		"build": "wireit",
 		"preview": "vite preview",
 		"migrate": "wireit",
@@ -34,17 +35,17 @@
 			]
 		},
 		"migrate": {
-			"command": "wrangler d1 migrations apply attic --remote"
+			"command": "wrangler d1 migrations apply ATTIC_DB --remote $(test -f wrangler.local.jsonc && echo --config=wrangler.local.jsonc)"
 		},
 		"deploy:worker": {
-			"command": "wrangler deploy",
+			"command": "wrangler deploy $(test -f wrangler.local.jsonc && echo --config=wrangler.local.jsonc)",
 			"dependencies": [
 				"build",
 				"migrate"
 			]
 		},
 		"deploy:waf": {
-			"command": "fnox exec -- node scripts/deploy-waf.mjs --optional"
+			"command": "if command -v fnox >/dev/null 2>&1; then fnox exec -- node scripts/deploy-waf.mjs --optional; else node scripts/deploy-waf.mjs --optional; fi"
 		},
 		"deploy": {
 			"dependencies": [
@@ -85,6 +86,7 @@
 		"@tailwindcss/vite": "^4.3.0",
 		"@types/d3-scale": "^4.0.9",
 		"@types/d3-shape": "^3.1.8",
+		"@types/node": "^26.1.1",
 		"bits-ui": "^2.18.1",
 		"d3-scale": "^4.0.2",
 		"d3-shape": "^3.2.0",
@@ -126,5 +128,18 @@
 		"svelte-sonner": "^1.1.1",
 		"tailwind-merge": "^3.6.0",
 		"tailwind-variants": "^3.2.2"
+	},
+	"cloudflare": {
+		"bindings": {
+			"ATTIC_DB": {
+				"description": "D1 database for cache/NAR metadata and admin tables (schema descends from attic's)."
+			},
+			"CACHE_BUCKET": {
+				"description": "R2 bucket holding deduplicated NAR chunks."
+			},
+			"CACHE_METRICS": {
+				"description": "Analytics Engine dataset for the monitoring page's traffic metrics."
+			}
+		}
 	}
 }

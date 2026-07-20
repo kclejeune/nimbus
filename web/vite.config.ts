@@ -2,6 +2,7 @@ import tailwindcss from '@tailwindcss/vite';
 import adapter from '@sveltejs/adapter-cloudflare';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
+import { existsSync } from 'node:fs';
 
 export default defineConfig({
 	plugins: [
@@ -26,8 +27,14 @@ export default defineConfig({
 			// The adapter emits its worker to the `main` of the given config; it gets
 			// a dedicated one so it never overwrites worker-entry.ts (the deploy
 			// entry in wrangler.jsonc, which wraps the adapter output to add the
-			// scheduled GC handler).
-			adapter: adapter({ config: 'wrangler.adapter.jsonc' })
+			// scheduled GC handler). Dev-time bindings emulation follows the same
+			// precedence as the deploy scripts: wrangler.local.jsonc when present.
+			adapter: adapter({
+				config: 'wrangler.adapter.jsonc',
+				platformProxy: {
+					configPath: existsSync('wrangler.local.jsonc') ? 'wrangler.local.jsonc' : 'wrangler.jsonc'
+				}
+			})
 		})
 	]
 });
