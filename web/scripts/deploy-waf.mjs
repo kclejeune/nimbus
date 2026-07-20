@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Declarative zone-WAF deploy for the cache host: PUTs the two ruleset phase
 // entrypoints (custom rules + rate limiting) with the desired rules, derived
-// from wrangler.jsonc's CACHE_BASE_URL so no hostname is duplicated here.
+// from the wrangler config's CACHE_BASE_URL (wrangler.local.jsonc when
+// present, else wrangler.jsonc) so no hostname is duplicated here.
 //
 // The phase-entrypoint PUT replaces the ENTIRE phase — this script owns every
 // rule in http_request_firewall_custom and http_ratelimit for the zone, and
@@ -27,7 +28,7 @@
 //   space (.narinfo / /nar/) is distinctive enough to need no host match.
 // - Free-plan rate limiting allows only period=10 and mitigation_timeout=10.
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -77,7 +78,12 @@ function stripJsonc(text) {
 }
 
 const webDir = join(dirname(fileURLToPath(import.meta.url)), '..');
-const wrangler = JSON.parse(stripJsonc(readFileSync(join(webDir, 'wrangler.jsonc'), 'utf8')));
+// Same precedence as the deploy scripts: an untracked wrangler.local.jsonc
+// (per-deployment values) wins over the tracked template.
+const configPath = ['wrangler.local.jsonc', 'wrangler.jsonc']
+	.map((name) => join(webDir, name))
+	.find(existsSync);
+const wrangler = JSON.parse(stripJsonc(readFileSync(configPath, 'utf8')));
 const cacheBaseUrl = wrangler.vars?.CACHE_BASE_URL;
 if (!cacheBaseUrl) fail('vars.CACHE_BASE_URL not found in wrangler.jsonc');
 const cacheHost = new URL(cacheBaseUrl).host;

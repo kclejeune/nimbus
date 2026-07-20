@@ -172,3 +172,6 @@ dist
 .svelte-kit
 
 # End of https://www.toptal.com/developers/gitignore/api/node
+
+# Per-deployment wrangler config override (auto-detected by npm scripts)
+wrangler.local.jsonc

@@ -1,4 +1,9 @@
 {
+	// Deployment manifest — see docs/deploy.md for the full self-hosting
+	// walkthrough. Values marked REPLACE_/example.com are per-deployment:
+	// either edit them in place (in your fork) or copy this file to
+	// wrangler.local.jsonc (gitignored) with your real values — the npm
+	// deploy scripts prefer it automatically, keeping `git pull` conflict-free.
 	"name": "nimbus",
 	"compatibility_date": "2026-07-06",
 	"compatibility_flags": ["nodejs_compat"],
@@ -32,15 +37,19 @@
 	// Nightly garbage collection (closure-aware retention, orphan reaping).
 	"triggers": { "crons": ["0 3 * * *"] },
 
-	// Custom domains: Cloudflare provisions the DNS records and edge
-	// certificates automatically on deploy. app.* serves the admin UI;
-	// cache.kclj.io is dispatched to the attic binary-cache API by
-	// hooks.server.ts (host match against CACHE_BASE_URL). Both MUST be
-	// declared here — wrangler removes domains not present in this config.
-	"routes": [
-		{ "pattern": "app.cache.kclj.io", "custom_domain": true },
-		{ "pattern": "cache.kclj.io", "custom_domain": true }
-	],
+	// Custom domains: a full deployment needs two hostnames on a zone in your
+	// account — app.* serves the admin UI; the cache hostname is dispatched to
+	// the binary-cache API by worker-entry.ts (host match against
+	// CACHE_BASE_URL). Uncomment with your hostnames and redeploy: Cloudflare
+	// provisions the DNS records and edge certificates automatically. Left
+	// commented in the template so a first deploy (including the Deploy to
+	// Cloudflare button) lands on workers.dev without needing a zone; note
+	// wrangler DETACHES custom domains not declared here, so once added they
+	// must stay.
+	// "routes": [
+	// 	{ "pattern": "app.cache.example.com", "custom_domain": true },
+	// 	{ "pattern": "cache.example.com", "custom_domain": true }
+	// ],
 
 	// Colo-scoped, eventually-consistent rate limiters (best-effort backstops,
 	// not accounting), sized generously: their job is stopping runaway
@@ -91,20 +100,25 @@
 		}
 	],
 	"vars": {
-		"APP_URL": "https://app.cache.kclj.io",
-		"CACHE_BASE_URL": "https://cache.kclj.io",
-		"OIDC_ISSUER": "https://auth.kclj.io",
-		"OIDC_CLIENT_ID": "nimbus",
-		"CF_ACCESS_TEAM_DOMAIN": "https://kclejeune.cloudflareaccess.com",
-		"CF_ACCESS_AUD": "623b56c404ad5907aad2ee0e6255d7c88f6e9aecf64ee2aca77090153c115217",
+		// Public URLs of the two hostnames declared in `routes`.
+		"APP_URL": "https://app.cache.example.com",
+		"CACHE_BASE_URL": "https://cache.example.com",
+		// Sign-in: configure at least one of OIDC, GitHub, Google, or
+		// Cloudflare Access (docs/deploy.md#authentication lists the options
+		// and their matching secrets).
+		// "OIDC_ISSUER": "https://auth.example.com",
+		// "OIDC_CLIENT_ID": "nimbus",
 		// OIDC ID-token claim carrying group names; enables group→permission sync.
 		"OIDC_GROUPS_CLAIM": "groups",
 		// Groups-claim value that auto-activates pending users at login.
-		"OIDC_ACTIVATION_GROUP": "nimbus_user",
+		"OIDC_ACTIVATION_GROUP": "nimbus_user"
+		// Cloudflare Access assertion auth (optional alternative/addition).
+		// "CF_ACCESS_TEAM_DOMAIN": "https://<team>.cloudflareaccess.com",
+		// "CF_ACCESS_AUD": "<access application aud tag>",
 		// Account owning the CACHE_METRICS dataset; pairs with the
 		// CF_ANALYTICS_TOKEN secret (Account Analytics: Read) to enable the
 		// monitoring page's read-traffic section.
-		"CF_ACCOUNT_ID": "14613cda02f216f5620eca979a286eaf"
+		// "CF_ACCOUNT_ID": "<cloudflare account id>"
 	},
 
 	// Read-path traffic metrics (narinfo/NAR hit/miss/upstream), written by
@@ -118,9 +132,9 @@
 		}
 	],
 
-	// NAR/chunk storage, shared with the attic API worker — needed by the
-	// in-process binary-cache read path (served when requests arrive on the
-	// cache hostname).
+	// NAR/chunk storage for the binary-cache engine — the read path serves
+	// from it when requests arrive on the cache hostname; uploads and
+	// pull-through ingestion write to it.
 	"r2_buckets": [
 		{
 			"binding": "CACHE_BUCKET",
@@ -128,13 +142,16 @@
 		}
 	],
 
-	// Shared D1 database with the attic API worker. The admin app owns the
-	// user/api_token/session/audit_log tables; the attic worker owns cache/nar/etc.
+	// Single D1 database for both halves of the worker: the admin app owns the
+	// user/api_token/session/audit_log tables; the binary-cache engine owns
+	// cache/nar/chunk/etc. ("attic" is the historical database name — the
+	// schema descends from attic's).
 	"d1_databases": [
 		{
 			"binding": "ATTIC_DB",
 			"database_name": "attic",
-			"database_id": "872ceec3-5438-4069-b3fa-69fbb66dd011",
+			// From `npx wrangler d1 create attic` (docs/deploy.md#resources).
+			"database_id": "REPLACE_WITH_D1_DATABASE_ID",
 			// `npm run migrate` (chained into `npm run deploy`) applies unapplied
 			// files in lexicographic order, tracked in d1_migrations — keep the
 			// YYYY-MM-DD filename prefix so order stays chronological. The table
@@ -146,8 +163,9 @@
 	]
 
 	// Secrets (set via `wrangler secret put`):
-	// - JWT_HS256_SECRET_BASE64: same HMAC secret the attic worker validates with;
-	//   used here to mint short-lived attic JWTs for service-binding API calls.
+	// - JWT_HS256_SECRET_BASE64: HMAC secret for attic-compatible cache JWTs —
+	//   the binary-cache API validates bearer tokens against it, and the
+	//   dashboard/CLI flows mint scoped tokens with it.
 	// - OIDC_CLIENT_SECRET: confidential-client secret for the OIDC token exchange.
 	// - GITHUB_CLIENT_SECRET: GitHub OAuth app secret (optional; with
 	//   GITHUB_CLIENT_ID enables GitHub sign-in for accounts linked from /settings).
@@ -167,7 +185,7 @@
 	// - CF_SSO_CLIENT_ID: Access for SaaS OIDC client id (optional; also needs
 	//   CF_ACCESS_TEAM_DOMAIN). Enable PKCE on the SaaS app. Callback URL is
 	//   <APP_URL>/api/auth/oauth2/callback/cloudflare.
-	// - CF_ACCESS_TEAM_DOMAIN: e.g. https://kclejeune.cloudflareaccess.com (enables
+	// - CF_ACCESS_TEAM_DOMAIN: e.g. https://<team>.cloudflareaccess.com (enables
 	//   the Cloudflare Access auth path).
 	// - CF_ACCESS_AUD: the Access application AUD tag.
 }

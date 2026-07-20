@@ -1,8 +1,0 @@
-default_provider = "op"
-
-[providers.op]
-type = "1password"
-vault = "Private"
-
-[secrets]
-WAF_API_TOKEN= { description = "CF WAF token", provider = "op", value = "op://Private/Cloudflare WAF/credential" }
