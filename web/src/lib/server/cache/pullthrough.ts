@@ -203,15 +203,13 @@ export async function persistUpstreamPath(
 
 		let raw = downloaded;
 		if (compression === 'zstd') {
-			const src = downloaded;
 			await initZstd();
 			// The signed NarSize bounds the destination buffer (persistIngestible
 			// already capped it), so the WASM heap grows to the expected size
 			// instead of the global cap; larger-than-declared content fails the
 			// decompress, which is a correct rejection of bytes that contradict
-			// the signed narinfo. Slot-gated: ingestion runs in the background
-			// and must not stack its WASM buffers on top of live uploads.
-			raw = await withSlot(wasmMemorySlots, () => zstdDecompress(src, parsed.narSize));
+			// the signed narinfo.
+			raw = await withSlot(wasmMemorySlots, () => zstdDecompress(raw, parsed.narSize));
 		}
 		// Drop the compressed buffer before the pipeline stages allocate.
 		downloaded = null;

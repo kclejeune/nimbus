@@ -3,6 +3,7 @@ package push
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -153,12 +154,7 @@ feed:
 	return invalidErr
 }
 
-func (p *Pusher) errw() io.Writer {
-	if p.Err != nil {
-		return p.Err
-	}
-	return p.Out
-}
+func (p *Pusher) errw() io.Writer { return cmp.Or(p.Err, p.Out) }
 
 func (p *Pusher) pathInfos(ctx context.Context, paths []string) ([]nix.PathInfo, error) {
 	if p.NoClosure {

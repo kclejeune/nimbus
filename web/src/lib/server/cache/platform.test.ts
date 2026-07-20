@@ -21,6 +21,7 @@ describe('Semaphore', () => {
 	it('releases the slot when fn throws', async () => {
 		const sem = new Semaphore(1);
 		await expect(withSlot(sem, () => Promise.reject(new Error('x')))).rejects.toThrow('x');
-		expect(sem.tryAcquire()).toBe(true);
+		// Only resolves if the slot was released.
+		await withSlot(sem, async () => {});
 	});
 });

@@ -71,17 +71,15 @@ export class Semaphore {
 	constructor(slots: number) {
 		this.free = slots;
 	}
-	tryAcquire(): boolean {
-		if (this.free > 0) {
-			this.free--;
-			return true;
-		}
-		return false;
-	}
 	async acquire(): Promise<void> {
-		while (!this.tryAcquire()) {
-			await new Promise((r) => setTimeout(r, 25 + Math.random() * 25));
+		// Adaptive interval: a handoff is noticed within ~5-10 ms while
+		// sustained contention backs off toward a steady ~40-80 ms.
+		let interval = 5;
+		while (this.free <= 0) {
+			await new Promise((r) => setTimeout(r, interval + Math.random() * interval));
+			interval = Math.min(interval * 2, 40);
 		}
+		this.free--;
 	}
 	release(): void {
 		this.free++;
