@@ -35,18 +35,28 @@
 				".svelte-kit/cloudflare/**"
 			]
 		},
+		"config": {
+			"command": "node scripts/materialize-config.mjs"
+		},
 		"migrate": {
-			"command": "wrangler d1 migrations apply ATTIC_DB --remote $(test -f wrangler.local.jsonc && echo --config=wrangler.local.jsonc)"
+			"command": "wrangler d1 migrations apply ATTIC_DB --remote $(test -f wrangler.local.jsonc && echo --config=wrangler.local.jsonc)",
+			"dependencies": [
+				"config"
+			]
 		},
 		"deploy:worker": {
 			"command": "wrangler deploy $(test -f wrangler.local.jsonc && echo --config=wrangler.local.jsonc)",
 			"dependencies": [
 				"build",
-				"migrate"
+				"migrate",
+				"config"
 			]
 		},
 		"deploy:waf": {
-			"command": "if command -v fnox >/dev/null 2>&1; then fnox exec -- node scripts/deploy-waf.mjs --optional; else node scripts/deploy-waf.mjs --optional; fi"
+			"command": "if command -v fnox >/dev/null 2>&1; then fnox exec -- node scripts/deploy-waf.mjs --optional; else node scripts/deploy-waf.mjs --optional; fi",
+			"dependencies": [
+				"config"
+			]
 		},
 		"deploy": {
 			"dependencies": [

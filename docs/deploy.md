@@ -152,6 +152,26 @@ matched by email, so use the same identity provider in Access as for OIDC
 sign-in. Keep the cache hostname *outside* Access — nix clients cannot answer
 challenges.
 
+### Push-triggered deploys (Workers Builds)
+
+If your deployment values are committed (the fork model, including Deploy
+button clones), connecting the repo to Workers Builds just works — set the
+root directory to `web` and pushes deploy automatically.
+
+If you track this repo directly with values in the untracked
+`wrangler.local.jsonc`, CI clones won't have that file and the build fails
+closed at `migrate` (the template's placeholder D1 id). To enable push
+deploys, add a build variable named `WRANGLER_LOCAL_CONFIG_B64` containing:
+
+```bash
+base64 -i web/wrangler.local.jsonc | tr -d '\n'
+```
+
+`scripts/materialize-config.mjs` (a dependency of every deploy task) writes
+the file from that variable before wrangler runs. Optionally add a
+`WAF_API_TOKEN` build secret so the WAF step applies in CI too; without it
+the step skips with a warning.
+
 ### Pull-through upstreams
 
 Upstream caches (e.g. `cache.nixos.org`) are configured per-cache from the
