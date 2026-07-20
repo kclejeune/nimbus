@@ -1,5 +1,5 @@
-// Custom worker entry: dispatches cache-hostname traffic to the attic
-// binary-cache API, everything else to the SvelteKit worker, and adds the
+// Custom worker entry: dispatches cache-hostname traffic to the binary-cache
+// API, everything else to the SvelteKit worker, and adds the
 // scheduled handler for nightly garbage collection. wrangler.jsonc points
 // `main` here; the SvelteKit bundle must be built (vite build) first.
 //

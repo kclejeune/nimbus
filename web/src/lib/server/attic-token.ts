@@ -40,10 +40,10 @@ function base64urlJson(value: unknown): string {
 /**
  * Mint an attic JWT.
  *
- * @param secretBase64 base64-encoded HS256 secret (same one the attic worker validates with)
+ * @param secretBase64 base64-encoded HS256 secret (same one the binary-cache API validates with)
  * @param sub subject (the acting user's id)
  * @param caches the cache access map to grant
- * @param ttlSeconds token lifetime (default 5 minutes — for internal service-binding calls)
+ * @param ttlSeconds token lifetime (default 5 minutes — for internal API calls)
  * @param jti optional JWT ID; set it for admin-issued tokens so they can be revoked
  */
 export async function mintAtticToken(

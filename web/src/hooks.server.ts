@@ -22,7 +22,7 @@ function getAuth(env: App.Platform['env']): Auth {
 }
 
 // Cache-hostname traffic never reaches SvelteKit: worker-entry.ts dispatches
-// it to the attic binary-cache API before the SvelteKit worker runs.
+// it to the binary-cache API before the SvelteKit worker runs.
 export const handle: Handle = async ({ event, resolve }) => {
 	const env = event.platform?.env;
 	if (!env) {

@@ -1,5 +1,5 @@
 // Route guards for the admin UI, mirroring requireAdmin's error style. All
-// derive from EffectiveAccess so the UI and the attic HTTP API agree on the
+// derive from EffectiveAccess so the UI and the binary-cache API agree on the
 // permission vocabulary.
 
 import { error } from '@sveltejs/kit';

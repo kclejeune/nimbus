@@ -1,4 +1,4 @@
-// Request router for the attic binary-cache API, dispatched from
+// Request router for the attic-compatible binary-cache API, dispatched from
 // worker-entry.ts when a request arrives on the cache hostname. Fully native
 // TypeScript — the legacy Rust worker is no longer involved.
 
