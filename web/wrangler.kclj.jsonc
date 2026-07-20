@@ -101,7 +101,7 @@
 		"OIDC_ISSUER": "https://auth.kclj.io",
 		"OIDC_CLIENT_ID": "nimbus",
 		"CF_ACCESS_TEAM_DOMAIN": "https://kclejeune.cloudflareaccess.com",
-		"CF_ACCESS_AUD": "623b56c404ad5907aad2ee0e6255d7c88f6e9aecf64ee2aca77090153c115217",
+		"CF_ACCESS_AUD": "28cd155213e47854ea7fd61961353b73cd3bd987a6d0a499a9491c8b13db4d8e",
 		// OIDC ID-token claim carrying group names; enables group→permission sync.
 		"OIDC_GROUPS_CLAIM": "groups",
 		// Groups-claim value that auto-activates pending users at login.
