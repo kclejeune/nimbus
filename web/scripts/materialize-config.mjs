@@ -13,7 +13,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const path = join(dirname(fileURLToPath(import.meta.url)), '..', 'wrangler.local.jsonc');
-if (!existsSync(path) && process.env.WRANGLER_LOCAL_CONFIG_B64) {
+if (existsSync(path)) {
+	console.log('materialize-config: wrangler.local.jsonc already present');
+} else if (process.env.WRANGLER_LOCAL_CONFIG_B64) {
 	writeFileSync(path, Buffer.from(process.env.WRANGLER_LOCAL_CONFIG_B64, 'base64'));
 	console.log('materialize-config: wrote wrangler.local.jsonc from WRANGLER_LOCAL_CONFIG_B64');
+} else {
+	console.log(
+		'materialize-config: no wrangler.local.jsonc and WRANGLER_LOCAL_CONFIG_B64 unset — wrangler will use the tracked wrangler.jsonc'
+	);
 }
