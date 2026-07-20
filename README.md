@@ -250,10 +250,24 @@ drizzle files with `wrangler d1 execute attic --local --file=...`.
 
 ## Deploy
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kclejeune/nimbus/tree/main/web)
+
+One-click: the button clones this repo into your GitHub/GitLab account,
+provisions the D1 database and R2 bucket in your Cloudflare account, prompts
+for secrets, and deploys to a `workers.dev` hostname. Finish by adding your
+two custom domains — see [docs/deploy.md](docs/deploy.md#one-click-deploy).
+
+Manual:
+
 ```bash
 cd web && npm run deploy   # applies pending D1 migrations, builds, deploys
 ```
 
-Custom domains and the nightly GC cron are declared in `web/wrangler.jsonc` —
-domains not listed there are detached on deploy, so keep that file the source
-of truth.
+See **[docs/deploy.md](docs/deploy.md)** for the full self-hosting
+walkthrough: creating the D1/R2 resources, hostnames, authentication options,
+secrets, and optional monitoring/WAF hardening. `web/wrangler.jsonc` is the
+deployment manifest — edit it in your fork, or keep your values in an
+untracked `web/wrangler.local.jsonc` (picked up automatically) so pulls stay
+conflict-free. Custom domains and the nightly GC cron are declared there;
+domains not listed are detached on deploy, so keep that file the source of
+truth.

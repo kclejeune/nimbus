@@ -66,8 +66,9 @@ npm install
 npm run check        # svelte-check
 npm test             # vitest: permissions, group sync, token/JWT, proxy resolution
 npm run build        # vite build + Cloudflare adapter (writes .svelte-kit/cloudflare)
-npx wrangler dev --host localhost:8788   # --host defeats the custom-domain Host rewrite
-                                         # (.dev.vars: secrets + CACHE_BASE_URL=http://localhost:8788)
+npm run dev:worker   # wrangler dev; --host localhost:8788 defeats the custom-domain
+                     # Host rewrite (.dev.vars: secrets + CACHE_BASE_URL=http://localhost:8788)
+
 ```
 
 The adapter writes its generated worker to the `main` of `wrangler.adapter.jsonc`;
@@ -78,14 +79,17 @@ adapter overwrites whatever `main` points at.
 ## Deploy
 
 ```bash
-npm run build && npx wrangler deploy
+npm run deploy   # migrate → build → wrangler deploy → WAF rules (optional)
 ```
 
-Both custom domains and the GC cron schedule live in `wrangler.jsonc`, along
-with the group-sync/activation vars (`OIDC_GROUPS_CLAIM`,
-`OIDC_ACTIVATION_GROUP`). Secrets (`JWT_HS256_SECRET_BASE64`,
-`SESSION_SECRET`, OIDC credentials) are set with `wrangler secret put`.
+See [../docs/deploy.md](../docs/deploy.md) for the full walkthrough.
+`wrangler.jsonc` is the deployment manifest (domains, GC cron, auth vars);
+per-deployment values can instead live in an untracked `wrangler.local.jsonc`,
+which every deploy script prefers automatically. Secrets
+(`JWT_HS256_SECRET_BASE64`, `SESSION_SECRET`, OIDC credentials) are set with
+`wrangler secret put`.
 
-Migrations are applied out-of-band with `wrangler d1 execute <db> --remote
---file=...`: attic tables from `schema/migrations/`, admin tables from
-`drizzle/`.
+Attic-table migrations in `schema/migrations/` are applied by `npm run
+migrate` (chained into `npm run deploy`); admin-table migrations from
+`drizzle/` are applied out-of-band with `wrangler d1 execute <db> --remote
+--file=...`.

@@ -1,0 +1,19 @@
+# Secrets for a nimbus deployment. The Deploy to Cloudflare button prompts
+# for these at setup; for manual deploys use `wrangler secret put <NAME>`,
+# and for local dev copy this file to .dev.vars (gitignored).
+
+# HMAC key for signing dashboard session cookies.
+# Generate: openssl rand -base64 32
+SESSION_SECRET=""
+
+# HMAC secret for attic-compatible cache JWTs — treat like a root credential;
+# anyone holding it can mint tokens for any cache.
+# Generate: openssl rand -base64 64 | tr -d '\n'
+JWT_HS256_SECRET_BASE64=""
+
+# Optional — pair with the matching vars in wrangler.jsonc (see
+# docs/deploy.md#authentication):
+# OIDC_CLIENT_SECRET=""      # with OIDC_ISSUER + OIDC_CLIENT_ID
+# GITHUB_CLIENT_SECRET=""    # with GITHUB_CLIENT_ID
+# GOOGLE_CLIENT_SECRET=""    # with GOOGLE_CLIENT_ID
+# CF_ANALYTICS_TOKEN=""      # with CF_ACCOUNT_ID (monitoring traffic charts)
