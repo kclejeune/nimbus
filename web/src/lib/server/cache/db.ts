@@ -4,6 +4,7 @@
 
 import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types';
 import { isActiveUser } from '../auth/types';
+import { withRetry } from './platform';
 
 /** D1 caps bound parameters per statement; IN-lists are windowed to this. */
 export const PARAM_BATCH = 99;
@@ -32,18 +33,8 @@ export function isTransientD1Error(e: unknown): boolean {
 /** Retry a D1 operation on transient primary-queue/connection errors with
  * jittered exponential backoff (~40/80/160 ms). Non-transient errors rethrow
  * on the first failure. */
-export async function withD1Retry<T>(op: () => Promise<T>, attempts = 4): Promise<T> {
-	let backoff = 40;
-	for (let attempt = 1; ; attempt++) {
-		try {
-			return await op();
-		} catch (e) {
-			if (attempt >= attempts || !isTransientD1Error(e)) throw e;
-			await new Promise((r) => setTimeout(r, backoff + Math.random() * backoff));
-			backoff *= 2;
-		}
-	}
-}
+export const withD1Retry = <T>(op: () => Promise<T>, attempts = 4): Promise<T> =>
+	withRetry(op, { attempts, baseMs: 40, shouldRetry: isTransientD1Error });
 
 /** Prepared-statement execution wrappers that retry transient D1 errors.
  * Every read-path and upload-path query goes through these; the remaining raw

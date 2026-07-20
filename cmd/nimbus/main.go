@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 
@@ -70,9 +69,9 @@ func exitCode(err error) int {
 	var apiErr *api.Error
 	if errors.As(err, &apiErr) {
 		switch {
-		case apiErr.Status >= 500 || apiErr.Status == http.StatusTooManyRequests:
+		case apiErr.Transient():
 			return 75 // EX_TEMPFAIL: transient server trouble
-		case apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden:
+		case apiErr.AuthFailure():
 			return 77 // EX_NOPERM: token missing, expired, or underprivileged
 		}
 	}

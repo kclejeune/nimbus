@@ -107,6 +107,11 @@ const MAX_UPSTREAM_PROBES = 250;
 // pin the request for the platform's full fetch timeout. Narinfo-sized
 // responses arrive well within this.
 const PROBE_TIMEOUT_MS = 5_000;
+
+/** fetch with the probe timeout always attached — probe sites must not
+ * reintroduce an unbounded hang by forgetting the signal. */
+const probeFetch = (url: string, init: RequestInit = {}) =>
+	fetch(url, { ...init, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
 const PROBE_CONCURRENCY = 10;
 const ABSENT_RECHECK_MS = 24 * 60 * 60 * 1000;
 
@@ -374,21 +379,17 @@ export async function classifyNarinfo(upstream: Upstream, text: string): Promise
 export async function probeUpstream(upstream: Upstream, hash: string): Promise<Verdict | null> {
 	try {
 		if (hash.startsWith('nar:')) {
-			const res = await fetch(`${upstream.url}/${hash.slice('nar:'.length)}`, {
-				method: 'HEAD',
-				signal: AbortSignal.timeout(PROBE_TIMEOUT_MS)
+			const res = await probeFetch(`${upstream.url}/${hash.slice('nar:'.length)}`, {
+				method: 'HEAD'
 			});
 			return headVerdict(res);
 		}
 		const url = `${upstream.url}/${hash}.narinfo`;
 		if (!upstream.publicKey && upstream.mode !== 'persist') {
-			const res = await fetch(url, {
-				method: 'HEAD',
-				signal: AbortSignal.timeout(PROBE_TIMEOUT_MS)
-			});
+			const res = await probeFetch(url, { method: 'HEAD' });
 			return headVerdict(res);
 		}
-		const res = await fetch(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+		const res = await probeFetch(url);
 		if (res.status === 404) return VERDICT_ABSENT;
 		if (res.status !== 200) return null;
 		return await classifyNarinfo(upstream, await res.text());
@@ -478,9 +479,7 @@ export async function fetchUpstreamNarInfo(
 		if (!(allowed ??= await takeProbeBudget(guard))) return PROBE_REFUSED;
 
 		try {
-			const res = await fetch(`${upstream.url}/${storePathHash}.narinfo`, {
-				signal: AbortSignal.timeout(PROBE_TIMEOUT_MS)
-			});
+			const res = await probeFetch(`${upstream.url}/${storePathHash}.narinfo`);
 			if (res.status === 200) {
 				const text = await res.text();
 				// Recording on any change actively corrects verdicts probed without

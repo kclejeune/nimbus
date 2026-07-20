@@ -13,10 +13,8 @@
 
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import sveltekit from './.svelte-kit/cloudflare/_worker.js';
-import { errorResponse, logUnhandled } from './src/lib/server/attic/http';
-import { isTransientD1Error } from './src/lib/server/cache/db';
 import { runGc } from './src/lib/server/cache/gc';
-import { handleCacheApi } from './src/lib/server/cache/router';
+import { caughtResponse, handleCacheApi } from './src/lib/server/cache/router';
 import { serveStore } from './src/lib/server/cache/store';
 
 type Env = App.Platform['env'];
@@ -35,18 +33,10 @@ export class CachedStore extends WorkerEntrypoint {
 		} catch (e) {
 			// serveNar/serveNarInfo have no internal boundary; an uncaught throw
 			// here (transient D1 error, half-linked NAR) would reject the RPC and
-			// surface to nix as a stackless 1101/500. Log the stack (observability
-			// is on) and return a controlled response across the loopback instead:
-			// 503 + Retry-After for transient D1 errors that outlived the query
-			// retries (nix retries substitutions; a bare 500 reads as fatal), 500
-			// otherwise.
-			logUnhandled('store read unhandled', request, e);
-			if (isTransientD1Error(e)) {
-				return errorResponse(503, 'Temporary database contention; retry shortly', undefined, {
-					'Retry-After': '2'
-				});
-			}
-			return errorResponse(500, 'Internal error reading store');
+			// surface to nix as a stackless 1101/500. caughtResponse logs the
+			// stack with a ref id and returns a controlled 500 — or 503 +
+			// Retry-After for transient D1 errors — across the loopback instead.
+			return caughtResponse('store read unhandled', request, e);
 		}
 	}
 

@@ -373,11 +373,13 @@ async function createUploadRows(
 		await db.updateNarState(d1, narId, 'D').catch(() => {});
 		// The stored object is content-addressed: a racing identical upload may
 		// have adopted the key, so only delete it when the guard query proves no
-		// chunk row claims it. Error ≠ miss: if the guard itself fails, keep the
-		// object and let the orphan reaper judge it — deleting on a query blip
-		// would permanently orphan the racer's valid row.
-		const claimed = await db.findChunk(d1, info.nar_hash, opts.compression).catch(() => undefined);
-		if (claimed === null) {
+		// chunk row claims it (error ≠ miss: on a failed query, keep the object
+		// and let the orphan reaper judge it).
+		const provenUnclaimed = await db
+			.findChunk(d1, info.nar_hash, opts.compression)
+			.then((row) => row === null)
+			.catch(() => false);
+		if (provenUnclaimed) {
 			await env.CACHE_BUCKET.delete(opts.storageKey).catch(() => {});
 		}
 		throw e;
@@ -753,6 +755,37 @@ export async function handleCdcQuery(
 const chunkVerifySlots = new Semaphore(2);
 
 /**
+ * Buffer and verify one uploaded chunk under a verify slot: decompress (the
+ * bomb guard caps output at the chunker's MAX_CHUNK) and check the raw
+ * sha256 against the claimed hash. The raw bytes live only inside the slot;
+ * just the length escapes.
+ */
+async function verifyChunk(
+	request: Request,
+	hash: string
+): Promise<{ compressed: Uint8Array; rawLength: number } | Response> {
+	await chunkVerifySlots.acquire();
+	try {
+		const compressed = new Uint8Array(await request.arrayBuffer());
+		if (compressed.length === 0) return errorResponse(400, 'Empty chunk body');
+		await initZstd();
+		let raw: Uint8Array;
+		try {
+			raw = zstdDecompress(compressed, CDC_MAX_CHUNK);
+		} catch (e) {
+			return errorResponse(400, `Invalid zstd chunk: ${e}`);
+		}
+		const actual = toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource));
+		if (actual !== hash) {
+			return errorResponse(400, `Chunk hash mismatch: expected ${hash}, got ${actual}`);
+		}
+		return { compressed, rawLength: raw.length };
+	} finally {
+		chunkVerifySlots.release();
+	}
+}
+
+/**
  * PUT /_api/v1/upload-path/chunks/{hash} — one zstd-compressed chunk, stored
  * verbatim under its content address. Stateless: the chunk row lands
  * immediately (state V); an abandoned push leaves unreferenced rows that the
@@ -765,40 +798,20 @@ export async function handleCdcChunkPut(
 ): Promise<Response> {
 	if (!HEX64.test(hash)) return errorResponse(400, `Invalid chunk hash: ${hash}`);
 
-	// Verify by decompressing: raw sha256 must equal the claimed hash, and the
-	// bomb guard caps the decompressed size at the chunker's MAX_CHUNK. The
-	// raw bytes are only needed inside this block; just the length outlives it.
-	let compressed: Uint8Array;
-	let rawLength: number;
-	let actual: string;
-	await chunkVerifySlots.acquire();
-	try {
-		compressed = new Uint8Array(await request.arrayBuffer());
-		if (compressed.length === 0) return errorResponse(400, 'Empty chunk body');
-		await initZstd();
-		let raw: Uint8Array;
-		try {
-			raw = zstdDecompress(compressed, CDC_MAX_CHUNK);
-		} catch (e) {
-			return errorResponse(400, `Invalid zstd chunk: ${e}`);
-		}
-		rawLength = raw.length;
-		actual = toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource));
-	} finally {
-		chunkVerifySlots.release();
-	}
-	if (actual !== hash) {
-		return errorResponse(400, `Chunk hash mismatch: expected ${hash}, got ${actual}`);
-	}
-
-	if (await db.findChunk(db.readSession(env.ATTIC_DB), `sha256:${hash}`, 'zstd')) {
-		// Already stored (raced or the client re-sent); nothing to do. If GC
-		// reaps it before the complete call, the 409 retry re-uploads it. A
-		// stale replica miss just re-stores the same content-addressed bytes,
-		// and the insert below converges on the winning row.
-		recordStoreWrite(env, { deduplicated: true, fileBytes: compressed.length });
+	// Dedup before admission: an already-stored chunk (repeated push, client
+	// re-send) returns without buffering the body or burning a verify slot.
+	// A stale replica miss falls through to the verify path, whose insert
+	// converges on the winning row; if GC reaps the chunk before the complete
+	// call, the 409 retry re-uploads it.
+	const existing = await db.findChunk(db.readSession(env.ATTIC_DB), `sha256:${hash}`, 'zstd');
+	if (existing) {
+		recordStoreWrite(env, { deduplicated: true, fileBytes: existing.file_size ?? 0 });
 		return json({ ok: true, deduplicated: true });
 	}
+
+	const verified = await verifyChunk(request, hash);
+	if (verified instanceof Response) return verified;
+	const { compressed, rawLength } = verified;
 
 	const key = chunkStorageKey(hash, 'zstd');
 	await withR2Retry(() => env.CACHE_BUCKET.put(key, compressed as unknown as ArrayBuffer));

@@ -31,24 +31,31 @@ export function newDigestStream(): DigestStreamLike {
 	return new workersCrypto.DigestStream('SHA-256');
 }
 
-/**
- * Retry an idempotent R2 operation on any failure with jittered backoff
- * (~100/200 ms). R2 errors carry no stable transience signal, and every call
- * site is a get/put of an immutable content-addressed object, so a blanket
- * retry is safe; the happy path pays one extra closure.
- */
-export async function withR2Retry<T>(op: () => Promise<T>, attempts = 3): Promise<T> {
-	let backoff = 100;
+/** Retry an async operation with jittered exponential backoff. shouldRetry
+ * gates which failures are worth re-attempting (default: all). */
+export async function withRetry<T>(
+	op: () => Promise<T>,
+	opts: { attempts?: number; baseMs?: number; shouldRetry?: (e: unknown) => boolean } = {}
+): Promise<T> {
+	const { attempts = 3, baseMs = 100, shouldRetry = () => true } = opts;
+	let backoff = baseMs;
 	for (let attempt = 1; ; attempt++) {
 		try {
 			return await op();
 		} catch (e) {
-			if (attempt >= attempts) throw e;
+			if (attempt >= attempts || !shouldRetry(e)) throw e;
 			await new Promise((r) => setTimeout(r, backoff + Math.random() * backoff));
 			backoff *= 2;
 		}
 	}
 }
+
+/**
+ * R2 flavor: retry any failure (~100/200 ms). R2 errors carry no stable
+ * transience signal, and every call site is a get/put of an immutable
+ * content-addressed object, so a blanket retry is safe.
+ */
+export const withR2Retry = <T>(op: () => Promise<T>): Promise<T> => withRetry(op);
 
 /** Minimal counting semaphore for bounding concurrent memory-heavy work
  * within an isolate. */

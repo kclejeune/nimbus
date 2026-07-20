@@ -631,9 +631,10 @@ async function requireToken(
  * stable message carrying the ref, the stack stays in Workers Logs — and
  * transient D1 errors that outlived the query-layer retries map to 503 +
  * Retry-After so clients back off and retry instead of treating an
- * infrastructure blip as fatal.
+ * infrastructure blip as fatal. Shared with the CachedStore boundary in
+ * worker-entry.ts so both halves speak one retryability contract.
  */
-function caughtResponse(prefix: string, request: Request, e: unknown): Response {
+export function caughtResponse(prefix: string, request: Request, e: unknown): Response {
 	if (e instanceof CacheConfigError) {
 		return errorResponse(e.status, e.message, e.status === 404 ? 'NoSuchCache' : undefined);
 	}

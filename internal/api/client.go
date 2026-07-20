@@ -44,6 +44,22 @@ type Error struct {
 	Attempts int
 }
 
+// transientStatus reports whether a status is worth retrying: server-side
+// trouble (5xx) or an edge rate limit (429). The single spelling shared by
+// the retry loop, Error rendering, and the CLI's exit-code classification.
+func transientStatus(code int) bool {
+	return code >= 500 || code == http.StatusTooManyRequests
+}
+
+// Transient reports server-side/transient failure — retrying may succeed.
+func (e *Error) Transient() bool { return transientStatus(e.Status) }
+
+// AuthFailure reports a credential problem (missing, expired, revoked, or
+// underprivileged token).
+func (e *Error) AuthFailure() bool {
+	return e.Status == http.StatusUnauthorized || e.Status == http.StatusForbidden
+}
+
 func (e *Error) Error() string {
 	msg := e.Message
 	if msg == "" {
@@ -56,7 +72,7 @@ func (e *Error) Error() string {
 	// Classify for the person reading a CI log: was this transient, or is it
 	// their token? Message stays untouched — the device flow matches on it.
 	switch {
-	case e.Status >= 500 || e.Status == http.StatusTooManyRequests:
+	case e.Transient():
 		detail += "; transient — retrying may succeed"
 	case e.Status == http.StatusUnauthorized:
 		detail += "; token missing, expired, or revoked — check `nimbus whoami`"
@@ -82,13 +98,17 @@ func (c *Client) do(req *http.Request) (*http.Response, int, error) {
 		if !replayable || attempt >= 3 {
 			return res, attempt, err
 		}
+		// Terminal outcomes first: cancellation (other transport errors replay
+		// — the request may not have reached the server) and non-transient
+		// statuses. What remains is a retry.
+		if err != nil && req.Context().Err() != nil {
+			return res, attempt, err
+		}
+		if err == nil && !transientStatus(res.StatusCode) {
+			return res, attempt, err
+		}
 		wait := backoff + rand.N(backoff)
-		switch {
-		case err != nil:
-			if req.Context().Err() != nil {
-				return res, attempt, err
-			}
-		case res.StatusCode >= 500 || res.StatusCode == http.StatusTooManyRequests:
+		if err == nil {
 			if ra := retryAfter(res); ra > 0 {
 				wait = ra
 			}
@@ -96,8 +116,6 @@ func (c *Client) do(req *http.Request) (*http.Response, int, error) {
 			// reuse the connection instead of paying a fresh TLS handshake.
 			_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 256<<10))
 			_ = res.Body.Close()
-		default:
-			return res, attempt, err
 		}
 		if req.GetBody != nil {
 			body, err := req.GetBody()
