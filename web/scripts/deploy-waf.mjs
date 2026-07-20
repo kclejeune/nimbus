@@ -124,6 +124,17 @@ async function findZone(host) {
 
 // --- desired state ----------------------------------------------------------
 
+/** Geo gate for the cache API, by continent (ip.src.continent codes:
+ *  NA/SA/EU/AS/AF/OC/AN; Tor exits report "T1" and are implicitly blocked).
+ *  The continental allowance is broad enough for steady-state — it covers
+ *  the Americas-based users plus EU-hosted machine consumers (CI runners,
+ *  VPSes pulling from the cache) — while a flood from outside it is blocked
+ *  at the edge and never billed as a worker request, the lever that actually
+ *  cuts cost under a distributed flood. Adjust and redeploy with
+ *  `npm run deploy:waf`. */
+const GEO_RESTRICT = true;
+const ALLOWED_CONTINENTS = ['NA', 'SA', 'EU'];
+
 const customRules = [
 	{
 		description: 'cache: block query strings on read paths (cache-busting)',
@@ -136,8 +147,35 @@ const customRules = [
 		expression: `(http.host eq "${cacheHost}" and not http.request.method in {"GET" "HEAD" "PUT" "POST" "DELETE" "PATCH"})`,
 		action: 'block',
 		enabled: true
+	},
+	{
+		// Legit paths are a 32-char hash plus short fixed affixes; deep fake
+		// nar paths are deflected before reaching the worker's own 256-char
+		// verdict guard.
+		description: 'cache: block oversized paths (fake nar-path shapes)',
+		expression: `(http.host eq "${cacheHost}" and len(http.request.uri.path) > 300)`,
+		action: 'block',
+		enabled: true
+	},
+	{
+		// Crawlers have no business indexing a binary cache, and every crawl
+		// is a billed worker request. Nix/attic clients are not verified bots.
+		description: 'cache: block known bots/crawlers',
+		expression: `(http.host eq "${cacheHost}" and cf.client.bot)`,
+		action: 'block',
+		enabled: true
 	}
 ];
+
+if (GEO_RESTRICT) {
+	const list = ALLOWED_CONTINENTS.map((c) => `"${c}"`).join(' ');
+	customRules.push({
+		description: 'cache: geo gate by continent (GEO_RESTRICT in deploy-waf.mjs)',
+		expression: `(http.host eq "${cacheHost}" and not ip.src.continent in {${list}})`,
+		action: 'block',
+		enabled: true
+	});
+}
 
 const ratelimitRules = [
 	{
