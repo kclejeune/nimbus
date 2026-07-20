@@ -88,11 +88,23 @@ async function isJtiDisabled(env: Env, jti: string): Promise<boolean> {
 	return disabled;
 }
 
+/** Server-side misconfiguration surfaced during auth — must map to 500, not
+ * 401: a 401 sends users chasing perfectly valid tokens. */
+class MisconfigError extends Error {}
+
+/** Response for a verifyRequestToken throw: 500 for server misconfig, else
+ * 401 with the bare message (interpolating the Error object would render a
+ * noisy "Authentication failed: Error: ..."). */
+function authFailure(e: unknown): Response {
+	if (e instanceof MisconfigError) return errorResponse(500, e.message);
+	return errorResponse(401, `Authentication failed: ${e instanceof Error ? e.message : e}`);
+}
+
 async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedToken | null> {
 	const bearer = parseAuthToken(request.headers.get('Authorization'));
 	if (!bearer) return null;
 	if (!env.JWT_HS256_SECRET_BASE64 && !env.JWT_RS256_PUBKEY_BASE64) {
-		throw new Error('JWT secret not configured');
+		throw new MisconfigError('JWT secret not configured');
 	}
 
 	const token = await verifyAtticToken(
@@ -158,7 +170,7 @@ async function authorizeCacheRead(
 		return { response: errorResponse(401, 'Unauthorized') };
 	}
 	if (cache.is_public === 1) return { cache };
-	if (authError) return { response: errorResponse(401, `Authentication failed: ${authError}`) };
+	if (authError) return { response: authFailure(authError) };
 	if (permission.pull) return { cache };
 	if (hasDiscovery) return { response: errorResponse(403, 'Permission denied: pull') };
 	return { response: errorResponse(401, 'Unauthorized') };
@@ -495,7 +507,7 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	try {
 		token = await verifyRequestToken(request, env);
 	} catch (e) {
-		return errorResponse(401, `Authentication failed: ${e}`);
+		return authFailure(e);
 	}
 	if (!token) return errorResponse(401, 'No token provided');
 
@@ -557,7 +569,7 @@ async function handleGcTrigger(
 	try {
 		token = await verifyRequestToken(request, env);
 	} catch (e) {
-		return errorResponse(401, `Authentication failed: ${e}`);
+		return authFailure(e);
 	}
 	if (!token) return errorResponse(401, 'No token provided');
 	// The nimbus gc claim is minted admin-only from the tokens page (it is
@@ -594,8 +606,7 @@ async function handleCacheInfo(
 			auth.cache.is_public === 1
 		);
 	} catch (e) {
-		const { status, message, kind } = statusOf(e);
-		return errorResponse(status, message, kind);
+		return caughtResponse('cache-info unhandled', request, e);
 	}
 }
 
@@ -609,19 +620,36 @@ async function requireToken(
 		if (!token) return { response: errorResponse(401, 'No token provided') };
 		return { token };
 	} catch (e) {
-		return { response: errorResponse(401, `Authentication failed: ${e}`) };
+		return { response: authFailure(e) };
 	}
 }
 
-function statusOf(e: unknown): { status: number; message: string; kind?: string } {
+/**
+ * Convert a thrown error at a request boundary into a client response.
+ * CacheConfigError is an expected client-facing error and passes through
+ * verbatim. Everything else is logged with a ref id — the client gets a
+ * stable message carrying the ref, the stack stays in Workers Logs — and
+ * transient D1 errors that outlived the query-layer retries map to 503 +
+ * Retry-After so clients back off and retry instead of treating an
+ * infrastructure blip as fatal.
+ */
+function caughtResponse(prefix: string, request: Request, e: unknown): Response {
 	if (e instanceof CacheConfigError) {
-		return {
-			status: e.status,
-			message: e.message,
-			kind: e.status === 404 ? 'NoSuchCache' : undefined
-		};
+		return errorResponse(e.status, e.message, e.status === 404 ? 'NoSuchCache' : undefined);
 	}
-	return { status: 500, message: `${e}` };
+	const ref = crypto.randomUUID().slice(0, 8);
+	logUnhandled(`${prefix} [${ref}]`, request, e);
+	if (db.isTransientD1Error(e)) {
+		return errorResponse(
+			503,
+			`Temporary database contention; retry shortly (ref ${ref})`,
+			undefined,
+			{
+				'Retry-After': '2'
+			}
+		);
+	}
+	return errorResponse(500, `Internal server error (ref ${ref})`);
 }
 
 /** /_api/v1/cache-config/:cache[/rename] and the upload endpoints. */
@@ -886,8 +914,7 @@ async function handleV1(
 				return jsonResponse({ name: body.new_name, renamed_from: cacheName, renamed: true });
 			}
 		} catch (e) {
-			const { status, message, kind } = statusOf(e);
-			return errorResponse(status, message, kind);
+			return caughtResponse('cache-config unhandled', request, e);
 		}
 	}
 
@@ -915,12 +942,9 @@ export async function handleCacheApi(
 	} catch (e) {
 		// Without this boundary an unhandled throw (a D1/R2 hiccup mid-upload, a
 		// read-path error crossing the CachedStore RPC) surfaces to Cloudflare as
-		// a raw 1101 with no logged stack. Log it — observability is on — and
-		// return a controlled 500 so nix's retry path engages and the stack is
-		// visible in Workers Logs.
-		logUnhandled('cache-api unhandled', request, e);
-		const { status, message, kind } = statusOf(e);
-		return errorResponse(status, message, kind);
+		// a raw 1101 with no logged stack. caughtResponse logs the stack and
+		// returns a controlled 500/503 so client retry paths engage.
+		return caughtResponse('cache-api unhandled', request, e);
 	}
 }
 

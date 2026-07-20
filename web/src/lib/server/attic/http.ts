@@ -10,10 +10,17 @@ const KIND_BY_STATUS: Record<number, string> = {
 	409: 'CacheAlreadyExists',
 	429: 'TooManyRequests',
 	500: 'InternalServerError',
-	503: 'IncompleteNar'
+	// Attic's incomplete-NAR 503 passes its kind explicitly (store.ts);
+	// the default covers generic transient unavailability.
+	503: 'ServiceUnavailable'
 };
 
-export function errorResponse(status: number, message: string, kind?: string): Response {
+export function errorResponse(
+	status: number,
+	message: string,
+	kind?: string,
+	headers?: Record<string, string>
+): Response {
 	return new Response(
 		JSON.stringify({
 			code: status,
@@ -24,7 +31,7 @@ export function errorResponse(status: number, message: string, kind?: string): R
 			status,
 			// Workers Caching heuristically caches bare 404s for 3 minutes, which
 			// would make freshly pushed paths invisible right after a miss.
-			headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+			headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers }
 		}
 	);
 }

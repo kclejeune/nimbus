@@ -366,8 +366,12 @@ async function createUploadRows(
 	} catch (e) {
 		await db.updateNarState(d1, narId, 'D').catch(() => {});
 		// The stored object is content-addressed: a racing identical upload may
-		// have adopted the key, so only delete it when no chunk row claims it.
-		if (!(await db.findChunk(d1, info.nar_hash, opts.compression).catch(() => null))) {
+		// have adopted the key, so only delete it when the guard query proves no
+		// chunk row claims it. Error ≠ miss: if the guard itself fails, keep the
+		// object and let the orphan reaper judge it — deleting on a query blip
+		// would permanently orphan the racer's valid row.
+		const claimed = await db.findChunk(d1, info.nar_hash, opts.compression).catch(() => undefined);
+		if (claimed === null) {
 			await env.CACHE_BUCKET.delete(opts.storageKey).catch(() => {});
 		}
 		throw e;

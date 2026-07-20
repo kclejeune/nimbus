@@ -88,7 +88,7 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 
 	missing, err := p.Client.GetMissingPaths(ctx, p.Cache, hashes, p.IgnoreUpstreamFilter)
 	if err != nil {
-		return fmt.Errorf("get-missing-paths: %w", err)
+		return fmt.Errorf("querying %q for missing paths: %w", p.Cache, err)
 	}
 
 	_, _ = fmt.Fprintf(p.Out, "⚙️  Pushing %d paths to %q (%d already present or upstream)\n",
@@ -201,13 +201,17 @@ func (p *Pusher) narInfo(info nix.PathInfo) *api.NarInfo {
 // identical bytes), making the stream replayable for the transport-level 5xx
 // retry in api.Client.
 func (p *Pusher) uploadSimple(ctx context.Context, info nix.PathInfo) (*api.UploadResult, error) {
-	return p.Client.UploadPath(ctx, p.narInfo(info), func() (io.ReadCloser, error) {
+	result, err := p.Client.UploadPath(ctx, p.narInfo(info), func() (io.ReadCloser, error) {
 		pr, pw := io.Pipe()
 		go func() {
 			pw.CloseWithError(nix.DumpPath(ctx, pw, info.Path))
 		}()
 		return pr, nil
 	}, info.NarSize)
+	if err != nil {
+		return nil, fmt.Errorf("upload: %w", err)
+	}
+	return result, nil
 }
 
 // uploadChunked cuts the NAR with the server-compatible FastCDC, uploads only
@@ -231,7 +235,7 @@ func (p *Pusher) uploadChunked(ctx context.Context, info nix.PathInfo) (*api.Upl
 
 	query, err := p.Client.QueryChunks(ctx, p.narInfo(info), info.NarSize, descs)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("querying missing chunks: %w", err)
 	}
 	if query.Kind == "deduplicated" {
 		return &api.UploadResult{Kind: "deduplicated"}, nil
@@ -253,7 +257,7 @@ func (p *Pusher) uploadChunked(ctx context.Context, info nix.PathInfo) (*api.Upl
 			descs,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("assembling NAR from chunks: %w", err)
 		}
 		if result != nil {
 			return result, nil
@@ -339,7 +343,7 @@ func (p *Pusher) uploadMissingChunks(
 				desc.Hash,
 				enc.EncodeAll(owned, nil),
 			); err != nil {
-				fail(fmt.Errorf("chunk %s: %w", desc.Hash[:12], err))
+				fail(fmt.Errorf("uploading chunk %s: %w", desc.Hash[:12], err))
 			}
 		})
 		return nil

@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,42 +40,89 @@ func New(endpoint, token string) *Client {
 type Error struct {
 	Status  int
 	Message string
+	// Requests sent before giving up (>1 when transient retries were burned).
+	Attempts int
 }
 
 func (e *Error) Error() string {
-	return fmt.Sprintf("%s (HTTP %d)", e.Message, e.Status)
+	msg := e.Message
+	if msg == "" {
+		msg = http.StatusText(e.Status)
+	}
+	detail := fmt.Sprintf("HTTP %d", e.Status)
+	if e.Attempts > 1 {
+		detail += fmt.Sprintf(" after %d attempts", e.Attempts)
+	}
+	// Classify for the person reading a CI log: was this transient, or is it
+	// their token? Message stays untouched — the device flow matches on it.
+	switch {
+	case e.Status >= 500 || e.Status == http.StatusTooManyRequests:
+		detail += "; transient — retrying may succeed"
+	case e.Status == http.StatusUnauthorized:
+		detail += "; token missing, expired, or revoked — check `nimbus whoami`"
+	case e.Status == http.StatusForbidden:
+		detail += "; token lacks permission"
+	}
+	return fmt.Sprintf("%s (%s)", msg, detail)
 }
 
-// do sends the request, retrying transient 5xx responses (a D1 replica blip,
-// a Workers restart) with jittered backoff. Only replayable bodies retry:
-// NewRequest sets GetBody for in-memory readers and UploadPath supplies a
-// re-dump factory; a body without GetBody gets a single attempt.
-func (c *Client) do(req *http.Request) (*http.Response, error) {
+// do sends the request, retrying transient failures with jittered backoff:
+// 5xx responses (a D1 replica blip, a Workers restart), 429s from the edge
+// rate limits (honoring Retry-After), and transport errors short of context
+// cancellation (a pooled connection reset by the edge — every endpoint is
+// idempotent, so replaying is safe even if the request was partially sent).
+// Only replayable bodies retry: NewRequest sets GetBody for in-memory
+// readers and UploadPath supplies a re-dump factory; a body without GetBody
+// gets a single attempt. Returns the attempt count for error reporting.
+func (c *Client) do(req *http.Request) (*http.Response, int, error) {
 	replayable := req.Body == nil || req.GetBody != nil
 	backoff := 500 * time.Millisecond
-	for attempt := 0; ; attempt++ {
+	for attempt := 1; ; attempt++ {
 		res, err := c.hc.Do(req)
-		if err != nil || res.StatusCode < 500 || attempt >= 2 || !replayable {
-			return res, err
+		if !replayable || attempt >= 3 {
+			return res, attempt, err
 		}
-		// Drain (bounded) before closing so the transport sees EOF and can
-		// reuse the connection instead of paying a fresh TLS handshake.
-		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 256<<10))
-		_ = res.Body.Close()
+		wait := backoff + rand.N(backoff)
+		switch {
+		case err != nil:
+			if req.Context().Err() != nil {
+				return res, attempt, err
+			}
+		case res.StatusCode >= 500 || res.StatusCode == http.StatusTooManyRequests:
+			if ra := retryAfter(res); ra > 0 {
+				wait = ra
+			}
+			// Drain (bounded) before closing so the transport sees EOF and can
+			// reuse the connection instead of paying a fresh TLS handshake.
+			_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 256<<10))
+			_ = res.Body.Close()
+		default:
+			return res, attempt, err
+		}
 		if req.GetBody != nil {
 			body, err := req.GetBody()
 			if err != nil {
-				return nil, err
+				return nil, attempt, err
 			}
 			req.Body = body
 		}
 		select {
 		case <-req.Context().Done():
-			return nil, req.Context().Err()
-		case <-time.After(backoff + rand.N(backoff)):
+			return nil, attempt, req.Context().Err()
+		case <-time.After(wait):
 		}
 		backoff *= 2
 	}
+}
+
+// retryAfter parses an integer-seconds Retry-After header, capped so a
+// misbehaving server cannot stall a push.
+func retryAfter(res *http.Response) time.Duration {
+	secs, err := strconv.Atoi(res.Header.Get("Retry-After"))
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return min(time.Duration(secs)*time.Second, 30*time.Second)
 }
 
 func (c *Client) newRequest(
@@ -92,7 +140,7 @@ func (c *Client) newRequest(
 	return req, nil
 }
 
-func decodeOrError(res *http.Response, out any) error {
+func decodeOrError(res *http.Response, out any, attempts int) error {
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		// The server's error shape is {code, error: <kind>, message: <detail>};
@@ -111,8 +159,15 @@ func decodeOrError(res *http.Response, out any) error {
 			case apiErr.Error != "":
 				message = apiErr.Error
 			}
+		} else if message != "" {
+			// Non-JSON bodies are edge interstitials (Cloudflare HTML error
+			// pages): keep the first line, bounded, not 4 KiB of markup.
+			message, _, _ = strings.Cut(message, "\n")
+			if len(message) > 200 {
+				message = message[:200] + "…"
+			}
 		}
-		return &Error{Status: res.StatusCode, Message: message}
+		return &Error{Status: res.StatusCode, Message: message, Attempts: attempts}
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, res.Body)
@@ -137,11 +192,11 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body, out any)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	res, err := c.do(req)
+	res, attempts, err := c.do(req)
 	if err != nil {
 		return err
 	}
-	return decodeOrError(res, out)
+	return decodeOrError(res, out, attempts)
 }
 
 // CacheInfo is the public cache discovery document (attic-cache-info).
@@ -229,12 +284,12 @@ func (c *Client) UploadPath(
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.ContentLength = size
 
-	res, err := c.do(req)
+	res, attempts, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}
 	result := &UploadResult{}
-	if err := decodeOrError(res, result); err != nil {
+	if err := decodeOrError(res, result, attempts); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -287,11 +342,11 @@ func (c *Client) UploadChunk(ctx context.Context, cache, hash string, data []byt
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	res, err := c.do(req)
+	res, attempts, err := c.do(req)
 	if err != nil {
 		return err
 	}
-	return decodeOrError(res, nil)
+	return decodeOrError(res, nil, attempts)
 }
 
 // CompleteChunks assembles the NAR from its chunk references. When the server
@@ -317,7 +372,7 @@ func (c *Client) CompleteChunks(
 		return nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := c.do(req)
+	res, attempts, err := c.do(req)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -333,7 +388,7 @@ func (c *Client) CompleteChunks(
 		return nil, out.MissingChunkHashes, nil
 	}
 	result := &UploadResult{}
-	if err := decodeOrError(res, result); err != nil {
+	if err := decodeOrError(res, result, attempts); err != nil {
 		return nil, nil, err
 	}
 	return result, nil, nil

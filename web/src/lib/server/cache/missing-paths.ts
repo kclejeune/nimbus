@@ -14,7 +14,7 @@
 // present if its narinfo carries a valid signature from that key.
 
 import { parseNarInfo, parsedNarInfoSignatureValid, type ParsedNarInfo } from '../attic/narinfo';
-import { dbBatch, readSession } from './db';
+import { dbAll, dbBatch, readSession } from './db';
 import { recordGuard } from './metrics';
 import { type ExecutionContext } from './platform';
 import { TtlMemo } from './ttl-memo';
@@ -190,13 +190,14 @@ async function cachedVerdictsAcrossUpstreams(
 	if (upstreams.length === 0) return verdicts;
 	const ttlById = new Map(upstreams.map((u) => [u.id, upstreamTtlSecs(u)]));
 	const placeholders = upstreams.map((_, i) => `?${i + 2}`).join(', ');
-	const { results } = await db
-		.prepare(
-			'SELECT upstream_id, present, checked_at FROM upstream_check ' +
-				`WHERE store_path_hash = ?1 AND upstream_id IN (${placeholders})`
-		)
-		.bind(hash, ...upstreams.map((u) => u.id))
-		.all<{ upstream_id: number; present: number; checked_at: string }>();
+	const { results } = await dbAll<{ upstream_id: number; present: number; checked_at: string }>(
+		db
+			.prepare(
+				'SELECT upstream_id, present, checked_at FROM upstream_check ' +
+					`WHERE store_path_hash = ?1 AND upstream_id IN (${placeholders})`
+			)
+			.bind(hash, ...upstreams.map((u) => u.id))
+	);
 	for (const row of results) {
 		const ttlSecs = ttlById.get(row.upstream_id);
 		if (ttlSecs !== undefined && verdictFresh(row, ttlSecs)) {
