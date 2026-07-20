@@ -25,6 +25,9 @@ vite.config.ts.timestamp-*
 
 # Wrangler dev secrets
 .dev.vars
+
+# Wireit incremental-build state
+.wireit
 # Created by https://www.toptal.com/developers/gitignore/api/node
 # Edit at https://www.toptal.com/developers/gitignore?templates=node
 

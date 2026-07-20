@@ -5,16 +5,73 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
-		"build": "vite build",
+		"build": "wireit",
 		"preview": "vite preview",
-		"migrate": "wrangler d1 migrations apply attic --remote",
-		"deploy": "npm run migrate && npm run build && wrangler deploy",
+		"migrate": "wireit",
+		"deploy": "wireit",
+		"deploy:worker": "wireit",
+		"deploy:waf": "wireit",
 		"prepare": "svelte-kit sync || echo ''",
-		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check": "wireit",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"lint": "prettier --check .",
 		"format": "prettier --write .",
-		"test": "vitest run"
+		"test": "wireit"
+	},
+	"wireit": {
+		"build": {
+			"command": "vite build",
+			"files": [
+				"src/**",
+				"static/**",
+				"vite.config.ts",
+				"tsconfig.json",
+				"wrangler.adapter.jsonc"
+			],
+			"output": [
+				".svelte-kit/output/**",
+				".svelte-kit/cloudflare/**"
+			]
+		},
+		"migrate": {
+			"command": "wrangler d1 migrations apply attic --remote"
+		},
+		"deploy:worker": {
+			"command": "wrangler deploy",
+			"dependencies": [
+				"build",
+				"migrate"
+			]
+		},
+		"deploy:waf": {
+			"command": "fnox exec -- node scripts/deploy-waf.mjs --optional"
+		},
+		"deploy": {
+			"dependencies": [
+				"deploy:worker",
+				"deploy:waf"
+			]
+		},
+		"check": {
+			"command": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+			"files": [
+				"src/**",
+				"static/**",
+				"vite.config.ts",
+				"tsconfig.json"
+			],
+			"output": []
+		},
+		"test": {
+			"command": "vitest run",
+			"files": [
+				"src/**",
+				"vite.config.ts",
+				"vitest.config.ts",
+				"tsconfig.json"
+			],
+			"output": []
+		}
 	},
 	"devDependencies": {
 		"@cloudflare/workers-types": "^5.20260706.1",
@@ -42,6 +99,7 @@
 		"typescript": "^6.0.3",
 		"vite": "^8.0.16",
 		"vitest": "^4.1.10",
+		"wireit": "^0.14.13",
 		"wrangler": "^4.110.0"
 	},
 	"overrides": {
