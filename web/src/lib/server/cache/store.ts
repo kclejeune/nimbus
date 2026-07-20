@@ -24,7 +24,7 @@ import {
 import { clearAbsent, getProxyKeypair } from './proxy';
 import { RateBudget } from './rate-budget';
 import { TtlMemo } from './ttl-memo';
-import type { ExecutionContext } from './platform';
+import { withR2Retry, type ExecutionContext } from './platform';
 
 type Env = App.Platform['env'];
 
@@ -564,7 +564,7 @@ async function serveNar(
 	});
 
 	if (chunks.length === 1) {
-		const object = await env.CACHE_BUCKET.get(keys[0]);
+		const object = await withR2Retry(() => env.CACHE_BUCKET.get(keys[0]));
 		if (!object) return errorResponse(404, `File not found in storage: ${keys[0]}`);
 		baseHeaders.set('Content-Length', String(object.size));
 		return new Response(object.body as unknown as BodyInit, { status: 200, headers: baseHeaders });
@@ -578,10 +578,10 @@ async function serveNar(
 		: null;
 	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
 	const pump = async () => {
-		let next = env.CACHE_BUCKET.get(keys[0]);
+		let next = withR2Retry(() => env.CACHE_BUCKET.get(keys[0]));
 		for (let i = 0; i < keys.length; i++) {
 			const object = await next;
-			if (i + 1 < keys.length) next = env.CACHE_BUCKET.get(keys[i + 1]);
+			if (i + 1 < keys.length) next = withR2Retry(() => env.CACHE_BUCKET.get(keys[i + 1]));
 			if (!object) throw new Error(`File not found in storage: ${keys[i]}`);
 			await (object.body as unknown as ReadableStream<Uint8Array>).pipeTo(writable, {
 				preventClose: true

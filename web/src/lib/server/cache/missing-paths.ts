@@ -101,6 +101,12 @@ function filtersPath(upstream: Upstream, verdict: Verdict): boolean {
 const BATCH = 99;
 /** Max live upstream narinfo probes per request (Workers subrequest budget). */
 const MAX_UPSTREAM_PROBES = 250;
+
+// Upstream probes run inline on the serve path (narinfo miss, NAR-404
+// redirect, get-missing-paths filtering); a black-holed upstream must not
+// pin the request for the platform's full fetch timeout. Narinfo-sized
+// responses arrive well within this.
+const PROBE_TIMEOUT_MS = 5_000;
 const PROBE_CONCURRENCY = 10;
 const ABSENT_RECHECK_MS = 24 * 60 * 60 * 1000;
 
@@ -368,15 +374,21 @@ export async function classifyNarinfo(upstream: Upstream, text: string): Promise
 export async function probeUpstream(upstream: Upstream, hash: string): Promise<Verdict | null> {
 	try {
 		if (hash.startsWith('nar:')) {
-			const res = await fetch(`${upstream.url}/${hash.slice('nar:'.length)}`, { method: 'HEAD' });
+			const res = await fetch(`${upstream.url}/${hash.slice('nar:'.length)}`, {
+				method: 'HEAD',
+				signal: AbortSignal.timeout(PROBE_TIMEOUT_MS)
+			});
 			return headVerdict(res);
 		}
 		const url = `${upstream.url}/${hash}.narinfo`;
 		if (!upstream.publicKey && upstream.mode !== 'persist') {
-			const res = await fetch(url, { method: 'HEAD' });
+			const res = await fetch(url, {
+				method: 'HEAD',
+				signal: AbortSignal.timeout(PROBE_TIMEOUT_MS)
+			});
 			return headVerdict(res);
 		}
-		const res = await fetch(url);
+		const res = await fetch(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
 		if (res.status === 404) return VERDICT_ABSENT;
 		if (res.status !== 200) return null;
 		return await classifyNarinfo(upstream, await res.text());
@@ -466,7 +478,9 @@ export async function fetchUpstreamNarInfo(
 		if (!(allowed ??= await takeProbeBudget(guard))) return PROBE_REFUSED;
 
 		try {
-			const res = await fetch(`${upstream.url}/${storePathHash}.narinfo`);
+			const res = await fetch(`${upstream.url}/${storePathHash}.narinfo`, {
+				signal: AbortSignal.timeout(PROBE_TIMEOUT_MS)
+			});
 			if (res.status === 200) {
 				const text = await res.text();
 				// Recording on any change actively corrects verdicts probed without

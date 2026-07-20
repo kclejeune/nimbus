@@ -31,6 +31,47 @@ export function newDigestStream(): DigestStreamLike {
 	return new workersCrypto.DigestStream('SHA-256');
 }
 
+/**
+ * Retry an idempotent R2 operation on any failure with jittered backoff
+ * (~100/200 ms). R2 errors carry no stable transience signal, and every call
+ * site is a get/put of an immutable content-addressed object, so a blanket
+ * retry is safe; the happy path pays one extra closure.
+ */
+export async function withR2Retry<T>(op: () => Promise<T>, attempts = 3): Promise<T> {
+	let backoff = 100;
+	for (let attempt = 1; ; attempt++) {
+		try {
+			return await op();
+		} catch (e) {
+			if (attempt >= attempts) throw e;
+			await new Promise((r) => setTimeout(r, backoff + Math.random() * backoff));
+			backoff *= 2;
+		}
+	}
+}
+
+/** Minimal counting semaphore for bounding concurrent memory-heavy work
+ * within an isolate. */
+export class Semaphore {
+	private waiters: (() => void)[] = [];
+	private free: number;
+	constructor(slots: number) {
+		this.free = slots;
+	}
+	async acquire(): Promise<void> {
+		if (this.free > 0) {
+			this.free--;
+			return;
+		}
+		await new Promise<void>((resolve) => this.waiters.push(resolve));
+	}
+	release(): void {
+		const next = this.waiters.shift();
+		if (next) next();
+		else this.free++;
+	}
+}
+
 /** Collect a stream into memory, or null once it exceeds `limit` bytes. */
 export async function readAll(
 	body: ReadableStream<Uint8Array>,

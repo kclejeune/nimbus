@@ -70,7 +70,8 @@ describe('probeUpstream', () => {
 		const spy = stubFetch(() => new Response(null, { status: 200 }));
 		expect(await probeUpstream(keyless, 'h'.repeat(32))).toBe(VERDICT_PRESENT);
 		expect(spy).toHaveBeenCalledWith(`https://up.example/${'h'.repeat(32)}.narinfo`, {
-			method: 'HEAD'
+			method: 'HEAD',
+			signal: expect.any(AbortSignal)
 		});
 	});
 
@@ -88,7 +89,10 @@ describe('probeUpstream', () => {
 	it('probes nar: pseudo-hashes at the NAR path', async () => {
 		const spy = stubFetch(() => new Response(null, { status: 200 }));
 		expect(await probeUpstream(keyless, 'nar:nar/abc.nar.xz')).toBe(VERDICT_PRESENT);
-		expect(spy).toHaveBeenCalledWith('https://up.example/nar/abc.nar.xz', { method: 'HEAD' });
+		expect(spy).toHaveBeenCalledWith('https://up.example/nar/abc.nar.xz', {
+			method: 'HEAD',
+			signal: expect.any(AbortSignal)
+		});
 	});
 
 	it('persist upstreams GET the body and mark unpersistable entries', async () => {

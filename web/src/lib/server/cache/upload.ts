@@ -30,7 +30,13 @@ import { findCacheCached } from './cache-lookup';
 import * as db from './db';
 import { recordPush, recordStoreWrite } from './metrics';
 import { bytesToHex } from '../attic/nix-base32';
-import { newDigestStream, readAll, type ExecutionContext } from './platform';
+import {
+	newDigestStream,
+	readAll,
+	Semaphore,
+	withR2Retry,
+	type ExecutionContext
+} from './platform';
 import { warmNarinfoAfterUpload } from './store';
 
 type Env = App.Platform['env'];
@@ -229,7 +235,7 @@ async function processNarChunk(
 	const key = chunkStorageKey(hash, kind);
 	// Content-addressed key: a concurrent upload of the same chunk writes the
 	// same bytes, so racing puts are harmless.
-	await env.CACHE_BUCKET.put(key, compressed.data as unknown as ArrayBuffer);
+	await withR2Retry(() => env.CACHE_BUCKET.put(key, compressed.data as unknown as ArrayBuffer));
 	recordStoreWrite(env, { deduplicated: false, fileBytes: compressed.fileSize ?? 0 });
 	return {
 		locked: false,
@@ -556,7 +562,7 @@ export async function handleBufferedUpload(
 	}
 
 	const storageKey = storageKeyFor(info.nar_hash, kind);
-	await env.CACHE_BUCKET.put(storageKey, result.data as unknown as ArrayBuffer);
+	await withR2Retry(() => env.CACHE_BUCKET.put(storageKey, result.data as unknown as ArrayBuffer));
 	recordStoreWrite(env, { deduplicated: false, fileBytes: result.fileSize ?? 0 });
 
 	return createUploadRows(env, info, cacheId, {
@@ -735,6 +741,18 @@ export async function handleCdcQuery(
 }
 
 /**
+ * Bounds concurrent decompress-and-verify work per isolate. Each in-flight
+ * chunk PUT holds the compressed body plus a full CDC_MAX_CHUNK WASM output
+ * buffer (~50 MB across the JS and WASM heaps), and the client uploads 8
+ * chunks concurrently over one HTTP/2 connection, which lands them on the
+ * same isolate — unbounded, a large multi-chunk NAR exceeds the 128 MiB
+ * isolate memory limit and every in-flight request dies as a Cloudflare 1102.
+ * Queued requests are cheap: acquired before the body is buffered, so their
+ * bytes stay in the platform stream, not the JS heap.
+ */
+const chunkVerifySlots = new Semaphore(2);
+
+/**
  * PUT /_api/v1/upload-path/chunks/{hash} — one zstd-compressed chunk, stored
  * verbatim under its content address. Stateless: the chunk row lands
  * immediately (state V); an abandoned push leaves unreferenced rows that the
@@ -745,21 +763,30 @@ export async function handleCdcChunkPut(
 	env: Env,
 	hash: string
 ): Promise<Response> {
-	if (!HEX64.test(hash)) return errorResponse(400, 'Invalid chunk hash');
-
-	const compressed = new Uint8Array(await request.arrayBuffer());
-	if (compressed.length === 0) return errorResponse(400, 'Empty chunk body');
+	if (!HEX64.test(hash)) return errorResponse(400, `Invalid chunk hash: ${hash}`);
 
 	// Verify by decompressing: raw sha256 must equal the claimed hash, and the
-	// bomb guard caps the decompressed size at the chunker's MAX_CHUNK.
-	await initZstd();
-	let raw: Uint8Array;
+	// bomb guard caps the decompressed size at the chunker's MAX_CHUNK. The
+	// raw bytes are only needed inside this block; just the length outlives it.
+	let compressed: Uint8Array;
+	let rawLength: number;
+	let actual: string;
+	await chunkVerifySlots.acquire();
 	try {
-		raw = zstdDecompress(compressed, CDC_MAX_CHUNK);
-	} catch (e) {
-		return errorResponse(400, `Invalid zstd chunk: ${e}`);
+		compressed = new Uint8Array(await request.arrayBuffer());
+		if (compressed.length === 0) return errorResponse(400, 'Empty chunk body');
+		await initZstd();
+		let raw: Uint8Array;
+		try {
+			raw = zstdDecompress(compressed, CDC_MAX_CHUNK);
+		} catch (e) {
+			return errorResponse(400, `Invalid zstd chunk: ${e}`);
+		}
+		rawLength = raw.length;
+		actual = toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource));
+	} finally {
+		chunkVerifySlots.release();
 	}
-	const actual = toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource));
 	if (actual !== hash) {
 		return errorResponse(400, `Chunk hash mismatch: expected ${hash}, got ${actual}`);
 	}
@@ -774,14 +801,14 @@ export async function handleCdcChunkPut(
 	}
 
 	const key = chunkStorageKey(hash, 'zstd');
-	await env.CACHE_BUCKET.put(key, compressed as unknown as ArrayBuffer);
+	await withR2Retry(() => env.CACHE_BUCKET.put(key, compressed as unknown as ArrayBuffer));
 	recordStoreWrite(env, { deduplicated: false, fileBytes: compressed.length });
 	// A concurrent PUT of the same chunk stored the same bytes; whichever row
 	// wins the unique index describes them.
 	const inserted = await db.insertChunk(env.ATTIC_DB, {
 		state: 'V',
 		chunk_hash: `sha256:${hash}`,
-		chunk_size: raw.length,
+		chunk_size: rawLength,
 		file_hash: toHex(await crypto.subtle.digest('SHA-256', compressed as BufferSource)),
 		file_size: compressed.length,
 		compression: 'zstd',
