@@ -15,11 +15,16 @@ D1 database and R2 bucket automatically, prompts for the secrets in
 Builds (pushes to your clone redeploy automatically). Then finish in your
 cloned repo:
 
-1. Uncomment `routes` in `web/wrangler.jsonc` with your two hostnames and
-   set `APP_URL`/`CACHE_BASE_URL` to match ([Configuration](#configuration)).
+1. Set your two hostnames (writes `routes` + `APP_URL`/`CACHE_BASE_URL` in
+   `web/wrangler.jsonc`):
+
+   ```bash
+   cd web && npm run set-hostnames -- app.cache.example.org cache.example.org
+   ```
+
 2. Configure a sign-in method ([Authentication](#authentication)).
-3. Push (or run `npm run deploy`) — custom domains, DNS, and certificates
-   are provisioned on deploy.
+3. Commit and push (or run `npm run deploy`) — custom domains, DNS, and
+   certificates are provisioned on deploy.
 
 The rest of this document is the equivalent manual walkthrough.
 
@@ -50,6 +55,9 @@ Values to replace:
   `app.cache.example.com` and `cache.example.com`). Once added, keep them —
   wrangler detaches custom domains missing from the config.
 - `vars.APP_URL` / `vars.CACHE_BASE_URL` — the matching URLs.
+
+  `npm run set-hostnames -- <app-host> <cache-host>` writes both of the
+  above in one step.
 - `vars` for your chosen auth method(s) — see below.
 - `d1_databases[0].database_id` — from [Resources](#resources).
 

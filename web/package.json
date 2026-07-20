@@ -12,6 +12,7 @@
 		"deploy": "wireit",
 		"deploy:worker": "wireit",
 		"deploy:waf": "wireit",
+		"set-hostnames": "node scripts/set-hostnames.mjs",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "wireit",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
