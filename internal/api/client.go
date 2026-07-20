@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strings"
@@ -42,6 +43,38 @@ type Error struct {
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("%s (HTTP %d)", e.Message, e.Status)
+}
+
+// do sends the request, retrying transient 5xx responses (a D1 replica blip,
+// a Workers restart) with jittered backoff. Only replayable bodies retry:
+// NewRequest sets GetBody for in-memory readers and UploadPath supplies a
+// re-dump factory; a body without GetBody gets a single attempt.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	replayable := req.Body == nil || req.GetBody != nil
+	backoff := 500 * time.Millisecond
+	for attempt := 0; ; attempt++ {
+		res, err := c.hc.Do(req)
+		if err != nil || res.StatusCode < 500 || attempt >= 2 || !replayable {
+			return res, err
+		}
+		// Drain (bounded) before closing so the transport sees EOF and can
+		// reuse the connection instead of paying a fresh TLS handshake.
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 256<<10))
+		_ = res.Body.Close()
+		if req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			req.Body = body
+		}
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-time.After(backoff + rand.N(backoff)):
+		}
+		backoff *= 2
+	}
 }
 
 func (c *Client) newRequest(
@@ -104,7 +137,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body, out any)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	res, err := c.hc.Do(req)
+	res, err := c.do(req)
 	if err != nil {
 		return err
 	}
@@ -169,27 +202,34 @@ type UploadResult struct {
 }
 
 // UploadPath uploads a raw NAR with the metadata in the X-Attic-Nar-Info
-// header. size must be the exact NAR size so the server can pick its
-// buffered/streaming strategy.
+// header. nar returns a fresh NAR stream per call — it seeds the request body
+// and serves as GetBody so do's 5xx retry can replay the upload. size must be
+// the exact NAR size so the server can pick its buffered/streaming strategy.
 func (c *Client) UploadPath(
 	ctx context.Context,
 	info *NarInfo,
-	nar io.Reader,
+	nar func() (io.ReadCloser, error),
 	size int64,
 ) (*UploadResult, error) {
 	header, err := json.Marshal(info)
 	if err != nil {
 		return nil, err
 	}
-	req, err := c.newRequest(ctx, http.MethodPut, "/_api/v1/upload-path", nar)
+	body, err := nar()
 	if err != nil {
 		return nil, err
 	}
+	req, err := c.newRequest(ctx, http.MethodPut, "/_api/v1/upload-path", body)
+	if err != nil {
+		_ = body.Close()
+		return nil, err
+	}
+	req.GetBody = nar
 	req.Header.Set("X-Attic-Nar-Info", string(header))
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.ContentLength = size
 
-	res, err := c.hc.Do(req)
+	res, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +287,7 @@ func (c *Client) UploadChunk(ctx context.Context, cache, hash string, data []byt
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	res, err := c.hc.Do(req)
+	res, err := c.do(req)
 	if err != nil {
 		return err
 	}
@@ -277,7 +317,7 @@ func (c *Client) CompleteChunks(
 		return nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := c.hc.Do(req)
+	res, err := c.do(req)
 	if err != nil {
 		return nil, nil, err
 	}

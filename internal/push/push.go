@@ -196,15 +196,18 @@ func (p *Pusher) narInfo(info nix.PathInfo) *api.NarInfo {
 	return narInfo
 }
 
-// uploadSimple streams the raw NAR; the server compresses.
+// uploadSimple streams the raw NAR; the server compresses. The body factory
+// re-dumps the path per call (store paths are immutable, so every dump yields
+// identical bytes), making the stream replayable for the transport-level 5xx
+// retry in api.Client.
 func (p *Pusher) uploadSimple(ctx context.Context, info nix.PathInfo) (*api.UploadResult, error) {
-	pr, pw := io.Pipe()
-	go func() {
-		pw.CloseWithError(nix.DumpPath(ctx, pw, info.Path))
-	}()
-	result, err := p.Client.UploadPath(ctx, p.narInfo(info), pr, info.NarSize)
-	pr.CloseWithError(err)
-	return result, err
+	return p.Client.UploadPath(ctx, p.narInfo(info), func() (io.ReadCloser, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			pw.CloseWithError(nix.DumpPath(ctx, pw, info.Path))
+		}()
+		return pr, nil
+	}, info.NarSize)
 }
 
 // uploadChunked cuts the NAR with the server-compatible FastCDC, uploads only

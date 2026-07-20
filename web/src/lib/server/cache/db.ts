@@ -16,11 +16,14 @@ export const STMT_BATCH = 100;
  * queue can back up and reject a call with "D1 requests queued for too long" or
  * drop the connection. These are transient — the queue drains — and safe to
  * retry: a rejected batch is atomic (nothing applied) and a rejected single
- * statement never committed. Constraint/logic errors carry different messages,
- * are not matched, and surface immediately.
+ * statement never committed. Replica sessions (readSession) add their own
+ * failure mode — "Replica disconnected from primary" — equally transient: the
+ * retried query just lands on a healthy replica or the primary. Constraint/
+ * logic errors carry different messages, are not matched, and surface
+ * immediately.
  */
 const TRANSIENT_D1_ERROR =
-	/queued for too long|Network connection lost|storage (?:caused|operation)|reset because|connection (?:lost|reset)|please try again/i;
+	/queued for too long|Network connection lost|storage (?:caused|operation)|reset because|connection (?:lost|reset)|please try again|replica disconnected/i;
 
 export function isTransientD1Error(e: unknown): boolean {
 	return TRANSIENT_D1_ERROR.test(e instanceof Error ? e.message : String(e));
@@ -42,11 +45,14 @@ export async function withD1Retry<T>(op: () => Promise<T>, attempts = 4): Promis
 	}
 }
 
-/** Prepared-statement execution wrappers that retry transient D1 errors, so
- * resilience is uniform across the query layer rather than opt-in per call. */
+/** Prepared-statement execution wrappers that retry transient D1 errors.
+ * Every read-path and upload-path query goes through these; the remaining raw
+ * .run()/.first() sites are best-effort touches (callers ignore errors) or
+ * rare admin/config statements where a surfaced transient error is fine. */
 export const dbRun = (stmt: D1PreparedStatement) => withD1Retry(() => stmt.run());
 export const dbFirst = <T = unknown>(stmt: D1PreparedStatement) =>
 	withD1Retry(() => stmt.first<T>());
+export const dbAll = <T = unknown>(stmt: D1PreparedStatement) => withD1Retry(() => stmt.all<T>());
 export const dbBatch = <T = unknown>(db: D1Database, stmts: D1PreparedStatement[]) =>
 	withD1Retry(() => db.batch<T>(stmts));
 
@@ -190,32 +196,33 @@ export async function findObjectWithChunks(
 	cacheName: string,
 	storePathHash: string
 ): Promise<ObjectWithNarChunks | null> {
-	const { results } = await db
-		.prepare(
-			'SELECT o.id, o.store_path_hash, o.store_path, o.refs, o.system, o.deriver, ' +
-				'o.sigs, o.ca, ' +
-				'n.id AS nar_id, n.state AS nar_state, n.nar_hash, n.nar_size, ' +
-				'n.compression AS nar_compression, n.num_chunks, ' +
-				CHUNK_JOIN_COLUMNS +
-				'FROM object o ' +
-				'INNER JOIN cache c ON o.cache_id = c.id ' +
-				'INNER JOIN nar n ON o.nar_id = n.id ' +
-				'LEFT JOIN chunkref cr ON cr.nar_id = n.id ' +
-				'LEFT JOIN chunk ch ON ch.id = cr.chunk_id ' +
-				"WHERE c.name = ?1 AND c.deleted_at IS NULL AND o.store_path_hash = ?2 AND n.state = 'V' " +
-				'ORDER BY cr.seq'
-		)
-		.bind(cacheName, storePathHash)
-		.all<
-			ObjectRow & {
-				nar_id: number;
-				nar_state: string;
-				nar_hash: string;
-				nar_size: number;
-				nar_compression: string;
-				num_chunks: number;
-			} & JoinedChunkColumns
-		>();
+	const { results } = await dbAll<
+		ObjectRow & {
+			nar_id: number;
+			nar_state: string;
+			nar_hash: string;
+			nar_size: number;
+			nar_compression: string;
+			num_chunks: number;
+		} & JoinedChunkColumns
+	>(
+		db
+			.prepare(
+				'SELECT o.id, o.store_path_hash, o.store_path, o.refs, o.system, o.deriver, ' +
+					'o.sigs, o.ca, ' +
+					'n.id AS nar_id, n.state AS nar_state, n.nar_hash, n.nar_size, ' +
+					'n.compression AS nar_compression, n.num_chunks, ' +
+					CHUNK_JOIN_COLUMNS +
+					'FROM object o ' +
+					'INNER JOIN cache c ON o.cache_id = c.id ' +
+					'INNER JOIN nar n ON o.nar_id = n.id ' +
+					'LEFT JOIN chunkref cr ON cr.nar_id = n.id ' +
+					'LEFT JOIN chunk ch ON ch.id = cr.chunk_id ' +
+					"WHERE c.name = ?1 AND c.deleted_at IS NULL AND o.store_path_hash = ?2 AND n.state = 'V' " +
+					'ORDER BY cr.seq'
+			)
+			.bind(cacheName, storePathHash)
+	);
 	const first = results[0];
 	if (!first) return null;
 	return {
@@ -250,28 +257,29 @@ export async function findNarWithChunks(
 	narHashes: string[]
 ): Promise<NarWithChunks | null> {
 	const placeholders = narHashes.map((_, i) => `?${i + 1}`).join(', ');
-	const { results } = await db
-		.prepare(
-			'SELECT n.id AS nar_id, n.state AS nar_state, n.nar_hash, n.nar_size, ' +
-				'n.compression AS nar_compression, n.num_chunks, ' +
-				CHUNK_JOIN_COLUMNS +
-				'FROM nar n ' +
-				'LEFT JOIN chunkref cr ON cr.nar_id = n.id ' +
-				'LEFT JOIN chunk ch ON ch.id = cr.chunk_id ' +
-				`WHERE n.nar_hash IN (${placeholders}) AND n.state = 'V' ` +
-				'ORDER BY n.id, cr.seq'
-		)
-		.bind(...narHashes)
-		.all<
-			{
-				nar_id: number;
-				nar_state: string;
-				nar_hash: string;
-				nar_size: number;
-				nar_compression: string;
-				num_chunks: number;
-			} & JoinedChunkColumns
-		>();
+	const { results } = await dbAll<
+		{
+			nar_id: number;
+			nar_state: string;
+			nar_hash: string;
+			nar_size: number;
+			nar_compression: string;
+			num_chunks: number;
+		} & JoinedChunkColumns
+	>(
+		db
+			.prepare(
+				'SELECT n.id AS nar_id, n.state AS nar_state, n.nar_hash, n.nar_size, ' +
+					'n.compression AS nar_compression, n.num_chunks, ' +
+					CHUNK_JOIN_COLUMNS +
+					'FROM nar n ' +
+					'LEFT JOIN chunkref cr ON cr.nar_id = n.id ' +
+					'LEFT JOIN chunk ch ON ch.id = cr.chunk_id ' +
+					`WHERE n.nar_hash IN (${placeholders}) AND n.state = 'V' ` +
+					'ORDER BY n.id, cr.seq'
+			)
+			.bind(...narHashes)
+	);
 	if (results.length === 0) return null;
 	// Prefer the earliest hash spelling that matched, then the lowest nar id.
 	const rank = new Map(narHashes.map((h, i) => [h, i]));
@@ -427,14 +435,19 @@ export async function removePin(db: D1Database, cacheId: number, name: string): 
  * Missing rows are valid (e.g. bootstrap tokens the admin app never tracked).
  */
 export async function isTokenDisabled(db: D1Database, jti: string): Promise<boolean> {
-	const row = await db
-		.prepare(
-			`SELECT t.revoked_at, u.status, u.role
-			 FROM api_token t LEFT JOIN user u ON u.id = t.user_id
-			 WHERE t.id = ?1`
-		)
-		.bind(jti)
-		.first<{ revoked_at: string | null; status: string | null; role: string | null }>();
+	const row = await dbFirst<{
+		revoked_at: string | null;
+		status: string | null;
+		role: string | null;
+	}>(
+		db
+			.prepare(
+				`SELECT t.revoked_at, u.status, u.role
+				 FROM api_token t LEFT JOIN user u ON u.id = t.user_id
+				 WHERE t.id = ?1`
+			)
+			.bind(jti)
+	);
 	if (!row) return false;
 	if (row.revoked_at != null) return true;
 	return row.status != null && !isActiveUser({ role: row.role ?? 'member', status: row.status });
@@ -514,13 +527,14 @@ export async function findChunk(
 	chunkHash: string,
 	compression: string
 ): Promise<ChunkRow | null> {
-	return db
-		.prepare(
-			'SELECT id, state, chunk_hash, chunk_size, file_hash, file_size, compression, remote_file ' +
-				"FROM chunk WHERE chunk_hash = ?1 AND compression = ?2 AND state = 'V'"
-		)
-		.bind(chunkHash, compression)
-		.first<ChunkRow>();
+	return dbFirst<ChunkRow>(
+		db
+			.prepare(
+				'SELECT id, state, chunk_hash, chunk_size, file_hash, file_size, compression, remote_file ' +
+					"FROM chunk WHERE chunk_hash = ?1 AND compression = ?2 AND state = 'V'"
+			)
+			.bind(chunkHash, compression)
+	);
 }
 
 /**
@@ -617,13 +631,14 @@ export async function findExistingChunkHashes(
 	for (let i = 0; i < chunkHashes.length; i += PARAM_BATCH) {
 		const batch = chunkHashes.slice(i, i + PARAM_BATCH);
 		const placeholders = batch.map((_, j) => `?${j + 2}`).join(', ');
-		const { results } = await db
-			.prepare(
-				`SELECT chunk_hash FROM chunk WHERE compression = ?1 AND state = 'V' ` +
-					`AND chunk_hash IN (${placeholders})`
-			)
-			.bind(compression, ...batch)
-			.all<{ chunk_hash: string }>();
+		const { results } = await dbAll<{ chunk_hash: string }>(
+			db
+				.prepare(
+					`SELECT chunk_hash FROM chunk WHERE compression = ?1 AND state = 'V' ` +
+						`AND chunk_hash IN (${placeholders})`
+				)
+				.bind(compression, ...batch)
+		);
 		for (const row of results) existing.add(row.chunk_hash);
 	}
 	return existing;
@@ -886,12 +901,13 @@ export async function findDeviceAuth(
 	db: D1Database,
 	deviceCode: string
 ): Promise<DeviceAuthRow | null> {
-	return db
-		.prepare(
-			'SELECT device_code, user_code, status, token, expires_at FROM device_auth WHERE device_code = ?1'
-		)
-		.bind(deviceCode)
-		.first();
+	return dbFirst<DeviceAuthRow>(
+		db
+			.prepare(
+				'SELECT device_code, user_code, status, token, expires_at FROM device_auth WHERE device_code = ?1'
+			)
+			.bind(deviceCode)
+	);
 }
 
 export async function deleteDeviceAuth(db: D1Database, deviceCode: string): Promise<void> {
@@ -911,14 +927,15 @@ export async function cachesWithStorePathHash(
 	db: D1Database,
 	storePathHash: string
 ): Promise<LiveCacheRow[]> {
-	const { results } = await db
-		.prepare(
-			`SELECT c.name, c.priority, c.is_public FROM object o
-			 JOIN cache c ON c.id = o.cache_id
-			 WHERE o.store_path_hash = ?1 AND c.deleted_at IS NULL`
-		)
-		.bind(storePathHash)
-		.all<LiveCacheRow>();
+	const { results } = await dbAll<LiveCacheRow>(
+		db
+			.prepare(
+				`SELECT c.name, c.priority, c.is_public FROM object o
+				 JOIN cache c ON c.id = o.cache_id
+				 WHERE o.store_path_hash = ?1 AND c.deleted_at IS NULL`
+			)
+			.bind(storePathHash)
+	);
 	return results;
 }
 
@@ -928,15 +945,16 @@ export async function cachesWithNarHash(
 	narHashes: string[]
 ): Promise<LiveCacheRow[]> {
 	const placeholders = narHashes.map((_, i) => `?${i + 1}`).join(', ');
-	const { results } = await db
-		.prepare(
-			`SELECT DISTINCT c.name, c.priority, c.is_public FROM nar n
-			 JOIN object o ON o.nar_id = n.id
-			 JOIN cache c ON c.id = o.cache_id
-			 WHERE n.nar_hash IN (${placeholders}) AND c.deleted_at IS NULL`
-		)
-		.bind(...narHashes)
-		.all<LiveCacheRow>();
+	const { results } = await dbAll<LiveCacheRow>(
+		db
+			.prepare(
+				`SELECT DISTINCT c.name, c.priority, c.is_public FROM nar n
+				 JOIN object o ON o.nar_id = n.id
+				 JOIN cache c ON c.id = o.cache_id
+				 WHERE n.nar_hash IN (${placeholders}) AND c.deleted_at IS NULL`
+			)
+			.bind(...narHashes)
+	);
 	return results;
 }
 
