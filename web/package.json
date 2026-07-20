@@ -10,6 +10,7 @@
 		"preview": "vite preview",
 		"migrate": "wireit",
 		"deploy": "wireit",
+		"deploy:preview": "wireit",
 		"deploy:worker": "wireit",
 		"deploy:waf": "wireit",
 		"set-hostnames": "node scripts/set-hostnames.mjs",
@@ -49,6 +50,13 @@
 			"dependencies": [
 				"build",
 				"migrate",
+				"config"
+			]
+		},
+		"deploy:preview": {
+			"command": "wrangler versions upload $(test -f wrangler.local.jsonc && echo --config=wrangler.local.jsonc)",
+			"dependencies": [
+				"build",
 				"config"
 			]
 		},

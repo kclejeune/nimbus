@@ -172,6 +172,12 @@ the file from that variable before wrangler runs. Optionally add a
 `WAF_API_TOKEN` build secret so the WAF step applies in CI too; without it
 the step skips with a warning.
 
+Build settings: root directory `web`, deploy command `npm run deploy`, and
+non-production branch deploy command `npm run deploy:preview` — it builds
+and runs `wrangler versions upload` with the same config detection, but
+deliberately skips D1 migrations (which would mutate the production
+database) and the WAF step.
+
 ### Pull-through upstreams
 
 Upstream caches (e.g. `cache.nixos.org`) are configured per-cache from the
