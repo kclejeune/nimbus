@@ -24,7 +24,7 @@
 
 import { parseNarInfo } from '../attic/narinfo';
 import { bytesToHex, sha256HexDigest } from '../attic/nix-base32';
-import { initZstd, uploadCompressionFor, zstdDecompress } from './compression';
+import { initZstd, uploadCompressionFor, wasmMemorySlots, zstdDecompress } from './compression';
 import * as db from './db';
 import { recordGuard } from './metrics';
 import {
@@ -35,7 +35,7 @@ import {
 	recordVerdicts,
 	VERDICT_UNPERSISTABLE
 } from './missing-paths';
-import { readAll, type ExecutionContext } from './platform';
+import { readAll, withSlot, type ExecutionContext } from './platform';
 import { warmNarinfoAfterUpload } from './store';
 import { TtlMemo } from './ttl-memo';
 import {
@@ -203,13 +203,15 @@ export async function persistUpstreamPath(
 
 		let raw = downloaded;
 		if (compression === 'zstd') {
+			const src = downloaded;
 			await initZstd();
 			// The signed NarSize bounds the destination buffer (persistIngestible
 			// already capped it), so the WASM heap grows to the expected size
 			// instead of the global cap; larger-than-declared content fails the
 			// decompress, which is a correct rejection of bytes that contradict
-			// the signed narinfo.
-			raw = zstdDecompress(downloaded, parsed.narSize);
+			// the signed narinfo. Slot-gated: ingestion runs in the background
+			// and must not stack its WASM buffers on top of live uploads.
+			raw = await withSlot(wasmMemorySlots, () => zstdDecompress(src, parsed.narSize));
 		}
 		// Drop the compressed buffer before the pipeline stages allocate.
 		downloaded = null;

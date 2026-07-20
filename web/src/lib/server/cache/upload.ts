@@ -23,6 +23,7 @@ import {
 	extensionFor,
 	initZstd,
 	uploadCompressionFor,
+	wasmMemorySlots,
 	zstdDecompress,
 	type CompressionKind
 } from './compression';
@@ -30,13 +31,7 @@ import { findCacheCached } from './cache-lookup';
 import * as db from './db';
 import { recordPush, recordStoreWrite } from './metrics';
 import { bytesToHex } from '../attic/nix-base32';
-import {
-	newDigestStream,
-	readAll,
-	Semaphore,
-	withR2Retry,
-	type ExecutionContext
-} from './platform';
+import { newDigestStream, readAll, withR2Retry, withSlot, type ExecutionContext } from './platform';
 import { warmNarinfoAfterUpload } from './store';
 
 type Env = App.Platform['env'];
@@ -231,7 +226,7 @@ async function processNarChunk(
 		};
 	}
 
-	const compressed = await compressBuffer(raw, kind);
+	const compressed = await withSlot(wasmMemorySlots, () => compressBuffer(raw, kind));
 	const key = chunkStorageKey(hash, kind);
 	// Content-addressed key: a concurrent upload of the same chunk writes the
 	// same bytes, so racing puts are harmless.
@@ -554,7 +549,7 @@ export async function handleBufferedUpload(
 		return finalizeChunkedNar(env, info, cacheId, kind, records, body.length);
 	}
 
-	const result = await compressBuffer(body, kind);
+	const result = await withSlot(wasmMemorySlots, () => compressBuffer(body, kind));
 
 	if (result.narHash !== stripSha256(info.nar_hash)) {
 		return errorResponse(
@@ -743,29 +738,18 @@ export async function handleCdcQuery(
 }
 
 /**
- * Bounds concurrent decompress-and-verify work per isolate. Each in-flight
- * chunk PUT holds the compressed body plus a full CDC_MAX_CHUNK WASM output
- * buffer (~50 MB across the JS and WASM heaps), and the client uploads 8
- * chunks concurrently over one HTTP/2 connection, which lands them on the
- * same isolate — unbounded, a large multi-chunk NAR exceeds the 128 MiB
- * isolate memory limit and every in-flight request dies as a Cloudflare 1102.
- * Queued requests are cheap: acquired before the body is buffered, so their
- * bytes stay in the platform stream, not the JS heap.
- */
-const chunkVerifySlots = new Semaphore(2);
-
-/**
- * Buffer and verify one uploaded chunk under a verify slot: decompress (the
- * bomb guard caps output at the chunker's MAX_CHUNK) and check the raw
- * sha256 against the claimed hash. The raw bytes live only inside the slot;
- * just the length escapes.
+ * Buffer and verify one uploaded chunk under a wasmMemorySlots slot:
+ * decompress (the bomb guard caps output at the chunker's MAX_CHUNK) and
+ * check the raw sha256 against the claimed hash. The slot is taken before
+ * the body is buffered, so queued requests keep their bytes in the platform
+ * stream, not the JS heap; the raw bytes live only inside the slot and just
+ * the length escapes.
  */
 async function verifyChunk(
 	request: Request,
 	hash: string
 ): Promise<{ compressed: Uint8Array; rawLength: number } | Response> {
-	await chunkVerifySlots.acquire();
-	try {
+	return withSlot(wasmMemorySlots, async () => {
 		const compressed = new Uint8Array(await request.arrayBuffer());
 		if (compressed.length === 0) return errorResponse(400, 'Empty chunk body');
 		await initZstd();
@@ -780,9 +764,7 @@ async function verifyChunk(
 			return errorResponse(400, `Chunk hash mismatch: expected ${hash}, got ${actual}`);
 		}
 		return { compressed, rawLength: raw.length };
-	} finally {
-		chunkVerifySlots.release();
-	}
+	});
 }
 
 /**

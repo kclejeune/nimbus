@@ -51,6 +51,7 @@ func pushCmd() *cobra.Command {
 				Cache:                ref.Cache,
 				Jobs:                 jobs,
 				Out:                  os.Stdout,
+				Err:                  os.Stderr,
 				SkipInvalid:          skipInvalid,
 				NoClosure:            noClosure,
 				IgnoreUpstreamFilter: ignoreUpstreamFilter,

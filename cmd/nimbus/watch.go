@@ -47,6 +47,7 @@ func watchStoreCmd() *cobra.Command {
 				Cache:  ref.Cache,
 				Jobs:   jobs,
 				Out:    os.Stdout,
+				Err:    os.Stderr,
 				// Unfinished builds and GC casualties are routine while watching;
 				// skipping them must not fail the run.
 				SkipInvalid: true,
@@ -93,6 +94,7 @@ while COMMAND is still running.`,
 				Cache:  ref.Cache,
 				Jobs:   jobs,
 				Out:    os.Stdout,
+				Err:    os.Stderr,
 				// Unfinished builds and GC casualties are routine while watching;
 				// skipping them must not fail the run.
 				SkipInvalid: true,

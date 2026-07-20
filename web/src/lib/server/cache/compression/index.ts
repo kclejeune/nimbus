@@ -4,9 +4,21 @@
 // uploads to a cache configured with either fall back to zstd — the actual
 // codec is recorded per-NAR, so narinfo output stays correct.
 
+import { Semaphore } from '../platform';
 import { initZstd, zstdCompress } from './zstd';
 
 export { initZstd, zstdDecompress } from './zstd';
+
+/**
+ * Shared per-isolate budget for WASM zstd work. Each compress/decompress
+ * holds tens of MB across the JS and WASM heaps (a 16 MiB chunk verify is
+ * ~50 MB), the Emscripten heap never shrinks, and concurrent requests
+ * multiplexed over one HTTP/2 connection land on the same isolate —
+ * ungated, a large push exceeds the 128 MiB isolate limit and dies as a
+ * Cloudflare 1101/1102. Every heavy call site acquires one slot: chunk
+ * verify, chunk and whole-NAR compression, pull-through decompression.
+ */
+export const wasmMemorySlots = new Semaphore(2);
 export {
 	extensionFor,
 	uploadCompressionFor,

@@ -32,6 +32,9 @@ type Pusher struct {
 	Cache  string
 	Jobs   int
 	Out    io.Writer
+	// Err receives diagnostics (skip warnings, per-path failures) so stdout
+	// stays clean for progress output; falls back to Out when nil.
+	Err io.Writer
 	// SkipInvalid tolerates paths missing from the local store: they are
 	// always skipped (never fail the batch), but without SkipInvalid their
 	// presence makes Push return an error after the valid paths upload.
@@ -62,7 +65,7 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 			invalidErr = fmt.Errorf("skipped %d paths not valid in the local store", len(invalid))
 		}
 		for _, m := range invalid {
-			fmt.Fprintf(p.Out, "%s: skipping %s: not valid in the local store\n", level, m)
+			fmt.Fprintf(p.errw(), "%s: skipping %s: not valid in the local store\n", level, m)
 		}
 	}
 	if len(paths) == 0 {
@@ -114,7 +117,7 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 					if ctx.Err() != nil {
 						return
 					}
-					_, _ = fmt.Fprintf(p.Out, "❌ %s: %v\n", nix.BaseName(info.Path), err)
+					_, _ = fmt.Fprintf(p.errw(), "❌ %s: %v\n", nix.BaseName(info.Path), err)
 					mu.Lock()
 					pathErrs = append(pathErrs, fmt.Errorf("%s: %w", nix.BaseName(info.Path), err))
 					mu.Unlock()
@@ -148,6 +151,13 @@ feed:
 		)
 	}
 	return invalidErr
+}
+
+func (p *Pusher) errw() io.Writer {
+	if p.Err != nil {
+		return p.Err
+	}
+	return p.Out
 }
 
 func (p *Pusher) pathInfos(ctx context.Context, paths []string) ([]nix.PathInfo, error) {
