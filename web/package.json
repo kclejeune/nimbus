@@ -111,7 +111,7 @@
 		"d3-shape": "^3.2.0",
 		"drizzle-kit": "^0.31.10",
 		"layerchart": "^2.0.1",
-		"prettier": "^3.8.3",
+		"prettier": "^3.9.5",
 		"prettier-plugin-svelte": "^4.1.0",
 		"prettier-plugin-tailwindcss": "^0.8.0",
 		"svelte": "^5.56.1",
