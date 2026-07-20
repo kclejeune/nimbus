@@ -61,10 +61,10 @@
 	// Abuse guards for the unauthenticated read path (missing-paths.ts,
 	// pullthrough.ts): a distinct-hash flood bypasses every per-hash defense
 	// (edge 404s, verdict cache, memos), so these bound the amplification a
-	// miss can trigger. Probe: live upstream fetches per client IP — 900/min
-	// is far above any legit client's cold-miss rate (verdict-cached paths
-	// never take budget) while capping outbound fan-out and probe-driven
-	// verdict churn. Absent-verdict: colo-wide cap on read-path D1 primary
+	// miss can trigger. Probe: live upstream fetches per client IP — 1800/min
+	// (30/s) covers a cold unified-endpoint closure walk (verdict-cached
+	// paths never take budget) while capping outbound fan-out and
+	// probe-driven verdict churn. Absent-verdict: colo-wide cap on read-path D1 primary
 	// writes for nonexistent paths — the one write an attacker can mint from
 	// nothing; losing one costs a future re-probe. Ingest: colo-wide cap on
 	// pull-through downloads, each seconds of CPU plus R2/D1 writes.
@@ -82,7 +82,7 @@
 		{
 			"name": "UPSTREAM_PROBE_LIMITER",
 			"namespace_id": "1003",
-			"simple": { "limit": 900, "period": 60 }
+			"simple": { "limit": 1800, "period": 60 }
 		},
 		{
 			"name": "ABSENT_VERDICT_LIMITER",

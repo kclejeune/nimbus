@@ -179,6 +179,10 @@ if (GEO_RESTRICT) {
 
 const ratelimitRules = [
 	{
+		// 5000/10s clears a single honest client's mass-substitution burst:
+		// nix runs up to 25 parallel connections against ~30-60ms edge hits
+		// (400-800 req/s peak), and edge cache hits still count against this
+		// phase. The rule's job is runaway loops and scrapers, not shaping.
 		description: 'cache: per-IP read flood backstop (narinfo + NAR paths)',
 		expression:
 			'(ends_with(http.request.uri.path, ".narinfo") or http.request.uri.path contains "/nar/")',
@@ -187,7 +191,7 @@ const ratelimitRules = [
 		ratelimit: {
 			characteristics: ['ip.src', 'cf.colo.id'],
 			period: 10,
-			requests_per_period: 1000,
+			requests_per_period: 5000,
 			mitigation_timeout: 10
 		}
 	}
