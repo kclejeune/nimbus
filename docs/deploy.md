@@ -161,16 +161,20 @@ root directory to `web` and pushes deploy automatically.
 If you track this repo directly with values in the untracked
 `wrangler.local.jsonc`, CI clones won't have that file and the build fails
 closed at `migrate` (the template's placeholder D1 id). To enable push
-deploys, add a build variable named `WRANGLER_LOCAL_CONFIG_B64` containing:
+deploys, commit your instance config under its own name (hostnames and
+resource ids are not secrets — e.g. `web/wrangler.myname.jsonc`) and add a
+build variable `WRANGLER_LOCAL_CONFIG_PATH` set to that filename (relative
+to `web/`). `scripts/materialize-config.mjs` (a dependency of every deploy
+task) copies it to `wrangler.local.jsonc` before wrangler runs, so config
+changes are just commits — nothing to re-sync. Locally, point the
+auto-detected name at the same file once:
 
 ```bash
-base64 -i web/wrangler.local.jsonc | tr -d '\n'
+cd web && ln -s wrangler.myname.jsonc wrangler.local.jsonc
 ```
 
-`scripts/materialize-config.mjs` (a dependency of every deploy task) writes
-the file from that variable before wrangler runs. Optionally add a
-`WAF_API_TOKEN` build secret so the WAF step applies in CI too; without it
-the step skips with a warning.
+Optionally add a `WAF_API_TOKEN` build secret so the WAF step applies in CI
+too; without it the step skips with a warning.
 
 Build settings: root directory `web`, deploy command `npm run deploy`, and
 non-production branch deploy command `npm run deploy:preview` — it builds
