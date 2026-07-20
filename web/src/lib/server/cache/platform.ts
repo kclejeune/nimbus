@@ -57,25 +57,44 @@ export async function withRetry<T>(
  */
 export const withR2Retry = <T>(op: () => Promise<T>): Promise<T> => withRetry(op);
 
-/** Minimal counting semaphore for bounding concurrent memory-heavy work
- * within an isolate. */
+/**
+ * Minimal counting semaphore for bounding concurrent memory-heavy work
+ * within an isolate. Waiters poll on their own jittered timers rather than
+ * being woken by the releaser: on Workers, each request runs in its own I/O
+ * context, and resolving a promise created in another request's context gets
+ * the continuation canceled — the waiter then hangs with no pending I/O and
+ * the runtime kills its request as hung (Cloudflare error 1101). A timer is
+ * the waiting request's own I/O, so polling is the only context-safe wait.
+ */
 export class Semaphore {
-	private waiters: (() => void)[] = [];
 	private free: number;
 	constructor(slots: number) {
 		this.free = slots;
 	}
-	async acquire(): Promise<void> {
+	tryAcquire(): boolean {
 		if (this.free > 0) {
 			this.free--;
-			return;
+			return true;
 		}
-		await new Promise<void>((resolve) => this.waiters.push(resolve));
+		return false;
+	}
+	async acquire(): Promise<void> {
+		while (!this.tryAcquire()) {
+			await new Promise((r) => setTimeout(r, 25 + Math.random() * 25));
+		}
 	}
 	release(): void {
-		const next = this.waiters.shift();
-		if (next) next();
-		else this.free++;
+		this.free++;
+	}
+}
+
+/** Run fn while holding one slot of sem. */
+export async function withSlot<T>(sem: Semaphore, fn: () => Promise<T> | T): Promise<T> {
+	await sem.acquire();
+	try {
+		return await fn();
+	} finally {
+		sem.release();
 	}
 }
 
