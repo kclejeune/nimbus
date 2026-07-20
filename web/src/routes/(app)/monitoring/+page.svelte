@@ -42,12 +42,19 @@
 			: 0
 	);
 	// Hit rate over narinfo lookups: the request nix actually fans out, and the
-	// one that decides whether this cache was useful.
+	// one that decides whether this cache was useful. `hit` excludes upstream
+	// passthroughs, so this is genuinely "answered from local storage".
 	const narinfoLookups = $derived(
 		traffic ? traffic.narinfo.hit + traffic.narinfo.miss + traffic.narinfo.upstream : 0
 	);
 	const hitRate = $derived(
 		narinfoLookups > 0 ? Math.round((100 * traffic!.narinfo.hit) / narinfoLookups) : null
+	);
+	// Edge-cache effectiveness: of the reads that reached a cacheable store
+	// fetch, how many the edge answered without touching D1 or R2.
+	const edgeLookups = $derived(traffic ? traffic.edge.hit + traffic.edge.origin : 0);
+	const edgeHitRate = $derived(
+		edgeLookups > 0 ? Math.round((100 * traffic!.edge.hit) / edgeLookups) : null
 	);
 	const trafficPoints = $derived(
 		(traffic?.days ?? []).map((d) => ({
@@ -55,6 +62,9 @@
 			value: d.hit + d.miss + d.upstream,
 			delta: d.hit + d.miss + d.upstream
 		}))
+	);
+	const edgePoints = $derived(
+		(traffic?.edgeDays ?? []).map((d) => ({ label: d.date, value: d.hit, delta: d.hit }))
 	);
 
 	const pushTotal = $derived(traffic ? traffic.push.stored + traffic.push.deduplicated : 0);
@@ -68,6 +78,26 @@
 			value: d.stored + d.deduplicated,
 			delta: d.stored + d.deduplicated
 		}))
+	);
+
+	// Chunk-level storage writes: what actually lands in R2 (incl. pull-through).
+	const writes = $derived(traffic?.writes);
+	const chunkTotal = $derived(writes ? writes.stored + writes.deduplicated : 0);
+	const chunkDedupPct = $derived(
+		writes && chunkTotal > 0 ? Math.round((100 * writes.deduplicated) / chunkTotal) : null
+	);
+	const writePoints = $derived(
+		(traffic?.writeDays ?? []).map((d) => ({
+			label: d.date,
+			value: d.storedBytes,
+			delta: d.storedBytes
+		}))
+	);
+
+	// Abuse-guard refusals: nonzero means the rate budgets are actively
+	// deflecting probe/verdict/ingest amplification.
+	const guardTotal = $derived(
+		traffic ? traffic.guards.probe + traffic.guards.verdict + traffic.guards.ingest : 0
 	);
 
 	const unitWord = $derived(
@@ -221,9 +251,14 @@
 		{#if traffic}
 			<div class="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
 				{@render stat(
-					'Hit rate',
+					'Local hit rate',
 					hitRate === null ? '—' : `${hitRate}%`,
-					'narinfo lookups answered locally'
+					'narinfo lookups answered from local storage'
+				)}
+				{@render stat(
+					'Edge cache',
+					edgeHitRate === null ? '—' : `${edgeHitRate}%`,
+					'reads served from the edge cache, skipping D1 and R2'
 				)}
 				{@render stat('narinfo hits', formatCount(traffic.narinfo.hit), 'last 30 days')}
 				{@render stat(
@@ -244,6 +279,27 @@
 					'pushes reusing an already-stored NAR'
 				)}
 				{@render stat('Pushed data', formatBytes(traffic.push.bytes), 'NAR bytes before dedup')}
+				{@render stat(
+					'Data written',
+					writes ? formatBytes(writes.storedBytes) : '—',
+					writes
+						? `${formatCount(writes.stored)} chunks into R2, incl. pull-through`
+						: 'no chunk writes recorded yet'
+				)}
+				{@render stat(
+					'Chunk dedup',
+					chunkDedupPct === null ? '—' : `${chunkDedupPct}%`,
+					writes && writes.dedupBytes > 0
+						? `${formatBytes(writes.dedupBytes)} avoided by chunk reuse`
+						: 'chunks matching already-stored content'
+				)}
+				{@render stat(
+					'Deflected',
+					formatCount(guardTotal),
+					guardTotal > 0
+						? `abuse-guard refusals: ${formatCount(traffic.guards.probe)} probes · ${formatCount(traffic.guards.verdict)} verdicts · ${formatCount(traffic.guards.ingest)} ingests`
+						: 'abuse-guard refusals (probes, verdict writes, ingests)'
+				)}
 			</div>
 
 			<div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
@@ -258,6 +314,16 @@
 					/>
 				</div>
 				<div class="rounded-lg border bg-card p-5">
+					{@render chartCard('Edge cache hits', `${formatCount(traffic.edge.hit)} reads · 30 days`)}
+					<AreaChart
+						points={edgePoints}
+						format={formatCount}
+						deltaFormat={formatCount}
+						deltaLabel="this day"
+						ariaLabel="Edge cache hits per day"
+					/>
+				</div>
+				<div class="rounded-lg border bg-card p-5">
 					{@render chartCard('Push traffic', `${formatCount(pushTotal)} paths · 30 days`)}
 					<AreaChart
 						points={pushPoints}
@@ -265,6 +331,19 @@
 						deltaFormat={formatCount}
 						deltaLabel="this day"
 						ariaLabel="Paths pushed per day"
+					/>
+				</div>
+				<div class="rounded-lg border bg-card p-5">
+					{@render chartCard(
+						'Data written',
+						`${writes ? formatBytes(writes.storedBytes) : '—'} · 30 days`
+					)}
+					<AreaChart
+						points={writePoints}
+						format={formatBytes}
+						deltaFormat={formatBytes}
+						deltaLabel="this day"
+						ariaLabel="Bytes written to storage per day"
 					/>
 				</div>
 			</div>

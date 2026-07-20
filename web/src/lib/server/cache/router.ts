@@ -38,14 +38,15 @@ import {
 import { TtlMemo } from './ttl-memo';
 import { persistUpstreamPath } from './pullthrough';
 import { handleCacheList, handleDestroyPath, handleTokensApi } from './v1-admin';
-import { recordRead, UNIFIED_LABEL } from './metrics';
+import { edgeEvent, recordRead, UNIFIED_LABEL, type EdgeEvent } from './metrics';
 import { extractPublicKey } from '../attic/signing';
 import {
 	keyedNarinfoUrl,
 	PERSIST_CACHE_HEADER,
 	PERSIST_UPSTREAM_HEADER,
 	PREFETCH_MARKER_HEADER,
-	serveStore
+	serveStore,
+	UPSTREAM_MARKER_HEADER
 } from './store';
 import {
 	NO_PERMISSION,
@@ -231,6 +232,19 @@ async function forwardToStore(
 	return stripped;
 }
 
+/** Edge-cache verdict of a store response, from the loopback's CF-Cache-Status. */
+function storeEdge(response: Response): EdgeEvent {
+	return edgeEvent(response.headers.get('CF-Cache-Status'));
+}
+
+/** Strip the internal upstream marker before a response leaves the gateway. */
+function stripUpstreamMarker(response: Response): Response {
+	if (!response.headers.has(UPSTREAM_MARKER_HEADER)) return response;
+	const stripped = new Response(response.body, response);
+	stripped.headers.delete(UPSTREAM_MARKER_HEADER);
+	return stripped;
+}
+
 async function handleNarInfo(
 	request: Request,
 	env: Env,
@@ -257,8 +271,12 @@ async function handleNarInfo(
 		auth.cache.keypair
 	);
 	const response = await forwardToStore(new Request(keyed, request), env, ctx);
-	recordRead(env, 'narinfo', cacheName, { status: response.status });
-	return withCachePolicy(response, auth.cache.is_public === 1);
+	recordRead(env, 'narinfo', cacheName, {
+		status: response.status,
+		viaUpstream: response.headers.has(UPSTREAM_MARKER_HEADER),
+		edge: storeEdge(response)
+	});
+	return withCachePolicy(stripUpstreamMarker(response), auth.cache.is_public === 1);
 }
 
 async function handleNar(
@@ -275,31 +293,47 @@ async function handleNar(
 	const auth = await authorizeCacheRead(request, env, cacheName);
 	if ('response' in auth) return auth.response;
 
-	// Retention is download-driven (like the reference server): touch every
-	// object in this cache backed by the NAR, off the critical path. This must
-	// happen in the gateway — downloads served from the edge cache never reach
-	// the CachedStore entrypoint. shouldTouch coalesces the writes per isolate.
-	if (!head && shouldTouch(cacheName, narHashRaw)) {
-		const touch = db.touchObjectsForNarHash(env.ATTIC_DB, cacheName, narHashRaw).catch(() => {});
-		ctx?.waitUntil(touch);
-	}
-
 	// NARs are content-addressed, so the store request drops the cache name:
 	// every cache referencing a NAR shares one edge entry, and a miss reads R2
-	// once instead of once per cache. Cache-specific concerns stay here: the
-	// visibility header is stamped per request, and a store miss falls back to
-	// the cache's upstreams (passthrough narinfo NAR URLs resolve that way).
+	// once instead of once per cache. The query string is dropped too — no
+	// legit NAR URL carries one, and forwarding it would let a client mint
+	// unlimited distinct edge keys for the same NAR (each a full D1+R2 miss).
+	// Cache-specific concerns stay here: the visibility header is stamped per
+	// request, and a store miss falls back to the cache's upstreams
+	// (passthrough narinfo NAR URLs resolve that way).
 	const shared = new URL(request.url);
 	shared.pathname = `/_nar/${filename}`;
+	shared.search = '';
 	const response = await forwardToStore(new Request(shared, request), env, ctx);
 
 	if (response.status === 404) {
-		const upstreamUrl = await upstreamNarRedirect(env, ctx, auth.cache, filename);
-		recordRead(env, 'nar', cacheName, { status: 404, viaUpstream: !!upstreamUrl });
+		const upstreamUrl = await upstreamNarRedirect(
+			env,
+			ctx,
+			auth.cache,
+			filename,
+			request.headers.get('CF-Connecting-IP')
+		);
+		recordRead(env, 'nar', cacheName, {
+			status: 404,
+			viaUpstream: !!upstreamUrl,
+			edge: storeEdge(response)
+		});
 		if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
 		return response;
 	}
-	recordRead(env, 'nar', cacheName, { status: response.status });
+
+	// Retention is download-driven (like the reference server): touch every
+	// object in this cache backed by the NAR, off the critical path. This must
+	// happen in the gateway — downloads served from the edge cache never reach
+	// the CachedStore entrypoint — and only after the store confirmed the NAR
+	// exists: touching before the read gave nonexistent-hash floods a free
+	// primary write per request, while real NARs stay coalesced by shouldTouch.
+	if (!head && response.ok && shouldTouch(cacheName, narHashRaw)) {
+		const touch = db.touchObjectsForNarHash(env.ATTIC_DB, cacheName, narHashRaw).catch(() => {});
+		ctx?.waitUntil(touch);
+	}
+	recordRead(env, 'nar', cacheName, { status: response.status, edge: storeEdge(response) });
 	return withCachePolicy(
 		withVisibility(new Response(response.body, response), auth.cache.is_public === 1),
 		auth.cache.is_public === 1
@@ -337,7 +371,10 @@ async function handleProxyNarInfo(
 
 	// Known-absent paths short-circuit before any token or D1 work: absence is
 	// token-independent, and mass queries re-ask for every miss.
-	if (isKnownAbsent(storePathHash)) return errorResponse(404, 'Not found', 'NoSuchObject');
+	if (isKnownAbsent(storePathHash)) {
+		recordRead(env, 'narinfo', UNIFIED_LABEL, { status: 404, edge: 'memo' });
+		return errorResponse(404, 'Not found', 'NoSuchObject');
+	}
 
 	const token = await proxyToken(request, env);
 	const session = db.readSession(env.ATTIC_DB);
@@ -357,12 +394,16 @@ async function handleProxyNarInfo(
 		// (nothing local for anyone) plus an upstream miss may record it.
 		if (response.status === 404) {
 			if (candidates.length === 0) recordAbsent(storePathHash);
-			recordRead(env, 'narinfo', UNIFIED_LABEL, { status: 404 });
+			recordRead(env, 'narinfo', UNIFIED_LABEL, { status: 404, edge: storeEdge(response) });
 			return errorResponse(404, 'Not found', 'NoSuchObject');
 		}
 		// A 200 here is upstream content served through the union fallback.
-		recordRead(env, 'narinfo', UNIFIED_LABEL, { status: response.status, viaUpstream: true });
-		return withCachePolicy(response, true);
+		recordRead(env, 'narinfo', UNIFIED_LABEL, {
+			status: response.status,
+			viaUpstream: true,
+			edge: storeEdge(response)
+		});
+		return withCachePolicy(stripUpstreamMarker(response), true);
 	}
 
 	const keyed = new URL(
@@ -374,7 +415,7 @@ async function handleProxyNarInfo(
 		// keypair unavailable: serve unsigned/stored-sig variant unkeyed
 	}
 	const response = await forwardToStore(new Request(keyed, request), env, ctx);
-	recordRead(env, 'narinfo', UNIFIED_LABEL, { status: response.status });
+	recordRead(env, 'narinfo', UNIFIED_LABEL, { status: response.status, edge: storeEdge(response) });
 	return withCachePolicy(response, winner.is_public === 1);
 }
 
@@ -398,12 +439,18 @@ async function handleProxyNar(
 	// with no local winner, so the root needs the same upstream redirect as the
 	// per-cache route — against the union of live caches' upstreams.
 	const upstreamRedirect = async (): Promise<Response | null> => {
-		const url = await upstreamNarRedirect(env, ctx, null, filename);
+		const url = await upstreamNarRedirect(
+			env,
+			ctx,
+			null,
+			filename,
+			request.headers.get('CF-Connecting-IP')
+		);
 		return url ? Response.redirect(url, 302) : null;
 	};
 	if (!winner) {
 		const redirect = await upstreamRedirect();
-		recordRead(env, 'nar', UNIFIED_LABEL, { status: 404, viaUpstream: !!redirect });
+		recordRead(env, 'nar', UNIFIED_LABEL, { status: 404, viaUpstream: !!redirect, edge: 'none' });
 		return redirect ?? errorResponse(404, 'Not found', 'NoSuchObject');
 	}
 
@@ -413,18 +460,24 @@ async function handleProxyNar(
 		ctx?.waitUntil(touch);
 	}
 
-	// Same shared content-addressed edge entry as the per-cache route.
+	// Same shared content-addressed edge entry as the per-cache route, with the
+	// same query-string drop (see handleNar).
 	const shared = new URL(request.url);
 	shared.pathname = `/_nar/${filename}`;
+	shared.search = '';
 	const response = await forwardToStore(new Request(shared, request), env, ctx);
 	if (response.status === 404) {
 		// Deletion race (GC reaped the NAR between resolution and read): the
 		// upstreams may still have it, same as the per-cache route.
 		const redirect = await upstreamRedirect();
-		recordRead(env, 'nar', UNIFIED_LABEL, { status: 404, viaUpstream: !!redirect });
+		recordRead(env, 'nar', UNIFIED_LABEL, {
+			status: 404,
+			viaUpstream: !!redirect,
+			edge: storeEdge(response)
+		});
 		return redirect ?? response;
 	}
-	recordRead(env, 'nar', UNIFIED_LABEL, { status: response.status });
+	recordRead(env, 'nar', UNIFIED_LABEL, { status: response.status, edge: storeEdge(response) });
 	return withCachePolicy(
 		withVisibility(new Response(response.body, response), winner.is_public === 1),
 		winner.is_public === 1

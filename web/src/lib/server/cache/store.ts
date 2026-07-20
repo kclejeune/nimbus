@@ -16,6 +16,7 @@ import * as db from './db';
 import {
 	allLiveUpstreams,
 	fetchUpstreamNarInfo,
+	PROBE_REFUSED,
 	upstreamsForCache,
 	upstreamTtlSecs,
 	type Upstream
@@ -75,7 +76,8 @@ function upstreamNarinfoResponse(
 		headers: {
 			'Content-Type': 'text/x-nix-narinfo',
 			'Cache-Control': upstreamNarinfoCacheControl(hit.upstream),
-			'Cache-Tag': tags
+			'Cache-Tag': tags,
+			[UPSTREAM_MARKER_HEADER]: '1'
 		}
 	});
 	if (hit.upstream.persistInto) {
@@ -96,6 +98,14 @@ function upstreamNarinfoResponse(
  */
 export const PERSIST_CACHE_HEADER = 'X-Nimbus-Persist-Cache';
 export const PERSIST_UPSTREAM_HEADER = 'X-Nimbus-Persist-Upstream';
+
+/**
+ * Internal marker on every upstream passthrough narinfo, so the gateway can
+ * classify the read as `upstream` in metrics regardless of status. Edge-cached
+ * with the entry — correct, since it describes where the content came from —
+ * and stripped by the gateway before the response leaves.
+ */
+export const UPSTREAM_MARKER_HEADER = 'X-Nimbus-Via-Upstream';
 
 /** Cache-Tag attached to narinfo responses; GC purges it on object deletion. */
 export function narinfoTag(cacheName: string, storePathHash: string): string {
@@ -207,7 +217,12 @@ export async function serveStore(
 		segments[0] === '_proxy_upstream' &&
 		segments[1].endsWith('.narinfo')
 	) {
-		return serveRootUpstreamNarInfo(env, ctx, segments[1].slice(0, -'.narinfo'.length));
+		return serveRootUpstreamNarInfo(
+			env,
+			ctx,
+			segments[1].slice(0, -'.narinfo'.length),
+			request.headers.get('CF-Connecting-IP')
+		);
 	}
 	if (segments.length === 2 && segments[1].endsWith('.narinfo')) {
 		return serveNarInfo(request, env, ctx, segments[0], segments[1].slice(0, -'.narinfo'.length));
@@ -265,7 +280,8 @@ async function serveProxyNarInfo(
 async function serveRootUpstreamNarInfo(
 	env: Env,
 	ctx: ExecutionContext | undefined,
-	storePathHash: string
+	storePathHash: string,
+	clientIp: string | null
 ): Promise<Response> {
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
@@ -277,8 +293,15 @@ async function serveRootUpstreamNarInfo(
 
 	const hit =
 		upstreams.length > 0
-			? await fetchUpstreamNarInfo(session, upstreams, storePathHash, ctx)
+			? await fetchUpstreamNarInfo(session, upstreams, storePathHash, ctx, {
+					env,
+					ip: clientIp
+				})
 			: null;
+	// A refused probe budget must not become an edge-cached 404 shared by
+	// every client: errorResponse is no-store, so the refusal dies with this
+	// response.
+	if (hit === PROBE_REFUSED) return errorResponse(404, 'Not found', 'NoSuchObject');
 	if (hit) return withVisibility(upstreamNarinfoResponse(hit, tag), true);
 	const absent = errorResponse(404, 'Not found', 'NoSuchObject');
 	absent.headers.set('Cache-Control', NARINFO_404_CACHE_CONTROL);
@@ -473,7 +496,15 @@ async function serveNarInfo(
 		// persist-mode subscription resolves into this cache (upstreamsForCache
 		// sets persistInto).
 		const upstreams = await upstreamsForCache(session, cache);
-		const hit = await fetchUpstreamNarInfo(session, upstreams, storePathHash, ctx);
+		const hit = await fetchUpstreamNarInfo(session, upstreams, storePathHash, ctx, {
+			env,
+			ip: request.headers.get('CF-Connecting-IP')
+		});
+		// Uncacheable by design (errorResponse is no-store): a budget refusal
+		// must never poison the shared edge cache with a false 404.
+		if (hit === PROBE_REFUSED) {
+			return withVisibility(errorResponse(404, 'Not found', 'NoSuchObject'), isPublic);
+		}
 		if (hit) {
 			return withVisibility(
 				upstreamNarinfoResponse(

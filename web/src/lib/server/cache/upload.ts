@@ -28,7 +28,7 @@ import {
 } from './compression';
 import { findCacheCached } from './cache-lookup';
 import * as db from './db';
-import { recordPush } from './metrics';
+import { recordPush, recordStoreWrite } from './metrics';
 import { bytesToHex } from '../attic/nix-base32';
 import { newDigestStream, readAll, type ExecutionContext } from './platform';
 import { warmNarinfoAfterUpload } from './store';
@@ -214,6 +214,7 @@ async function processNarChunk(
 	const probed = await db.findChunk(db.readSession(env.ATTIC_DB), `sha256:${hash}`, kind);
 	const existing = probed ? await db.tryLockChunk(env.ATTIC_DB, `sha256:${hash}`, kind) : null;
 	if (existing) {
+		recordStoreWrite(env, { deduplicated: true, fileBytes: existing.file_size ?? 0 });
 		return {
 			chunkId: existing.id,
 			locked: true,
@@ -229,6 +230,7 @@ async function processNarChunk(
 	// Content-addressed key: a concurrent upload of the same chunk writes the
 	// same bytes, so racing puts are harmless.
 	await env.CACHE_BUCKET.put(key, compressed.data as unknown as ArrayBuffer);
+	recordStoreWrite(env, { deduplicated: false, fileBytes: compressed.fileSize ?? 0 });
 	return {
 		locked: false,
 		hash,
@@ -551,6 +553,7 @@ export async function handleBufferedUpload(
 
 	const storageKey = storageKeyFor(info.nar_hash, kind);
 	await env.CACHE_BUCKET.put(storageKey, result.data as unknown as ArrayBuffer);
+	recordStoreWrite(env, { deduplicated: false, fileBytes: result.fileSize ?? 0 });
 
 	return createUploadRows(env, info, cacheId, {
 		narSize: result.narSize,
@@ -762,11 +765,13 @@ export async function handleCdcChunkPut(
 		// reaps it before the complete call, the 409 retry re-uploads it. A
 		// stale replica miss just re-stores the same content-addressed bytes,
 		// and the insert below converges on the winning row.
+		recordStoreWrite(env, { deduplicated: true, fileBytes: compressed.length });
 		return json({ ok: true, deduplicated: true });
 	}
 
 	const key = chunkStorageKey(hash, 'zstd');
 	await env.CACHE_BUCKET.put(key, compressed as unknown as ArrayBuffer);
+	recordStoreWrite(env, { deduplicated: false, fileBytes: compressed.length });
 	// A concurrent PUT of the same chunk stored the same bytes; whichever row
 	// wins the unique index describes them.
 	const inserted = await db.insertChunk(env.ATTIC_DB, {

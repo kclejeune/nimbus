@@ -53,6 +53,16 @@
 	// (router.ts) — 300/min/IP is ~25x one login flow's polling rate, so even
 	// a shared/CGNAT IP with many simultaneous logins never trips it, while
 	// an abuser is still capped at ~5 primary ops/sec/IP.
+	// Abuse guards for the unauthenticated read path (missing-paths.ts,
+	// pullthrough.ts): a distinct-hash flood bypasses every per-hash defense
+	// (edge 404s, verdict cache, memos), so these bound the amplification a
+	// miss can trigger. Probe: live upstream fetches per client IP — 900/min
+	// is far above any legit client's cold-miss rate (verdict-cached paths
+	// never take budget) while capping outbound fan-out and probe-driven
+	// verdict churn. Absent-verdict: colo-wide cap on read-path D1 primary
+	// writes for nonexistent paths — the one write an attacker can mint from
+	// nothing; losing one costs a future re-probe. Ingest: colo-wide cap on
+	// pull-through downloads, each seconds of CPU plus R2/D1 writes.
 	"ratelimits": [
 		{
 			"name": "PREFETCH_LIMITER",
@@ -63,6 +73,21 @@
 			"name": "DEVICE_AUTH_LIMITER",
 			"namespace_id": "1002",
 			"simple": { "limit": 300, "period": 60 }
+		},
+		{
+			"name": "UPSTREAM_PROBE_LIMITER",
+			"namespace_id": "1003",
+			"simple": { "limit": 900, "period": 60 }
+		},
+		{
+			"name": "ABSENT_VERDICT_LIMITER",
+			"namespace_id": "1004",
+			"simple": { "limit": 1200, "period": 60 }
+		},
+		{
+			"name": "INGEST_LIMITER",
+			"namespace_id": "1005",
+			"simple": { "limit": 60, "period": 60 }
 		}
 	],
 	"vars": {

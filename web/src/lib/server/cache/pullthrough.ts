@@ -26,6 +26,7 @@ import { parseNarInfo } from '../attic/narinfo';
 import { bytesToHex, sha256HexDigest } from '../attic/nix-base32';
 import { initZstd, uploadCompressionFor, zstdDecompress } from './compression';
 import * as db from './db';
+import { recordGuard } from './metrics';
 import {
 	findExistingPaths,
 	PERSIST_MAX_COMPRESSED_BYTES,
@@ -61,6 +62,22 @@ const INGEST_MEMO_MAX_ENTRIES = 10_000;
 const recentIngests = new TtlMemo<true>(INGEST_COOLDOWN_MS, INGEST_MEMO_MAX_ENTRIES);
 
 /**
+ * One unit of colo-wide pull-through budget. Fails closed on binding errors
+ * (ingestion is speculative background work, like prefetch); an absent
+ * binding (dev/tests) is unlimited.
+ */
+async function takeIngestBudget(env: Env): Promise<boolean> {
+	if (!env.INGEST_LIMITER) return true;
+	try {
+		const { success } = await env.INGEST_LIMITER.limit({ key: 'ingest' });
+		if (!success) recordGuard(env, 'ingest');
+		return success;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Ingest one upstream-served path into `cacheName`. Best-effort and
  * idempotent: failures are logged and the passthrough keeps serving; the next
  * edge revalidation retriggers. Runs under the GATEWAY's ctx.waitUntil (the
@@ -83,6 +100,17 @@ export async function persistUpstreamPath(
 	const memoKey = `${cacheName}:${storePathHash}`;
 	if (recentIngests.get(memoKey)) return;
 	recentIngests.set(memoKey, true);
+
+	// Colo-wide budget before any D1 work: ingest markers ride anonymous read
+	// traffic, and each ingest costs seconds of CPU plus R2/D1 writes — a
+	// flood of distinct upstream-present paths must not schedule unbounded
+	// downloads. A refusal is not a cooldown (the memo is cleared), so later
+	// re-asks retry once the window rolls; ingestion stays best-effort either
+	// way.
+	if (!(await takeIngestBudget(env))) {
+		recentIngests.delete(memoKey);
+		return;
+	}
 
 	try {
 		// The persist marker rode an edge-cached response, so re-check the

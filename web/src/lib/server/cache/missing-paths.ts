@@ -15,6 +15,7 @@
 
 import { parseNarInfo, parsedNarInfoSignatureValid, type ParsedNarInfo } from '../attic/narinfo';
 import { dbBatch, readSession } from './db';
+import { recordGuard } from './metrics';
 import { type ExecutionContext } from './platform';
 import { TtlMemo } from './ttl-memo';
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
@@ -253,17 +254,85 @@ const recentVerdictWrites = new TtlMemo<Verdict>(
 	VERDICT_WRITE_MEMO_MAX_ENTRIES
 );
 
+// --- read-path abuse guards -------------------------------------------------
+// Every per-hash defense (edge-cached 404s, the verdict cache, the memos) is
+// keyed by the hash, so a distinct-hash flood bypasses them all: each miss
+// would fan out to live upstream fetches and an absent-verdict primary write.
+// These budgets bound that amplification. The batch push path
+// (filterUpstreamPaths) is authenticated and keeps its own unguarded writes.
+
+/** What read-path guards need; omitted (tests, batch callers) = unguarded. */
+export interface ProbeGuard {
+	env: Env;
+	/** Client IP keying the probe budget; null degrades to a shared key. */
+	ip: string | null;
+}
+
+/** Distinguishes "budget refused" from a genuine miss, so callers emit an
+ *  uncacheable 404 instead of poisoning the shared edge cache (narinfo) or
+ *  the redirect memo (NARs) with false negatives that would outlive the
+ *  refusal. */
+export const PROBE_REFUSED = Symbol('upstream probe budget refused');
+
+/**
+ * One unit of per-IP upstream-fetch budget for an edge-missed read. Fails
+ * open (binding absent in dev/tests, or erroring): a refusal 404s paths that
+ * exist upstream, so this is a generous abuse backstop, not admission
+ * control.
+ */
+async function takeProbeBudget(guard: ProbeGuard | undefined): Promise<boolean> {
+	const limiter = guard?.env.UPSTREAM_PROBE_LIMITER;
+	if (!limiter) return true;
+	try {
+		const { success } = await limiter.limit({ key: `probe:${guard.ip ?? 'unknown'}` });
+		if (!success) recordGuard(guard.env, 'probe');
+		return success;
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * Colo-wide budget for absent-verdict writes from the read path. An absent
+ * row only saves a future re-probe, while unbounded absent writes are how a
+ * distinct-hash flood reaches the D1 primary and permanently bloats
+ * upstream_check — so this fails closed (the write is optional cache-fill).
+ */
+async function takeAbsentVerdictBudget(env: Env): Promise<boolean> {
+	if (!env.ABSENT_VERDICT_LIMITER) return true;
+	try {
+		const { success } = await env.ABSENT_VERDICT_LIMITER.limit({ key: 'absent-verdict' });
+		if (!success) recordGuard(env, 'verdict');
+		return success;
+	} catch {
+		return false;
+	}
+}
+
 function recordVerdictDeferred(
 	db: D1,
 	ctx: ExecutionContext | undefined,
 	upstreamId: number,
 	hash: string,
-	verdict: Verdict
+	verdict: Verdict,
+	env?: Env
 ): void {
+	// Attacker-shaped keys (arbitrarily deep fake nar paths) must not become
+	// permanent rows; legit keys stay well under this (a 32-char hash, or
+	// nar/<hash>/sha256:<hex>.nar).
+	if (hash.length > 256) return;
 	const key = `${upstreamId}:${hash}`;
 	if (recentVerdictWrites.get(key) === verdict) return;
 	recentVerdictWrites.set(key, verdict);
-	const write = recordVerdicts(db, upstreamId, [{ hash, verdict }]).catch(() => {});
+	const write = (async () => {
+		if (verdict === VERDICT_ABSENT && env && !(await takeAbsentVerdictBudget(env))) {
+			// Undo the coalesce marker so an organic miss can record once the
+			// budget window rolls.
+			recentVerdictWrites.delete(key);
+			return;
+		}
+		await recordVerdicts(db, upstreamId, [{ hash, verdict }]);
+	})().catch(() => {});
 	ctx?.waitUntil(write);
 }
 
@@ -383,12 +452,17 @@ export async function fetchUpstreamNarInfo(
 	db: D1,
 	upstreams: Upstream[],
 	storePathHash: string,
-	ctx: ExecutionContext | undefined
-): Promise<{ text: string; upstream: Upstream } | null> {
+	ctx: ExecutionContext | undefined,
+	guard?: ProbeGuard
+): Promise<{ text: string; upstream: Upstream } | null | typeof PROBE_REFUSED> {
 	const cached = await cachedVerdictsAcrossUpstreams(db, upstreams, storePathHash);
+	let allowed: boolean | undefined;
 	for (const upstream of upstreams) {
 		const verdict = cached.get(upstream.id);
 		if (verdict === VERDICT_ABSENT) continue;
+		// Every non-absent case fetches the upstream live (narinfo bodies are
+		// never stored in D1), so the whole loop rides one budget take.
+		if (!(allowed ??= await takeProbeBudget(guard))) return PROBE_REFUSED;
 
 		try {
 			const res = await fetch(`${upstream.url}/${storePathHash}.narinfo`);
@@ -402,13 +476,13 @@ export async function fetchUpstreamNarInfo(
 				// skipped upstreams already known absent.
 				const fresh = await classifyNarinfo(upstream, text);
 				if (verdict !== fresh) {
-					recordVerdictDeferred(db, ctx, upstream.id, storePathHash, fresh);
+					recordVerdictDeferred(db, ctx, upstream.id, storePathHash, fresh, guard?.env);
 				}
 				if (fresh === VERDICT_ABSENT) continue;
 				return { text, upstream };
 			}
 			if (res.status === 404) {
-				recordVerdictDeferred(db, ctx, upstream.id, storePathHash, VERDICT_ABSENT);
+				recordVerdictDeferred(db, ctx, upstream.id, storePathHash, VERDICT_ABSENT, guard?.env);
 			} else {
 				// Unexpected status (rate limit, block, outage): worth surfacing,
 				// since the caller silently treats it as a miss.
@@ -433,20 +507,23 @@ export async function findUpstreamNar(
 	db: D1,
 	upstreams: Upstream[],
 	narPath: string,
-	ctx: ExecutionContext | undefined
-): Promise<string | null> {
+	ctx: ExecutionContext | undefined,
+	guard?: ProbeGuard
+): Promise<string | null | typeof PROBE_REFUSED> {
 	const key = `nar:${narPath}`;
 	const cached = await cachedVerdictsAcrossUpstreams(db, upstreams, key);
+	let allowed: boolean | undefined;
 	for (const upstream of upstreams) {
 		const url = `${upstream.url}/${narPath}`;
 		const verdict = cached.get(upstream.id);
 		if (verdict === VERDICT_ABSENT) continue;
 		if (verdict !== undefined) return url;
+		if (!(allowed ??= await takeProbeBudget(guard))) return PROBE_REFUSED;
 		// No signature check on NARs: the client verifies the downloaded bytes
 		// against the NarHash of the (signature-checked) narinfo that named them.
 		const probed = await probeUpstream(upstream, key);
 		if (probed !== null) {
-			recordVerdictDeferred(db, ctx, upstream.id, key, probed);
+			recordVerdictDeferred(db, ctx, upstream.id, key, probed, guard?.env);
 		}
 		if (probed === VERDICT_PRESENT) return url;
 	}
@@ -481,7 +558,8 @@ export async function upstreamNarRedirect(
 	env: Env,
 	ctx: ExecutionContext | undefined,
 	cache: { id: number; name: string } | null,
-	filename: string
+	filename: string,
+	ip?: string | null
 ): Promise<string | null> {
 	const key = `${cache ? cache.name : '~'}:${filename}`;
 	const cached = narRedirectMemo.get(key);
@@ -490,7 +568,13 @@ export async function upstreamNarRedirect(
 	const upstreams = cache
 		? await upstreamsForCache(session, cache)
 		: await allLiveUpstreams(session);
-	const url = await findUpstreamNar(session, upstreams, `nar/${filename}`, ctx);
+	const url = await findUpstreamNar(session, upstreams, `nar/${filename}`, ctx, {
+		env,
+		ip: ip ?? null
+	});
+	// A refused budget is not a verdict: skip the memo so organic requests
+	// keep resolving once the window rolls.
+	if (url === PROBE_REFUSED) return null;
 	narRedirectMemo.set(key, url);
 	return url;
 }

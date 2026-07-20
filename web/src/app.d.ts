@@ -59,6 +59,13 @@ declare global {
 				/** Colo-wide backstop for the unauthenticated CLI device-auth
 				 * endpoints (the only anonymous D1-primary writes). */
 				DEVICE_AUTH_LIMITER?: RateLimit;
+				/** Per-IP budget for live upstream fetches on edge-missed reads
+				 * (missing-paths.ts); unbound = unguarded. */
+				UPSTREAM_PROBE_LIMITER?: RateLimit;
+				/** Colo-wide cap on read-path absent-verdict primary writes. */
+				ABSENT_VERDICT_LIMITER?: RateLimit;
+				/** Colo-wide cap on pull-through ingests (pullthrough.ts). */
+				INGEST_LIMITER?: RateLimit;
 				/** Analytics Engine dataset for read-path traffic metrics
 				 * (narinfo/NAR hit/miss/upstream); unbound = metrics off. */
 				CACHE_METRICS?: AnalyticsEngineDataset;
