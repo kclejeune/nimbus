@@ -51,7 +51,7 @@ export interface GcStats {
 	/** Advisory: live objects whose References are neither local nor covered
 	 * by an upstream verdict — closures Nix could fail to substitute. */
 	incomplete_closure_objects: number;
-	/** Never-probed dangling refs classified against upstreams this run. */
+	/** Uncovered dangling refs run through upstream classification this run. */
 	integrity_refs_probed: number;
 	refs_synced: number;
 	narinfo_tags_purged: number;
@@ -961,28 +961,39 @@ async function prunePinRevisions(db: D1, stats: GcStats): Promise<void> {
 	}
 }
 
-/** Never-probed dangling refs classified per run — sized to one
- * filterUpstreamPaths probe budget, so a large backlog converges over a few
- * runs without eating the invocation's subrequest budget. */
+/** The incomplete-closure predicate shared by the probe, count, and example
+ * queries. */
+const INCOMPLETE_CLOSURE_WHERE =
+	'FROM object_ref r ' +
+	'JOIN object o ON o.id = r.object_id ' +
+	'WHERE r.child_id IS NULL AND o.detached_at IS NULL ' +
+	'AND NOT EXISTS (SELECT 1 FROM upstream_check uc ' +
+	'WHERE uc.store_path_hash = r.ref_hash AND uc.present <> 0)';
+
+/** Uncovered refs (re)classified per run — sized to one filterUpstreamPaths
+ * probe budget, so a large backlog converges over a few runs without eating
+ * the invocation's subrequest budget. */
 const INTEGRITY_PROBE_LIMIT = 250;
 
 /**
- * Read-repair for the integrity report: probe dangling refs no upstream has
- * ever been asked about and record the verdicts (filterUpstreamPaths).
- * Without this the report never converges — it only reads cached verdicts,
- * and nothing on the serve or push path asks upstreams about references of
- * already-pushed objects, so upstream-covered refs are flagged forever (and
- * re-flagged whenever their verdicts are pruned). Only never-probed refs are
- * selected: refs with a live absent verdict are already classified, and
- * skipping them keeps a genuinely-broken backlog from starving the window.
+ * Read-repair for the integrity report: run still-uncovered dangling refs
+ * through filterUpstreamPaths, which probes each upstream lacking a fresh
+ * verdict for a ref and records the results. Without this the report never
+ * converges — it only reads cached verdicts, and nothing on the serve or
+ * push path asks upstreams about references of already-pushed objects, so
+ * upstream-covered refs would be flagged forever (and re-flagged whenever
+ * their verdicts are pruned). Selection shares the report's own predicate,
+ * least-recently-checked refs first, so never-probed refs lead and a
+ * genuinely-broken backlog cannot starve the window; refs whose absent
+ * verdicts are still fresh cost only the cached-verdict read.
  */
 async function probeUncoveredRefs(db: D1, stats: GcStats): Promise<void> {
 	const { results } = await db
 		.prepare(
-			'SELECT DISTINCT r.ref_hash AS h FROM object_ref r ' +
-				'JOIN object o ON o.id = r.object_id ' +
-				'WHERE r.child_id IS NULL AND o.detached_at IS NULL ' +
-				'AND NOT EXISTS (SELECT 1 FROM upstream_check uc WHERE uc.store_path_hash = r.ref_hash) ' +
+			`SELECT r.ref_hash AS h ${INCOMPLETE_CLOSURE_WHERE} ` +
+				'GROUP BY r.ref_hash ' +
+				'ORDER BY (SELECT MAX(uc2.checked_at) FROM upstream_check uc2 ' +
+				'WHERE uc2.store_path_hash = r.ref_hash) ' +
 				`LIMIT ${INTEGRITY_PROBE_LIMIT}`
 		)
 		.all<{ h: string }>();
@@ -997,14 +1008,6 @@ async function probeUncoveredRefs(db: D1, stats: GcStats): Promise<void> {
 	stats.integrity_refs_probed = results.length;
 }
 
-/** The incomplete-closure predicate shared by the count and example queries. */
-const INCOMPLETE_CLOSURE_WHERE =
-	'FROM object_ref r ' +
-	'JOIN object o ON o.id = r.object_id ' +
-	'WHERE r.child_id IS NULL AND o.detached_at IS NULL ' +
-	'AND NOT EXISTS (SELECT 1 FROM upstream_check uc ' +
-	'WHERE uc.store_path_hash = r.ref_hash AND uc.present <> 0)';
-
 /**
  * Advisory closure-completeness monitor (the cachix invariant, adapted to
  * the redirect design): count live objects with a Reference that is neither
@@ -1014,8 +1017,10 @@ const INCOMPLETE_CLOSURE_WHERE =
  */
 async function closureIntegrityReport(db: D1, stats: GcStats): Promise<GcIntegritySummary | null> {
 	try {
-		// Verdict writes happen on dry runs too: the rows are the same probe
-		// cache any read-path request fills, not GC state.
+		// Swallowed separately from the outer catch: a failed probe must not
+		// null the report, which still counts fine from cached verdicts. Runs
+		// on dry runs too — verdict rows are the same probe cache any
+		// read-path request fills, not GC state.
 		await probeUncoveredRefs(db, stats).catch((e) =>
 			console.warn(`gc: integrity ref probe failed: ${e}`)
 		);
