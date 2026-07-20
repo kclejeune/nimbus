@@ -101,22 +101,23 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 	queue := make(chan nix.PathInfo)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var firstErr error
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var pathErrs []error
 
 	for range jobs {
 		wg.Go(func() {
 			for info := range queue {
 				if err := p.uploadOne(ctx, info); err != nil {
-					mu.Lock()
-					if firstErr == nil {
-						firstErr = fmt.Errorf("%s: %w", nix.BaseName(info.Path), err)
-						cancel()
+					// Context cancellation (Ctrl-C) ends the worker; any other
+					// failure is per-path — report it like the ✅ line, keep
+					// draining the queue, and aggregate for the exit status
+					// instead of abandoning every path still pending.
+					if ctx.Err() != nil {
+						return
 					}
+					_, _ = fmt.Fprintf(p.Out, "❌ %s: %v\n", nix.BaseName(info.Path), err)
+					mu.Lock()
+					pathErrs = append(pathErrs, fmt.Errorf("%s: %w", nix.BaseName(info.Path), err))
 					mu.Unlock()
-					return
 				}
 			}
 		})
@@ -136,8 +137,15 @@ feed:
 	}
 	close(queue)
 	wg.Wait()
-	if firstErr != nil {
-		return firstErr
+	if len(pathErrs) > 0 {
+		// Per-path detail already printed as ❌ lines; the summary wraps the
+		// first error so errors.As classification (exit codes) still works.
+		return fmt.Errorf(
+			"%d of %d paths failed; first: %w",
+			len(pathErrs),
+			len(missing),
+			pathErrs[0],
+		)
 	}
 	return invalidErr
 }

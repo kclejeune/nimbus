@@ -3,7 +3,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
@@ -58,8 +60,26 @@ server entirely.`,
 		fang.WithVersion(version),
 		fang.WithCommit(commit),
 	); err != nil {
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
+}
+
+// exitCode classifies failures sysexits-style so CI can tell "retry the job"
+// from "fix your credentials/config" without parsing error text.
+func exitCode(err error) int {
+	var apiErr *api.Error
+	if errors.As(err, &apiErr) {
+		switch {
+		case apiErr.Status >= 500 || apiErr.Status == http.StatusTooManyRequests:
+			return 75 // EX_TEMPFAIL: transient server trouble
+		case apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden:
+			return 77 // EX_NOPERM: token missing, expired, or underprivileged
+		}
+	}
+	if errors.Is(err, config.ErrConfig) {
+		return 78 // EX_CONFIG: no or unknown server configured
+	}
+	return 1
 }
 
 func loadConfig() (*config.Config, error) {
@@ -86,8 +106,8 @@ func resolveCache(ref string) (*config.CacheRef, *api.Client, error) {
 func requireToken(ref *config.CacheRef) error {
 	if strings.TrimSpace(ref.Server.Token) == "" {
 		return fmt.Errorf(
-			"no auth token for server %q (%s); run `nimbus login` or set %s",
-			ref.ServerName, ref.Server.Endpoint, config.TokenEnv,
+			"%w: no auth token for server %q (%s); run `nimbus login %s <endpoint>` or set %s",
+			config.ErrConfig, ref.ServerName, ref.Server.Endpoint, ref.ServerName, config.TokenEnv,
 		)
 	}
 	return nil

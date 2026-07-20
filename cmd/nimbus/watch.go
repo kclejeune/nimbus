@@ -332,6 +332,14 @@ func pushSettled(ctx context.Context, pusher *push.Pusher, pending map[string]ti
 	slices.Sort(due)
 	if err := pusher.Push(ctx, due); err != nil {
 		fmt.Fprintf(os.Stderr, "push: %v\n", err)
+		// Re-queue with fresh timestamps so a transient outage retries after
+		// the next debounce window instead of dropping the paths for the
+		// watcher's lifetime. Already-pushed paths cost one get-missing-paths
+		// dedup; a persistent failure re-reports once per settle cycle.
+		now := time.Now()
+		for _, path := range due {
+			pending[path] = now
+		}
 	}
 }
 

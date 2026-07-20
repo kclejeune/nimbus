@@ -16,6 +16,11 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 )
 
+// ErrConfig tags configuration-resolution failures (no server, unknown
+// server) so main can map them to a distinct exit code without string
+// matching.
+var ErrConfig = errors.New("configuration error")
+
 // Environment configuration. Any config field can be set or overridden with
 // NIMBUS_-prefixed variables mirroring the file's shape:
 //
@@ -240,8 +245,10 @@ func (c *Config) ResolveServer(name string) (string, Server, error) {
 						name = only
 					}
 				} else {
-					return "", Server{}, errors.New(
-						"no default server configured; name one explicitly, run `nimbus login`, or set " + EndpointEnv,
+					return "", Server{}, fmt.Errorf(
+						"%w: no default server configured; name one explicitly, run `nimbus login NAME ENDPOINT`, or set %s",
+						ErrConfig,
+						EndpointEnv,
 					)
 				}
 			}
@@ -249,7 +256,8 @@ func (c *Config) ResolveServer(name string) (string, Server, error) {
 		var ok bool
 		if server, ok = c.Servers[name]; !ok {
 			return "", Server{}, fmt.Errorf(
-				"unknown server %q; run `nimbus login %s <endpoint>` first",
+				"%w: unknown server %q; run `nimbus login %s <endpoint>` first",
+				ErrConfig,
 				name,
 				name,
 			)
