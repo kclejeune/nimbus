@@ -51,27 +51,46 @@
 	// 	{ "pattern": "cache.example.com", "custom_domain": true }
 	// ],
 
-	// Colo-scoped, eventually-consistent rate limiters (best-effort backstops,
-	// not accounting), sized generously: their job is stopping runaway
-	// pathology, not shaping legitimate traffic. Prefetch: speculative
-	// loopback fan-out across every isolate in a colo (guardrail block in
-	// store.ts) — each warm costs ~2 replica reads and zero primary work, so
-	// 100/sec/colo is still trivial load while keeping prefetch effective
-	// under a large cold mass query. Device-auth: the only unauthenticated
-	// endpoints that touch the D1 primary, keyed per client IP + endpoint
-	// (router.ts) — 300/min/IP is ~25x one login flow's polling rate, so even
-	// a shared/CGNAT IP with many simultaneous logins never trips it, while
-	// an abuser is still capped at ~5 primary ops/sec/IP.
+	// Eventually-consistent rate limiters (best-effort backstops, not
+	// accounting). Every one is scoped PER COLO, not per instance — so the
+	// ceiling a limit actually buys is `limit x colos the traffic can reach`,
+	// and the geo gate in scripts/deploy-waf.mjs admits NA+SA+EU, well over
+	// 100 of them. Size against that product, not against the number written
+	// here: a distributed flood is precisely the threat these exist for, and
+	// it arrives spread across colos by construction.
+	//
+	// Prefetch: speculative loopback fan-out across every isolate in a colo
+	// (guardrail block in store.ts). The most permissive of the set on purpose
+	// — each warm is ~2 replica reads and zero primary work, and prefetch is
+	// off entirely unless PREFETCH_DEPTH is set — so the colo multiplier is
+	// affordable here in a way it is not below.
+	// Device-auth: the only unauthenticated endpoints that touch the D1
+	// primary, keyed per client IP + endpoint (router.ts) — 300/min/IP is ~25x
+	// one login flow's polling rate, so even a shared/CGNAT IP with many
+	// simultaneous logins never trips it, while an abuser is capped at ~5
+	// primary ops/sec/IP. Keyed per IP, so not colo-multiplied in practice.
+	//
 	// Abuse guards for the unauthenticated read path (missing-paths.ts,
 	// pullthrough.ts): a distinct-hash flood bypasses every per-hash defense
 	// (edge 404s, verdict cache, memos), so these bound the amplification a
-	// miss can trigger. Probe: live upstream fetches per client IP — 1800/min
-	// (30/s) covers a cold unified-endpoint closure walk (verdict-cached
-	// paths never take budget) while capping outbound fan-out and
-	// probe-driven verdict churn. Absent-verdict: colo-wide cap on read-path D1 primary
-	// writes for nonexistent paths — the one write an attacker can mint from
-	// nothing; losing one costs a future re-probe. Ingest: colo-wide cap on
-	// pull-through downloads, each seconds of CPU plus R2/D1 writes.
+	// miss can trigger.
+	// Probe: live upstream fetches per client IP — 1800/min (30/s) covers a
+	// cold unified-endpoint closure walk (verdict-cached paths never take
+	// budget) while capping outbound fan-out and probe-driven verdict churn.
+	// Absent-verdict: read-path D1 primary writes for nonexistent paths — the
+	// one write an attacker can mint from nothing. 60/min/colo is ~7k/min
+	// across a continental flood. The bound is cheap: an absent verdict only
+	// saves a future re-probe, a refusal defers it one window, and a flood's
+	// hashes never recur to benefit anyway.
+	// Ingest: pull-through downloads, each seconds of CPU plus R2 Class A and
+	// D1 writes — the most expensive single operation an anonymous request can
+	// trigger, and the one place the colo multiplier is knowingly accepted.
+	// Left generous because the throttle falls on legitimate use first: a cold
+	// pull of a large closure through a persist-mode upstream ingests at this
+	// rate in the client's colo, so a low limit means hours of repeated edge
+	// re-asks before content lands locally (a refusal is safe — the passthrough
+	// keeps serving by redirect — just slow). Lower it if you rely on
+	// pull-through little and want the flood ceiling tighter.
 	"ratelimits": [
 		{
 			"name": "PREFETCH_LIMITER",
@@ -91,7 +110,7 @@
 		{
 			"name": "ABSENT_VERDICT_LIMITER",
 			"namespace_id": "1004",
-			"simple": { "limit": 1200, "period": 60 }
+			"simple": { "limit": 60, "period": 60 }
 		},
 		{
 			"name": "INGEST_LIMITER",
@@ -125,6 +144,13 @@
 	// the gateway in router.ts. The monitoring page queries this dataset via
 	// the Analytics Engine SQL API when CF_ACCOUNT_ID + CF_ANALYTICS_TOKEN
 	// (secret) are configured; without them the worker still writes points.
+	//
+	// One read point per gateway invocation, edge hits included — so this is
+	// the only point stream that scales 1:1 with request volume, and at high
+	// sustained read rates it becomes a real line item. Set the
+	// CACHE_METRICS_SAMPLE var to N to record 1-in-N reads weighted by N
+	// (cache/metrics.ts); the monitoring page's totals stay correct because
+	// the query weights by double1. Push/chunk/guard points are never sampled.
 	"analytics_engine_datasets": [
 		{
 			"binding": "CACHE_METRICS",
