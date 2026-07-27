@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS cache (
     retention_max_bytes INTEGER -- size budget in compressed bytes; NULL = unlimited
 );
 
-CREATE INDEX IF NOT EXISTS idx_cache_name ON cache(name);
+-- No index on name: the UNIQUE constraint's autoindex already serves lookups
+-- (a separate idx_cache_name was pure write cost; dropped 2026-07-27).
 CREATE INDEX IF NOT EXISTS idx_cache_deleted ON cache(deleted_at);
 
 -- Instance-level upstream registry: trust (URL + public key + TTL) is
@@ -58,10 +59,11 @@ CREATE TABLE IF NOT EXISTS object_ref (
     PRIMARY KEY (object_id, ref_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_object_ref_ref_hash ON object_ref(ref_hash);
+-- Also the index for dangling edges awaiting resolution: every consumer of
+-- those is driven by `child_id IS NULL`, which this serves. (A partial
+-- idx_object_ref_unresolved(ref_hash) WHERE child_id IS NULL was never chosen
+-- by the planner and was dropped 2026-07-27.)
 CREATE INDEX IF NOT EXISTS idx_object_ref_child ON object_ref(child_id);
--- Dangling edges awaiting resolution (referenced path not yet pushed).
-CREATE INDEX IF NOT EXISTS idx_object_ref_unresolved ON object_ref(ref_hash)
-    WHERE child_id IS NULL;
 
 -- Named pins (cachix parity): a pin is a name whose gc_root rows are its
 -- revision history (newest = current). keep_revisions / keep_days prune old
@@ -117,6 +119,10 @@ CREATE TABLE IF NOT EXISTS upstream_check (
 );
 -- GC's closure-integrity report probes verdicts by hash alone.
 CREATE INDEX IF NOT EXISTS idx_upstream_check_hash ON upstream_check(store_path_hash);
+-- No (present, checked_at) index for GC's nightly prune: it would bill a
+-- written row on every verdict write to save one nightly scan of a table
+-- holding ~90 days of them, and writes cost ~1000x reads (see
+-- migrations/2026-07-27-index-cleanup.sql).
 
 -- NAR table (content-addressed)
 CREATE TABLE IF NOT EXISTS nar (
@@ -163,7 +169,8 @@ CREATE TABLE IF NOT EXISTS object (
     UNIQUE(cache_id, store_path_hash)
 );
 
-CREATE INDEX IF NOT EXISTS idx_object_cache_hash ON object(cache_id, store_path_hash);
+-- No (cache_id, store_path_hash) index: the UNIQUE constraint's autoindex is
+-- exactly that (a duplicate idx_object_cache_hash was dropped 2026-07-27).
 CREATE INDEX IF NOT EXISTS idx_object_nar ON object(nar_id);
 -- Store-path browsing: order/filter by date or name within a cache.
 CREATE INDEX IF NOT EXISTS idx_object_cache_created ON object(cache_id, created_at);
@@ -217,7 +224,9 @@ CREATE TABLE IF NOT EXISTS device_auth (
     expires_at INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_device_auth_user_code ON device_auth(user_code);
+-- No index on user_code: the UNIQUE constraint's autoindex serves it. The
+-- expiry sweep needs one, though — this table takes unauthenticated inserts.
+CREATE INDEX IF NOT EXISTS idx_device_auth_expires ON device_auth(expires_at);
 
 -- Migrations tracking table
 CREATE TABLE IF NOT EXISTS _migrations (

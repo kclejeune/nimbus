@@ -8,7 +8,7 @@
 // next (retention deletes objects -> orphans NARs -> orphans chunks -> R2).
 
 import { chunkKey, dbRun, PARAM_BATCH, runBatched } from './db';
-import { allLiveUpstreams, filterUpstreamPaths } from './missing-paths';
+import { allLiveUpstreams, filterUpstreamPaths, VERDICT_ABSENT } from './missing-paths';
 import { type ExecutionContext } from './platform';
 import { narinfoTag } from './store';
 
@@ -972,7 +972,7 @@ const INCOMPLETE_CLOSURE_WHERE =
 	'WHERE r.child_id IS NULL AND o.detached_at IS NULL ' +
 	'AND o.created_at < ?1 ' +
 	'AND NOT EXISTS (SELECT 1 FROM upstream_check uc ' +
-	'WHERE uc.store_path_hash = r.ref_hash AND uc.present <> 0)';
+	`WHERE uc.store_path_hash = r.ref_hash AND uc.present <> ${VERDICT_ABSENT})`;
 
 /** Sized to outlast any real push that spans the nightly run. */
 const INTEGRITY_PUSH_GRACE_MS = 6 * 60 * 60 * 1000;
@@ -1167,7 +1167,12 @@ async function reapOrphans(env: Env, stats: GcStats): Promise<void> {
 }
 
 /** Bound the upstream_check cache: recheck absents daily, presents eventually.
- * Rows whose registry entry was deleted go immediately. */
+ * Rows whose registry entry was deleted go immediately.
+ *
+ * A full scan by design — the alternative index bills more in writes than the
+ * nightly scan costs in reads (schema/migrations/2026-07-27-index-cleanup.sql).
+ * The two cutoffs stay in one statement because splitting them buys nothing
+ * without that index. */
 async function pruneUpstreamChecks(db: D1): Promise<void> {
 	const absentCutoff = new Date(Date.now() - UPSTREAM_ABSENT_TTL_SECS * 1000).toISOString();
 	const presentCutoff = new Date(Date.now() - UPSTREAM_PRESENT_TTL_SECS * 1000).toISOString();
@@ -1175,8 +1180,8 @@ async function pruneUpstreamChecks(db: D1): Promise<void> {
 		.batch([
 			db
 				.prepare(
-					// present <> 0 covers both PRESENT and UNPERSISTABLE verdicts.
-					'DELETE FROM upstream_check WHERE (present = 0 AND checked_at < ?1) OR (present <> 0 AND checked_at < ?2)'
+					`DELETE FROM upstream_check WHERE (present = ${VERDICT_ABSENT} AND checked_at < ?1) ` +
+						`OR (present <> ${VERDICT_ABSENT} AND checked_at < ?2)`
 				)
 				.bind(absentCutoff, presentCutoff),
 			db.prepare('DELETE FROM upstream_check WHERE upstream_id NOT IN (SELECT id FROM upstream)')
