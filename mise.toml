@@ -51,6 +51,17 @@ run = ["go build -o build/nimbus ./cmd/nimbus"]
 description = "build the world"
 depends = ["build-web", "build-cli"]
 
+[tasks.deploy]
+dir = "./web"
+sources = [
+    "**/*.ts",
+    "**/*.html",
+    "**/*.json",
+    "**/*.jsonc",
+    "prettier.config.js"
+]
+run = ["npm run deploy"]
+
 [tasks.check]
 description = "Lint, test, and build"
 depends = ["lint", "test", "build"]
