@@ -62,6 +62,11 @@ sources = [
 ]
 run = ["npm run deploy"]
 
+[tasks.vendor-hash]
+description = "Refresh pkgs/nimbus vendorHash after a go.mod change"
+sources = ["go.mod", "go.sum"]
+run = ["nix run nixpkgs#nix-update -- --flake --version=skip nimbus"]
+
 [tasks.check]
 description = "Lint, test, and build"
 depends = ["lint", "test", "build"]
