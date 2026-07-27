@@ -1,0 +1,28 @@
+{
+	"permissions": {
+		"allow": [
+			"Bash(mise run:*)",
+			"Bash(golangci-lint:*)",
+			"Bash(gofumpt:*)",
+			"Bash(npx vitest:*)",
+			"Bash(npx svelte-check:*)",
+			"Bash(npx wrangler dev:*)",
+			"Bash(npx wrangler tail:*)",
+			"Bash(npx wrangler d1 migrations list:*)",
+			"Bash(wrangler dev:*)",
+			"Bash(wrangler tail:*)"
+		],
+		"ask": [
+			"Bash(npm run deploy:*)",
+			"Bash(npm run migrate:*)",
+			"Bash(npx wrangler deploy:*)",
+			"Bash(wrangler deploy:*)",
+			"Bash(npx wrangler versions upload:*)",
+			"Bash(wrangler versions upload:*)",
+			"Bash(npx wrangler secret:*)",
+			"Bash(wrangler secret:*)",
+			"Bash(npx wrangler d1 migrations apply:*)",
+			"Bash(wrangler d1 migrations apply:*)"
+		]
+	}
+}
