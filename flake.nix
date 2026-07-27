@@ -25,7 +25,7 @@
             pname = "nimbus";
             inherit version;
             src = self;
-            vendorHash = "sha256-AKZ85lcBaN29sGoqqSCJK8LcsMZSQxEuuKzZxVpXs9E=";
+            vendorHash = "sha256-Zxytm0q+2ruJR0YpJMzlCECj7ZBN54xp3EQ7rz3mVoc=";
             subPackages = [ "cmd/nimbus" ];
             env.CGO_ENABLED = 0;
             ldflags = [
