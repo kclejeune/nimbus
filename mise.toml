@@ -62,6 +62,11 @@ sources = [
 ]
 run = ["npm run deploy"]
 
+[tasks.snapshot]
+description = "goreleaser snapshot build stamped with ./VERSION"
+sources = ["**/*.go", "go.mod", "go.sum", "VERSION", ".goreleaser.yaml"]
+run = ["NIMBUS_VERSION=$(cat VERSION) goreleaser build --clean --snapshot"]
+
 [tasks.vendor-hash]
 description = "Refresh pkgs/nimbus vendorHash after a go.mod change"
 sources = ["go.mod", "go.sum"]

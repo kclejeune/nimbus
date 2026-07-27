@@ -29,6 +29,14 @@ builds:
       - -X main.commit={{.Commit}}
       - -X main.date={{.Date}}
 
+snapshot:
+  # Snapshot builds should report what ./VERSION says, so `goreleaser build
+  # --snapshot` and `nix build` agree on main instead of one deriving from the
+  # last tag and the other from the file. Templates cannot read files, so the
+  # mise task and CI export NIMBUS_VERSION=$(cat VERSION); bare invocations fall
+  # back to goreleaser's own tag-derived version rather than failing.
+  version_template: '{{ envOrDefault "NIMBUS_VERSION" (print .Version "-SNAPSHOT") }}+g{{ .ShortCommit }}'
+
 archives:
   - formats: [tar.gz]
     # this name template makes the OS and Arch compatible with the results of `uname`.

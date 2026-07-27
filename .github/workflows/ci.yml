@@ -88,10 +88,17 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: stable
+      # Snapshot builds report ./VERSION rather than a version derived from the
+      # last tag, so this agrees with `nix build`. See snapshot.version_template
+      # in .goreleaser.yaml.
+      - id: version
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: build --clean --snapshot
+        env:
+          NIMBUS_VERSION: ${{ steps.version.outputs.version }}
 
   release:
     name: release
