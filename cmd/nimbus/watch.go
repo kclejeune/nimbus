@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -166,15 +167,26 @@ func watchAndPush(
 	batchIdle time.Duration,
 	ready chan<- struct{},
 ) error {
+	// fsnotify's kqueue backend watches a directory by holding an fd for every
+	// entry in it, adding one per new store path (.drv files included) and
+	// never releasing them. A store that grows past the process fd limit makes
+	// every later rescan fail on open — and fsnotify discards that error at the
+	// dirChange call site, so the watch goes deaf mid-run with no diagnostic
+	// and the paths a build just produced are never pushed. Polling has no
+	// per-entry cost, so use it on macOS unconditionally.
+	if runtime.GOOS == "darwin" {
+		return pollAndPush(ctx, pusher, stop, batch, batchIdle, ready)
+	}
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = watcher.Close() }()
 	if err := watcher.Add(nix.StoreDir); err != nil {
-		// kqueue (macOS) watches a directory by opening every entry in it and
-		// fails on unopenable ones (e.g. sockets in the store); fall back to
-		// diffing directory listings.
+		// kqueue (the other BSDs) watches a directory by opening every entry in
+		// it and fails on unopenable ones (e.g. sockets in the store); fall back
+		// to diffing directory listings.
 		fmt.Fprintf(os.Stderr, "watch %s: %v; falling back to polling\n", nix.StoreDir, err)
 		return pollAndPush(ctx, pusher, stop, batch, batchIdle, ready)
 	}
