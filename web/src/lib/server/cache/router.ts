@@ -227,7 +227,15 @@ async function forwardToStore(
 		warnedStoreUnavailable = true;
 		console.warn('ctx.exports.CachedStore unavailable; serving read path uncached');
 	}
-	const response = store ? await store.fetch(forwarded) : await serveStore(forwarded, env, ctx);
+	let response = store ? await store.fetch(forwarded) : await serveStore(forwarded, env, ctx);
+	// The Workers Caching pipeline intermittently mints an empty 502 without
+	// invoking CachedStore. Read-path code never emits 502, so the status alone
+	// identifies a caching-layer failure — serve uncached instead of passing it
+	// through. Reusing `forwarded` is safe: GET/HEAD, no body to disturb.
+	if (store && response.status === 502) {
+		console.warn(`store loopback returned 502; serving uncached: ${new URL(request.url).pathname}`);
+		response = await serveStore(forwarded, env, ctx);
+	}
 
 	const cacheName = response.headers.get(PERSIST_CACHE_HEADER);
 	const upstreamUrl = response.headers.get(PERSIST_UPSTREAM_HEADER);
