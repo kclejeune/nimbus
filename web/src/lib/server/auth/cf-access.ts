@@ -61,13 +61,24 @@ function b64url(buf: ArrayBuffer): string {
 interface SessionCookiePayload {
 	id: string;
 	role: UserRole;
+	/** Access subject the cookie was minted for; the caller must present the
+	 * same one (see resolveCfAccessUser). Without this the cookie is a bearer
+	 * credential for its user id and role independent of which Access identity
+	 * carries it — which would make a stolen cookie sufficient on its own, the
+	 * one thing sitting behind Access is supposed to prevent. */
+	sub: string;
 	exp: number;
 }
 
-async function mintSessionToken(userId: string, role: UserRole, secret: string): Promise<string> {
+async function mintSessionToken(
+	user: Pick<SessionUser, 'id' | 'role'>,
+	sub: string,
+	secret: string
+): Promise<string> {
 	const payload = JSON.stringify({
-		id: userId,
-		role,
+		id: user.id,
+		role: user.role,
+		sub,
 		exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS
 	} satisfies SessionCookiePayload);
 	const key = await importHmacKey(secret);
@@ -75,8 +86,12 @@ async function mintSessionToken(userId: string, role: UserRole, secret: string):
 	return `${b64url(new TextEncoder().encode(payload).buffer as ArrayBuffer)}.${b64url(sig)}`;
 }
 
+/** Null unless the cookie is well-formed, unexpired, and was minted for
+ *  `expectedSub` — every way of failing to be this Access identity's cookie is
+ *  one rejection here, so no caller can hold the payload without the check. */
 async function verifySessionToken(
 	value: string,
+	expectedSub: string,
 	secret: string
 ): Promise<Pick<SessionUser, 'id' | 'role'> | null> {
 	const dotIdx = value.lastIndexOf('.');
@@ -110,6 +125,11 @@ async function verifySessionToken(
 	}
 	if (typeof payload.id !== 'string' || !payload.id) return null;
 	if (payload.role !== 'admin' && payload.role !== 'member') return null;
+	// Pre-binding cookies carry no sub; they fail here and fall through to a
+	// full D1 resolution that re-mints, so the rollout costs one lookup. A
+	// mismatch is not an attack signal either — it is the normal shape of a
+	// second identity on a shared browser.
+	if (payload.sub !== expectedSub) return null;
 	if (typeof payload.exp !== 'number' || Math.floor(Date.now() / 1000) > payload.exp) return null;
 
 	return { id: payload.id, role: payload.role };
@@ -124,7 +144,12 @@ async function verifySessionToken(
  * minted after the first successful D1 resolution and verified on subsequent
  * requests, avoiding the 3-4 D1 queries per request for returning users. The
  * CF Access JWT is still validated on every request; the cookie only replaces
- * the D1 user lookup.
+ * the D1 user lookup, and is bound to the Access subject so it cannot stand in
+ * for one.
+ *
+ * The cookie carries `role`, so a role change (like a deactivation) takes up
+ * to the cookie TTL to bite on this path — the same tradeoff better-auth's
+ * cookieCache makes on the OIDC path.
  */
 export async function resolveCfAccessUser(
 	event: RequestEvent,
@@ -160,7 +185,7 @@ export async function resolveCfAccessUser(
 	if (sessionSecret) {
 		const cookieValue = event.cookies.get(SESSION_COOKIE);
 		if (cookieValue) {
-			const cached = await verifySessionToken(cookieValue, sessionSecret);
+			const cached = await verifySessionToken(cookieValue, sub, sessionSecret);
 			if (cached) {
 				return {
 					id: cached.id,
@@ -197,7 +222,7 @@ export async function resolveCfAccessUser(
 	// Mint a fresh session cookie to skip D1 on subsequent requests. Pending
 	// users get no cookie: the cookie fast path implies active status.
 	if (sessionSecret && isActiveUser(user)) {
-		const cookieToken = await mintSessionToken(user.id, user.role, sessionSecret);
+		const cookieToken = await mintSessionToken(user, sub, sessionSecret);
 		event.cookies.set(SESSION_COOKIE, cookieToken, {
 			httpOnly: true,
 			secure: true,
