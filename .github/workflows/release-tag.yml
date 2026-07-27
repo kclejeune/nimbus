@@ -1,0 +1,69 @@
+name: Release tag
+
+# Cuts the release tag from ./VERSION, then reopens development.
+#
+# Releasing is: open a PR dropping the "-dev" suffix from VERSION. Merging it
+# lands a commit whose VERSION reads as a bare semver, this job tags that commit,
+# and the tag trigger in ci.yml runs goreleaser. Immediately afterwards the job
+# writes the next minor back as "-dev" so main stops reporting a bare release
+# version the moment another commit lands.
+#
+# RELEASE_TOKEN (a PAT owned by a repo admin) is required for both writes here,
+# for two different reasons. The tag push starts the release, and a GITHUB_TOKEN
+# push does not trigger workflows. The reopen-development commit goes to main,
+# which the ruleset guards with a pull-request rule whose only bypass actor is
+# the admin role — GitHub will not grant that bypass to the Actions app on a
+# user-owned repo, so GITHUB_TOKEN is rejected outright. A PAT acts as the
+# admin and satisfies both.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - VERSION
+
+jobs:
+  tag:
+    name: tag
+    runs-on: ubuntu-latest
+    # Job-scoped so a later job in this file starts read-only.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Tag the release and reopen development
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+
+          # The reopen-development commit below re-triggers this workflow; that
+          # run lands here and stops.
+          case "$version" in
+            *-dev)
+              echo "VERSION is $version — a development version, nothing to tag."
+              exit 0
+              ;;
+          esac
+
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::notice::v$version already exists; nothing to do."
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git tag -a "v$version" -m "v$version"
+          git push origin "v$version"
+          echo "::notice::tagged v$version"
+
+          next="$(echo "$version" | awk -F. '{print $1 "." $2 + 1 ".0-dev"}')"
+          echo "$next" > VERSION
+          git commit -m "chore(release): open $next" -- VERSION
+          git push origin HEAD:main
+          echo "::notice::development reopened at $next"

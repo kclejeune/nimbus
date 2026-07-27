@@ -1,0 +1,44 @@
+name: Dependabot auto-merge
+
+# npm and gomod, patch/minor only.
+#
+# gomod is safe to auto-merge because build validation is `goreleaser build
+# --clean --snapshot` (ci.yml), which never reads the flake, and the vendorHash
+# a Go bump invalidates is repaired on main by vendor-hash.yml straight after
+# the merge.
+#
+# This only *queues* the merge: the branch ruleset's required checks (lint,
+# test, web, build) still have to pass before GitHub lands anything. Workflows
+# on Dependabot PRs get a read-only token by default; the permissions block
+# below is what makes `gh pr merge` possible.
+
+on: pull_request
+
+jobs:
+  auto-merge:
+    name: auto-merge
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    # Job-scoped so a later job in this file starts read-only. This job never
+    # pushes — it only queues the merge — but contents:write is what lets
+    # GitHub perform that merge on its behalf.
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Queue auto-merge
+        # For a grouped PR, update-type is the largest bump in the group, so a
+        # major sneaking into a group still fails this test.
+        if: >-
+          contains(fromJSON('["npm_and_yarn", "gomod"]'), steps.meta.outputs.package-ecosystem) &&
+          contains(fromJSON('["version-update:semver-patch", "version-update:semver-minor"]'), steps.meta.outputs.update-type)
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

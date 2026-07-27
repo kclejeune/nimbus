@@ -1,20 +1,63 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
+# Dependabot version updates.
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# `cooldown` is the supply-chain guard: a release has to survive in the wild for
+# this long before Dependabot will even open a PR, which is the window in which
+# a compromised publish normally gets yanked. Security-advisory updates ignore
+# cooldown entirely, so a real CVE fix is never delayed by it.
+#
+# Auto-merge (.github/workflows/dependabot-auto-merge.yml) covers npm and gomod
+# at patch/minor. Majors always stay manual.
 
 version: 2
 updates:
-  - package-ecosystem: "gomod" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  # A gomod bump invalidates pkgs/nimbus's vendorHash, which Dependabot cannot
+  # compute. Rather than block the PR on it, vendor-hash.yml repairs main right
+  # after the merge — so these can auto-merge like any other bump. Grouped to
+  # keep that repair to one commit per batch rather than one per module.
+  - package-ecosystem: "gomod"
+    directory: "/"
     schedule:
       interval: "weekly"
-  - package-ecosystem: "npm" # See documentation for possible values
-    directory: "/web" # Location of package manifests
-    schedule:
-      interval: "weekly"
-  - package-ecosystem: "nix" # See documentation for possible values
-    directory: "/web" # Location of package manifests
-    schedule:
-      interval: "weekly"
+    cooldown:
+      default-days: 7
+      semver-patch-days: 7
+      semver-minor-days: 7
+      semver-major-days: 30
+    groups:
+      gomod:
+        update-types:
+          - "minor"
+          - "patch"
 
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+      semver-patch-days: 7
+      semver-minor-days: 7
+      semver-major-days: 30
+    # Grouped by dependency type so each PR carries one update-type verdict for
+    # the auto-merge workflow to gate on. Majors stay ungrouped and manual.
+    groups:
+      npm-development:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-production:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # flake.nix / flake.lock are at the repo root — this pointed at /web, where
+  # there is no flake, so it had been silently updating nothing.
+  - package-ecosystem: "nix"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7

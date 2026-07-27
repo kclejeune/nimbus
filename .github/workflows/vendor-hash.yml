@@ -1,0 +1,72 @@
+name: Vendor hash
+
+# A go.mod/go.sum change changes the vendored module set, which invalidates
+# pkgs/nimbus's vendorHash. Dependabot cannot produce the new hash, so rather
+# than block its PRs this job repairs main after the fact: it runs on the merge
+# commit and pushes the refreshed hash straight to main.
+#
+# That ordering is deliberate. PR-time build validation is `goreleaser build
+# --clean --snapshot` in ci.yml, which does not read the flake at all, so a
+# gomod PR can auto-merge on its own merits; main is briefly stale for the
+# minute or two this job takes, and then it is not.
+#
+# RELEASE_TOKEN is REQUIRED for the push, not an optimization. The main ruleset
+# requires a pull request, and its only bypass actor is the repo-admin role —
+# GitHub refuses to make the Actions app a bypass actor on a user-owned repo
+# ("must be part of the ruleset source or owner organization"), so a
+# GITHUB_TOKEN push is rejected outright. A PAT pushes as the admin, which the
+# existing bypass covers, and has the side benefit of retriggering CI.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "flake.nix"
+      - "pkgs/nimbus/**"
+
+# Declared on the job, not the workflow, so a job added here later starts
+# read-only rather than inheriting the push capability.
+jobs:
+  vendor-hash:
+    name: vendor-hash
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Refresh vendorHash
+        id: refresh
+        run: |
+          nix run nixpkgs#nix-update -- --flake --version=skip nimbus
+          # nix-update exits 0 whether or not it rewrote anything, so the diff
+          # is the only signal that the hash was stale.
+          if git diff --quiet -- pkgs/nimbus; then
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push the refreshed hash
+        if: steps.refresh.outputs.stale == 'true'
+        run: |
+          set -euo pipefail
+          git diff -- pkgs/nimbus
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'build(nix): refresh vendorHash for the dependency bump' -- pkgs/nimbus
+          # This push re-triggers the workflow (pkgs/nimbus is a trigger path);
+          # the rerun finds nothing stale and pushes nothing.
+          git push origin HEAD:main
+          echo "::notice::vendorHash was stale; refreshed it on main."
