@@ -105,14 +105,19 @@ interface SqlRow {
 export async function loadTraffic(env: Env): Promise<TrafficSummary | null> {
 	if (!env.CF_ACCOUNT_ID || !env.CF_ANALYTICS_TOKEN) return null;
 
-	// _sample_interval sums to the true event count under AE's sampling; the
-	// same weighting recovers byte totals (double2, written by push points and
-	// zero on read points).
+	// Two independent weightings multiply into the true event count:
+	// _sample_interval undoes AE's own ingestion sampling, double1 undoes the
+	// client-side read sampling in cache/metrics.ts (1 on every unsampled
+	// point, including every row written before that sampling existed). Bytes
+	// take the same two weights — the invariant is "double1 is the point's
+	// weight", so anything summed from a point must carry it. A no-op today
+	// (only read points are sampled and they carry no bytes), which is exactly
+	// why it has to be written down rather than derived per column.
 	const sql = `
 		SELECT toStartOfDay(timestamp) AS day, blob1 AS kind, blob2 AS event,
 		       blob4 AS edge,
-		       SUM(_sample_interval) AS n,
-		       SUM(_sample_interval * double2) AS bytes
+		       SUM(_sample_interval * double1) AS n,
+		       SUM(_sample_interval * double1 * double2) AS bytes
 		FROM ${DATASET}
 		WHERE timestamp > NOW() - INTERVAL '30' DAY
 		GROUP BY day, kind, event, edge

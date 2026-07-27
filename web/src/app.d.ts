@@ -62,13 +62,16 @@ declare global {
 				/** Per-IP budget for live upstream fetches on edge-missed reads
 				 * (missing-paths.ts); unbound = unguarded. */
 				UPSTREAM_PROBE_LIMITER?: RateLimit;
-				/** Colo-wide cap on read-path absent-verdict primary writes. */
+				/** Per-colo cap on read-path absent-verdict primary writes. */
 				ABSENT_VERDICT_LIMITER?: RateLimit;
-				/** Colo-wide cap on pull-through ingests (pullthrough.ts). */
+				/** Per-colo cap on pull-through ingests (pullthrough.ts). */
 				INGEST_LIMITER?: RateLimit;
 				/** Analytics Engine dataset for read-path traffic metrics
 				 * (narinfo/NAR hit/miss/upstream); unbound = metrics off. */
 				CACHE_METRICS?: AnalyticsEngineDataset;
+				/** Sampling divisor for read points only: 1-in-N recorded, each
+				 * weighted by N (cache/metrics.ts). Unset/<=1 records everything. */
+				CACHE_METRICS_SAMPLE?: string;
 				/** Account id + API token (Account Analytics read) for querying
 				 * CACHE_METRICS from the dashboard via the Analytics Engine SQL
 				 * API; the monitoring traffic section hides when either is unset. */

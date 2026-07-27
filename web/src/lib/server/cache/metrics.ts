@@ -13,6 +13,12 @@
 // `miss` is a 404 — absent locally and upstream. Orthogonally, the edge blob
 // records whether the CachedStore loopback was answered by the edge cache
 // (blob4), which is the D1/R2-protection number.
+//
+// Every point carries its own weight in double1 — 1 normally, the sampling
+// divisor for a sampled read (see readSampleRate). Counts are therefore
+// SUM(_sample_interval * double1), never SUM(_sample_interval): the latter
+// silently undercounts once sampling is on. Rows written before sampling
+// existed all carry double1 = 1, so the weighted form is exact for them too.
 
 type Env = App.Platform['env'];
 
@@ -67,6 +73,22 @@ export function edgeEvent(cfCacheStatus: string | null): EdgeEvent {
 	}
 }
 
+/**
+ * Client-side sampling divisor for read points. Reads are the only unbounded
+ * point stream — one per gateway invocation, edge hits included — so at the
+ * volumes the read path is built for they dominate Analytics Engine spend,
+ * while push/chunk/guard points stay rare enough to be worth recording whole.
+ *
+ * A sampled point carries its divisor as double1, so it stands for that many
+ * events; every writer here sets double1 to its weight and traffic.ts sums
+ * `_sample_interval * double1`. Unset or <= 1 records everything, which is the
+ * default — turn this up only when the AE bill says to.
+ */
+function readSampleRate(env: Env): number {
+	const raw = Number(env.CACHE_METRICS_SAMPLE);
+	return Number.isFinite(raw) && raw > 1 ? Math.floor(raw) : 1;
+}
+
 /** Record one gateway read. `viaUpstream` marks responses whose content came
  *  from an upstream regardless of status (a redirect about to be issued, or a
  *  narinfo passthrough 200); `edge` is the loopback's cache verdict. */
@@ -77,14 +99,20 @@ export function recordRead(
 	outcome: { status: number; viaUpstream?: boolean; edge?: EdgeEvent }
 ): void {
 	try {
-		env.CACHE_METRICS?.writeDataPoint({
+		if (!env.CACHE_METRICS) return;
+		const sample = readSampleRate(env);
+		// Independent per point rather than a counter: isolates are numerous and
+		// short-lived, so a per-isolate counter would bias toward whatever each
+		// one happened to see first.
+		if (Math.random() * sample >= 1) return;
+		env.CACHE_METRICS.writeDataPoint({
 			blobs: [
 				kind,
 				readEvent(outcome.status, outcome.viaUpstream ?? false),
 				cache,
 				outcome.edge ?? 'none'
 			],
-			doubles: [1],
+			doubles: [sample],
 			indexes: [cache]
 		});
 	} catch {
