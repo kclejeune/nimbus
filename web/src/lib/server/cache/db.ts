@@ -323,41 +323,83 @@ export async function findNarWithChunks(
 	};
 }
 
-/** Bump last_accessed_at for LRU retention (best-effort; callers ignore errors). */
-export async function touchObject(
-	db: D1Database,
-	cacheName: string,
-	storePathHash: string
-): Promise<void> {
-	await db
-		.prepare(
-			'UPDATE object SET last_accessed_at = ?1 WHERE store_path_hash = ?2 ' +
-				'AND cache_id = (SELECT id FROM cache WHERE name = ?3)'
-		)
-		.bind(new Date().toISOString(), storePathHash, cacheName)
-		.run();
-}
+/**
+ * Granularity of the download-touch write: an object touched more recently
+ * than this is not touched again.
+ *
+ * This is what keeps read throughput off the D1 write primary. shouldTouch
+ * (proxy.ts) coalesces per isolate, which collapses under exactly the load it
+ * matters for: a wide cold pull spreads across many colos and isolates, each
+ * seeing a given NAR about once, so per-isolate coalescing approaches one
+ * touch per NAR GET — the write rate then tracks read volume and competes
+ * with uploads for the single primary. This window makes it
+ * O(distinct objects per window) instead, independent of isolate count, colo
+ * count, and fleet size.
+ *
+ * One hour rather than something longer because retention's floor is
+ * `retention_period = 1` day: at 6h a just-missed touch could cost such a
+ * cache a quarter of its window. At 1h the worst-case early eviction is ~4%
+ * of the shortest usable retention, and the write reduction is still ~24x per
+ * object per day against an unbounded per-request touch.
+ */
+export const TOUCH_GRANULARITY_MS = 60 * 60 * 1000;
+
+// ?1 cache id, ?2/?3 nar hash spellings, ?4 recency cutoff — shared by the
+// probe and the write so the two can never test different predicates.
+const TOUCH_MATCH_SQL =
+	'cache_id = ?1 ' +
+	"AND nar_id IN (SELECT id FROM nar WHERE nar_hash IN (?2, ?3) AND state = 'V') " +
+	'AND (last_accessed_at IS NULL OR last_accessed_at < ?4)';
+const TOUCH_PROBE_SQL = `SELECT 1 FROM object WHERE ${TOUCH_MATCH_SQL} LIMIT 1`;
+const TOUCH_UPDATE_SQL = `UPDATE object SET last_accessed_at = ?5 WHERE ${TOUCH_MATCH_SQL}`;
 
 /**
  * Bump last_accessed_at for every object in a cache backed by the NAR with
- * this hash (bare or sha256:-prefixed). NAR URLs carry the nar hash rather
- * than a store path hash, so a download can only be attributed at NAR
- * granularity (like the reference server's touch-on-download semantics).
- * Keyed by hash rather than id so the gateway can touch without resolving the
- * NAR row it no longer needs for serving.
+ * this hash (bare or sha256:-prefixed), unless it was already touched within
+ * TOUCH_GRANULARITY_MS. NAR URLs carry the nar hash rather than a store path
+ * hash, so a download can only be attributed at NAR granularity (like the
+ * reference server's touch-on-download semantics). Keyed by nar hash rather
+ * than nar id so the gateway can touch without resolving the NAR row it no
+ * longer needs for serving.
+ *
+ * The staleness check runs on a REPLICA and the UPDATE is issued only when it
+ * will actually write. Putting the recency predicate on the UPDATE alone
+ * bounds rows written but not statements: writes route to the single primary
+ * whether or not they match, so a no-op UPDATE still occupies its request
+ * queue — the resource that surfaces as "D1 requests queued for too long"
+ * under a wide pull. Deciding on a replica moves the per-request work onto
+ * horizontally-scaled reads and leaves the primary seeing roughly one
+ * statement per object per window. The UPDATE keeps the predicate anyway, so
+ * two isolates racing the same window still write once each at most, and
+ * replica lag costs only a redundant write that would have happened regardless.
+ *
+ * Both statements are raw, per the best-effort carve-out documented on
+ * dbRun/dbFirst above: a touch that fails is skipped and the next download
+ * re-decides, so retrying would only add load to a primary or replica that is
+ * already signalling contention.
  */
 export async function touchObjectsForNarHash(
 	db: D1Database,
-	cacheName: string,
+	cacheId: number,
 	narHashRaw: string
 ): Promise<void> {
+	const now = Date.now();
+	const args = [
+		cacheId,
+		`sha256:${narHashRaw}`,
+		narHashRaw,
+		new Date(now - TOUCH_GRANULARITY_MS).toISOString()
+	];
+
+	const stale = await readSession(db)
+		.prepare(TOUCH_PROBE_SQL)
+		.bind(...args)
+		.first();
+	if (!stale) return;
+
 	await db
-		.prepare(
-			'UPDATE object SET last_accessed_at = ?1 ' +
-				'WHERE cache_id = (SELECT id FROM cache WHERE name = ?2) ' +
-				"AND nar_id IN (SELECT id FROM nar WHERE nar_hash IN (?3, ?4) AND state = 'V')"
-		)
-		.bind(new Date().toISOString(), cacheName, `sha256:${narHashRaw}`, narHashRaw)
+		.prepare(TOUCH_UPDATE_SQL)
+		.bind(...args, new Date(now).toISOString())
 		.run();
 }
 

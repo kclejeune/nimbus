@@ -344,8 +344,10 @@ async function handleNar(
 	// the CachedStore entrypoint — and only after the store confirmed the NAR
 	// exists: touching before the read gave nonexistent-hash floods a free
 	// primary write per request, while real NARs stay coalesced by shouldTouch.
-	if (!head && response.ok && shouldTouch(cacheName, narHashRaw)) {
-		const touch = db.touchObjectsForNarHash(env.ATTIC_DB, cacheName, narHashRaw).catch(() => {});
+	if (!head && response.ok && shouldTouch(auth.cache.id, narHashRaw)) {
+		const touch = db
+			.touchObjectsForNarHash(env.ATTIC_DB, auth.cache.id, narHashRaw)
+			.catch(() => {});
 		ctx?.waitUntil(touch);
 	}
 	recordRead(env, 'nar', cacheName, { status: response.status, edge: storeEdge(response) });
@@ -470,8 +472,8 @@ async function handleProxyNar(
 	}
 
 	// Download-driven retention, attributed to the winning cache (see handleNar).
-	if (!head && shouldTouch(winner.name, narHashRaw)) {
-		const touch = db.touchObjectsForNarHash(env.ATTIC_DB, winner.name, narHashRaw).catch(() => {});
+	if (!head && shouldTouch(winner.id, narHashRaw)) {
+		const touch = db.touchObjectsForNarHash(env.ATTIC_DB, winner.id, narHashRaw).catch(() => {});
 		ctx?.waitUntil(touch);
 	}
 
