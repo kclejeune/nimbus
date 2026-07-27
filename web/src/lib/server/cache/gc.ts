@@ -962,13 +962,20 @@ async function prunePinRevisions(db: D1, stats: GcStats): Promise<void> {
 }
 
 /** The incomplete-closure predicate shared by the probe, count, and example
- * queries. */
+ * queries. ?1 is the freshness cutoff: refs of objects pushed after it are
+ * ignored — a push in flight when GC fires uploads parents before their
+ * references, and a half-uploaded closure is not a gap. Genuine gaps persist
+ * into later runs. */
 const INCOMPLETE_CLOSURE_WHERE =
 	'FROM object_ref r ' +
 	'JOIN object o ON o.id = r.object_id ' +
 	'WHERE r.child_id IS NULL AND o.detached_at IS NULL ' +
+	'AND o.created_at < ?1 ' +
 	'AND NOT EXISTS (SELECT 1 FROM upstream_check uc ' +
 	'WHERE uc.store_path_hash = r.ref_hash AND uc.present <> 0)';
+
+/** Sized to outlast any real push that spans the nightly run. */
+const INTEGRITY_PUSH_GRACE_MS = 6 * 60 * 60 * 1000;
 
 /** Uncovered refs (re)classified per run — sized to one filterUpstreamPaths
  * probe budget, so a large backlog converges over a few runs without eating
@@ -987,7 +994,7 @@ const INTEGRITY_PROBE_LIMIT = 250;
  * genuinely-broken backlog cannot starve the window; refs whose absent
  * verdicts are still fresh cost only the cached-verdict read.
  */
-async function probeUncoveredRefs(db: D1, stats: GcStats): Promise<void> {
+async function probeUncoveredRefs(db: D1, stats: GcStats, cutoff: string): Promise<void> {
 	const { results } = await db
 		.prepare(
 			`SELECT r.ref_hash AS h ${INCOMPLETE_CLOSURE_WHERE} ` +
@@ -996,6 +1003,7 @@ async function probeUncoveredRefs(db: D1, stats: GcStats): Promise<void> {
 				'WHERE uc2.store_path_hash = r.ref_hash) ' +
 				`LIMIT ${INTEGRITY_PROBE_LIMIT}`
 		)
+		.bind(cutoff)
 		.all<{ h: string }>();
 	if (results.length === 0) return;
 	const upstreams = await allLiveUpstreams(db);
@@ -1017,15 +1025,17 @@ async function probeUncoveredRefs(db: D1, stats: GcStats): Promise<void> {
  */
 async function closureIntegrityReport(db: D1, stats: GcStats): Promise<GcIntegritySummary | null> {
 	try {
+		const cutoff = new Date(Date.now() - INTEGRITY_PUSH_GRACE_MS).toISOString();
 		// Swallowed separately from the outer catch: a failed probe must not
 		// null the report, which still counts fine from cached verdicts. Runs
 		// on dry runs too — verdict rows are the same probe cache any
 		// read-path request fills, not GC state.
-		await probeUncoveredRefs(db, stats).catch((e) =>
+		await probeUncoveredRefs(db, stats, cutoff).catch((e) =>
 			console.warn(`gc: integrity ref probe failed: ${e}`)
 		);
 		const row = await db
 			.prepare(`SELECT COUNT(DISTINCT r.object_id) AS n ${INCOMPLETE_CLOSURE_WHERE}`)
+			.bind(cutoff)
 			.first<{ n: number }>();
 		stats.incomplete_closure_objects = row?.n ?? 0;
 		let examples: string[] = [];
@@ -1039,6 +1049,7 @@ async function closureIntegrityReport(db: D1, stats: GcStats): Promise<GcIntegri
 						`SELECT DISTINCT o.store_path AS p ${INCOMPLETE_CLOSURE_WHERE} ` +
 							`ORDER BY o.store_path LIMIT ${INTEGRITY_EXAMPLE_LIMIT}`
 					)
+					.bind(cutoff)
 					.all<{ p: string }>()
 			).results.map((r) => r.p);
 		}
