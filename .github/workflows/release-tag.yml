@@ -62,7 +62,13 @@ jobs:
           git push origin "v$version"
           echo "::notice::tagged v$version"
 
-          next="$(echo "$version" | awk -F. '{print $1 "." $2 + 1 ".0-dev"}')"
+          # Patch, not minor: at this instant the cycle has no commits in it, so
+          # any bump is a guess about the future. Patch is the smallest claim
+          # that is never wrong, and the release PR raises it to a minor or
+          # major when the cycle turns out to warrant one -- editing VERSION is
+          # that PR's whole job anyway. Guessing minor instead would leave main
+          # advertising a feature release for a cycle that only ever gets fixes.
+          next="$(echo "$version" | awk -F. '{print $1 "." $2 "." $3 + 1 "-dev"}')"
           echo "$next" > VERSION
           git commit -m "chore(release): open $next" -- VERSION
           git push origin HEAD:main

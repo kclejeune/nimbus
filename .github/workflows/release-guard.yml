@@ -1,0 +1,76 @@
+name: Release version
+
+# Guards the release PR -- the one that drops the "-dev" suffix from ./VERSION.
+#
+# The reopen bump in release-tag.yml is deliberately a patch, because at reopen
+# time the cycle is empty and any bump is a guess. This is where the guess gets
+# corrected: by the time the release PR exists, the commits do too, so the
+# minimum honest version is derivable from their conventional-commit types
+# (feat -> minor, fix/perf/refactor -> patch, ! or BREAKING CHANGE -> major).
+#
+# It fails rather than rewriting VERSION. The commit log is advisory -- a feat
+# that is purely internal may genuinely not warrant a minor -- so the override
+# should be a visible human edit, not a silent one.
+#
+# Paths-filtered, so it cannot be a required status check: a required check that
+# never runs blocks every PR that doesn't touch VERSION.
+
+on:
+  pull_request:
+    paths:
+      - VERSION
+
+jobs:
+  guard:
+    name: version-guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Read the proposed version
+        id: proposed
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Minimum version the commit log demands
+        id: required
+        if: ${{ !endsWith(steps.proposed.outputs.version, '-dev') }}
+        uses: ietf-tools/semver-action@v1
+        with:
+          token: ${{ github.token }}
+          branch: ${{ github.event.pull_request.head.ref }}
+          # "none" is a legitimate outcome -- a cycle of docs/chore/ci commits
+          # demands no bump at all. Report the current version so the comparison
+          # below accepts anything at or above it instead of erroring out.
+          noVersionBumpBehavior: current
+          noNewCommitBehavior: current
+
+      - name: Compare
+        if: ${{ !endsWith(steps.proposed.outputs.version, '-dev') }}
+        env:
+          PROPOSED: ${{ steps.proposed.outputs.version }}
+          REQUIRED: ${{ steps.required.outputs.nextStrict }}
+          BUMP: ${{ steps.required.outputs.bump }}
+        run: |
+          set -euo pipefail
+
+          if git rev-parse -q --verify "refs/tags/v$PROPOSED" >/dev/null; then
+            echo "::error::v$PROPOSED already exists. Pick a version that has not been released."
+            exit 1
+          fi
+
+          # sort -V puts the lower version first, so the log's demand is met
+          # exactly when REQUIRED sorts first (or they are equal).
+          if [ "$(printf '%s\n%s\n' "$REQUIRED" "$PROPOSED" | sort -V | head -1)" != "$REQUIRED" ]; then
+            echo "::error::VERSION proposes $PROPOSED, but the commits since the last tag demand a $BUMP bump to at least $REQUIRED."
+            exit 1
+          fi
+
+          if [ "$PROPOSED" != "$REQUIRED" ]; then
+            echo "::notice::Releasing $PROPOSED; the commit log only demanded $REQUIRED ($BUMP). Deliberate over-bumps are fine."
+          else
+            echo "::notice::Releasing $PROPOSED, matching the $BUMP bump the commit log demands."
+          fi
