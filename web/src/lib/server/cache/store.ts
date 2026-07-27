@@ -163,6 +163,49 @@ export function keyedNarinfoUrl(
 }
 
 /**
+ * NAR URL as the gateway keys it for the edge cache, derived from the client
+ * request so a store miss lands on the same origin.
+ *
+ * Public caches share one content-addressed entry: every cache referencing a
+ * NAR hits the same key, so a miss reads D1+R2 once instead of once per cache.
+ * That sharing is only sound while every reader of the entry is entitled to
+ * the bytes — and authorization is per CACHE, while the store's lookup is by
+ * nar HASH. For a private cache the two diverge: pull on any cache (anonymous,
+ * on any public one) plus a known nar hash would otherwise read content held
+ * only by the private cache. Private caches therefore get a cache-scoped path,
+ * which puts the cache in the edge key AND makes serveNar verify the NAR is
+ * reachable from it; the shared path enforces the same invariant from the
+ * other side — serveNar resolves it only against NARs reachable from a live
+ * public cache (findNarWithChunks). Edge hits skipping the store stay sound
+ * because the key already carries the cache the gateway authorized.
+ *
+ * Scoped by id, not name. NAR responses carry no Cache-Tag and a year-long
+ * max-age, so an entry outlives the cache that produced it; names are reusable
+ * (purgeDeletedCache), so a name key would let a recreated cache inherit its
+ * predecessor's NAR entries — the same inheritance destroyCache already
+ * prevents for grants. Ids are AUTOINCREMENT and never reused.
+ *
+ * The cost falls only on private caches, and it is dedup, not work: N private
+ * caches holding the same NAR now occupy N edge entries and pay N cold misses
+ * instead of sharing one. Public reads are untouched.
+ *
+ * The query string is dropped: no legit NAR URL carries one, and forwarding it
+ * would let a client mint unlimited distinct edge keys for the same NAR, each
+ * a full D1+R2 miss.
+ */
+export function narStoreUrl(
+	request: Request,
+	cache: { id: number; is_public: number },
+	filename: string
+): URL {
+	const url = new URL(request.url);
+	url.pathname =
+		cache.is_public === 1 ? `/_nar/${filename}` : `/_nar_scoped/${cache.id}/${filename}`;
+	url.search = '';
+	return url;
+}
+
+/**
  * After an upload lands an object, purge its narinfo tag (covering both a
  * negatively-cached 404 and a stale narinfo from re-pushing an existing
  * path), then re-fetch through the loopback so the edge holds the fresh
@@ -232,12 +275,21 @@ export async function serveStore(
 	if (segments.length === 3 && segments[0] === '_proxy' && segments[2].endsWith('.narinfo')) {
 		return serveProxyNarInfo(env, segments[1], segments[2].slice(0, -'.narinfo'.length));
 	}
-	// NARs are content-addressed and shared across caches, so their route
-	// carries no cache name: every cache referencing a NAR hits the same edge
-	// entry, and R2 is read once instead of per cache. The gateway authorizes
-	// against the requested cache and stamps visibility before forwarding here.
+	// NARs are content-addressed and shared across PUBLIC caches, so their
+	// route carries no cache name: every public cache referencing a NAR hits
+	// the same edge entry, and R2 is read once instead of per cache. The
+	// gateway authorizes against the requested cache and stamps visibility
+	// before forwarding here.
 	if (segments.length === 2 && segments[0] === '_nar') {
 		return serveNar(env, ctx, segments[1]);
+	}
+	// Private caches take a cache-scoped route instead (narStoreUrl above).
+	// Digits only: Number() would accept '', ' 3', '1e3' and '0x2', each a
+	// different spelling of one id and so a distinct edge key for the same
+	// bytes.
+	if (segments.length === 3 && segments[0] === '_nar_scoped') {
+		if (!/^\d+$/.test(segments[1])) return errorResponse(400, 'Invalid cache scope');
+		return serveNar(env, ctx, segments[2], Number(segments[1]));
 	}
 	return errorResponse(404, 'Not found');
 }
@@ -526,18 +578,23 @@ async function serveNarInfo(
 	return narinfoResponse(narinfo, cacheName, storePathHash, isPublic);
 }
 
+/** `cacheId` scopes the lookup to NARs that cache actually references; the
+ * gateway passes it for private caches only (see narStoreUrl above). Unscoped
+ * lookups resolve only NARs reachable from a live public cache. */
 async function serveNar(
 	env: Env,
 	ctx: ExecutionContext | undefined,
-	filename: string
+	filename: string,
+	cacheId?: number
 ): Promise<Response> {
 	const narHashRaw = filename.split('.')[0];
 	if (!narHashRaw) return errorResponse(400, 'Invalid NAR path');
 
-	const found = await db.findNarWithChunks(db.readSession(env.ATTIC_DB), [
-		`sha256:${narHashRaw}`,
-		narHashRaw
-	]);
+	const found = await db.findNarWithChunks(
+		db.readSession(env.ATTIC_DB),
+		[`sha256:${narHashRaw}`, narHashRaw],
+		cacheId
+	);
 	if (!found) {
 		// The gateway turns this 404 into an upstream redirect when the cache
 		// has upstreams (passthrough narinfo NAR URLs resolve that way).

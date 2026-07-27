@@ -42,6 +42,7 @@ import { edgeEvent, recordRead, UNIFIED_LABEL, type EdgeEvent } from './metrics'
 import { extractPublicKey } from '../attic/signing';
 import {
 	keyedNarinfoUrl,
+	narStoreUrl,
 	PERSIST_CACHE_HEADER,
 	PERSIST_UPSTREAM_HEADER,
 	PREFETCH_MARKER_HEADER,
@@ -313,18 +314,12 @@ async function handleNar(
 	const auth = await authorizeCacheRead(request, env, cacheName);
 	if ('response' in auth) return auth.response;
 
-	// NARs are content-addressed, so the store request drops the cache name:
-	// every cache referencing a NAR shares one edge entry, and a miss reads R2
-	// once instead of once per cache. The query string is dropped too — no
-	// legit NAR URL carries one, and forwarding it would let a client mint
-	// unlimited distinct edge keys for the same NAR (each a full D1+R2 miss).
-	// Cache-specific concerns stay here: the visibility header is stamped per
-	// request, and a store miss falls back to the cache's upstreams
-	// (passthrough narinfo NAR URLs resolve that way).
-	const shared = new URL(request.url);
-	shared.pathname = `/_nar/${filename}`;
-	shared.search = '';
-	const response = await forwardToStore(new Request(shared, request), env, ctx);
+	// narStoreUrl owns the edge key (content-addressed for public caches,
+	// cache-scoped for private). The cache-specific concerns stay here: the
+	// visibility header is stamped per request, and a store miss falls back to
+	// the cache's upstreams (passthrough narinfo NAR URLs resolve that way).
+	const keyed = narStoreUrl(request, auth.cache, filename);
+	const response = await forwardToStore(new Request(keyed, request), env, ctx);
 
 	if (response.status === 404) {
 		const upstreamUrl = await upstreamNarRedirect(
@@ -480,12 +475,11 @@ async function handleProxyNar(
 		ctx?.waitUntil(touch);
 	}
 
-	// Same shared content-addressed edge entry as the per-cache route, with the
-	// same query-string drop (see handleNar).
-	const shared = new URL(request.url);
-	shared.pathname = `/_nar/${filename}`;
-	shared.search = '';
-	const response = await forwardToStore(new Request(shared, request), env, ctx);
+	// Same edge entry as the per-cache route. pickReadableWinner already proved
+	// the winner holds this NAR, but the scoped path is what keeps the resulting
+	// edge entry out of reach of a request authorized against another cache.
+	const keyed = narStoreUrl(request, winner, filename);
+	const response = await forwardToStore(new Request(keyed, request), env, ctx);
 	if (response.status === 404) {
 		// Deletion race (GC reaped the NAR between resolution and read): the
 		// upstreams may still have it, same as the per-cache route.

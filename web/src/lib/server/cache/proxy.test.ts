@@ -10,10 +10,12 @@ import {
 import type { VerifiedToken, Permission } from '../attic/token';
 import { NO_PERMISSION } from '../attic/token';
 
+// Ids are distinct and deliberately not in name order: the winner is chosen by
+// (priority, name), and nothing may quietly start ordering by id.
 const rows = [
-	{ name: 'public-a', priority: 40, is_public: 1 },
-	{ name: 'private-b', priority: 30, is_public: 0 },
-	{ name: 'private-c', priority: 30, is_public: 0 }
+	{ id: 3, name: 'public-a', priority: 40, is_public: 1 },
+	{ id: 1, name: 'private-b', priority: 30, is_public: 0 },
+	{ id: 2, name: 'private-c', priority: 30, is_public: 0 }
 ];
 
 function tokenWith(caches: Record<string, Partial<Permission>>): VerifiedToken {

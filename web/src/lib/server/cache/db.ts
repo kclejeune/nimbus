@@ -242,12 +242,41 @@ export async function findObjectWithChunks(
 /**
  * Valid NAR and its chunks in one round-trip, matching any of the given hash
  * spellings (earlier entries win, e.g. `sha256:`-prefixed before bare).
+ *
+ * `cacheId` restricts the match to NARs some object in that cache references.
+ * NAR bodies are content-addressed, so the unscoped form is what lets every
+ * public cache share one edge entry and one R2 read — but it resolves by hash
+ * across the whole instance, while the gateway only ever authorized the cache
+ * named in the URL. Entitlement is therefore re-established here, from both
+ * sides: the unscoped form matches only NARs reachable from a live public
+ * cache (bytes any public-cache reader is entitled to), so pull on a public
+ * cache plus knowledge of a nar hash cannot read a NAR held only by a private
+ * one; private caches take the scoped form (see narStoreUrl in store.ts),
+ * which is how their own authorized requests still resolve — with the cache
+ * id in the edge key, so the resulting entry is out of reach of requests
+ * authorized against any other cache.
+ *
+ * Scoping is by id rather than name because names are reusable
+ * (purgeDeletedCache) while ids are AUTOINCREMENT and never are — the same
+ * reason destroyCache drops the old name's grants. The scoped form needs no
+ * join back to `cache`: the id always comes from a row the caller already
+ * resolved through a deleted_at IS NULL filter.
  */
 export async function findNarWithChunks(
 	db: D1Database,
-	narHashes: string[]
+	narHashes: string[],
+	cacheId?: number
 ): Promise<NarWithChunks | null> {
 	const placeholders = narHashes.map((_, i) => `?${i + 1}`).join(', ');
+	// Bind list first so the scope placeholder index falls out of it rather
+	// than being computed twice and kept in sync by hand.
+	const args: (string | number)[] = [...narHashes];
+	if (cacheId !== undefined) args.push(cacheId);
+	const scope =
+		cacheId === undefined
+			? 'AND EXISTS (SELECT 1 FROM object o JOIN cache c ON c.id = o.cache_id ' +
+				'WHERE o.nar_id = n.id AND c.is_public = 1 AND c.deleted_at IS NULL) '
+			: `AND EXISTS (SELECT 1 FROM object o WHERE o.nar_id = n.id AND o.cache_id = ?${args.length}) `;
 	const { results } = await dbAll<
 		{
 			nar_id: number;
@@ -267,9 +296,10 @@ export async function findNarWithChunks(
 					'LEFT JOIN chunkref cr ON cr.nar_id = n.id ' +
 					'LEFT JOIN chunk ch ON ch.id = cr.chunk_id ' +
 					`WHERE n.nar_hash IN (${placeholders}) AND n.state = 'V' ` +
+					scope +
 					'ORDER BY n.id, cr.seq'
 			)
-			.bind(...narHashes)
+			.bind(...args)
 	);
 	if (results.length === 0) return null;
 	// Prefer the earliest hash spelling that matched, then the lowest nar id.
@@ -908,6 +938,10 @@ export async function deleteDeviceAuth(db: D1Database, deviceCode: string): Prom
 // --- root proxy resolution ---------------------------------------------------
 
 export interface LiveCacheRow {
+	/** Row id, not just the name: it is what the private-NAR store path is
+	 * keyed by (narStoreUrl in store.ts), and unlike the name it is never
+	 * reused. */
+	id: number;
 	name: string;
 	priority: number;
 	is_public: number;
@@ -921,7 +955,7 @@ export async function cachesWithStorePathHash(
 	const { results } = await dbAll<LiveCacheRow>(
 		db
 			.prepare(
-				`SELECT c.name, c.priority, c.is_public FROM object o
+				`SELECT c.id, c.name, c.priority, c.is_public FROM object o
 				 JOIN cache c ON c.id = o.cache_id
 				 WHERE o.store_path_hash = ?1 AND c.deleted_at IS NULL`
 			)
@@ -939,7 +973,7 @@ export async function cachesWithNarHash(
 	const { results } = await dbAll<LiveCacheRow>(
 		db
 			.prepare(
-				`SELECT DISTINCT c.name, c.priority, c.is_public FROM nar n
+				`SELECT DISTINCT c.id, c.name, c.priority, c.is_public FROM nar n
 				 JOIN object o ON o.nar_id = n.id
 				 JOIN cache c ON c.id = o.cache_id
 				 WHERE n.nar_hash IN (${placeholders}) AND c.deleted_at IS NULL`
