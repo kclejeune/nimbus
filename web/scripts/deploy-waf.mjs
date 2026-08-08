@@ -144,22 +144,18 @@ async function findZone(host) {
 
 // --- desired state ----------------------------------------------------------
 
-/** Geo gate for both hosts, by continent (ip.src.continent codes:
- *  NA/SA/EU/AS/AF/OC/AN; Tor exits report "T1" and are implicitly blocked).
- *  The continental allowance is broad enough for steady-state — it covers
- *  the Americas-based users plus EU-hosted machine consumers (CI runners,
- *  VPSes pulling from the cache) — while a flood from outside it is blocked
- *  at the edge and never billed as a worker request, the lever that actually
- *  cuts cost under a distributed flood. Under active attack the response is to
- *  narrow this list rather than add rules — with NA+SA+EU allowed the gate is
- *  doing little cost work, which is the right default for usability.
- *
- *  It covers the ADMIN host too, so an admin travelling outside these
- *  continents is locked out of the dashboard (the cache API too, but nix
- *  clients are the machines, not the person). Widen the list and redeploy
- *  with `npm run deploy:waf` before travelling, or drop appHost from the
- *  `hosts` list below to exempt the dashboard. */
-const GEO_RESTRICT = true;
+/** Geo gate by continent — OFF by default. The shape allowlist above kills
+ *  junk at the edge regardless of origin, the per-IP rate limit bounds
+ *  honest-shaped floods, and a worldwide cache beats the lockout risk (the
+ *  gate covered the ADMIN host too, stranding a travelling admin). Kept
+ *  wired because it is the one lever the other rules cannot replace: a
+ *  distributed flood of protocol-VALID requests bills a worker invocation
+ *  each no matter what the shape rules say, and blocking whole continents at
+ *  the edge is what actually cuts that bill. Under sustained attack: set
+ *  true, narrow the list, `npm run deploy:waf`. (ip.src.continent codes
+ *  NA/SA/EU/AS/AF/OC/AN; Tor exits report "T1" and are implicitly blocked
+ *  while the gate is on.) */
+const GEO_RESTRICT = false;
 const ALLOWED_CONTINENTS = ['NA', 'SA', 'EU'];
 
 /** Always-block junk shared by both hosts: non-protocol methods (the allowlist
@@ -174,12 +170,49 @@ const JUNK_SHAPES =
 	`len(http.request.uri.path) > 300 or ` +
 	`cf.client.bot`;
 
+/** Path-shape allowlist for the cache host. The binary-cache URL space is
+ *  closed and machine-generated — router.ts serves exactly these shapes — so
+ *  scanner probes (`/wp-login.php`, hash-shaped names with a bogus extension,
+ *  truncated NAR paths) can die at the edge unbilled instead of 404ing in the
+ *  worker. The Free plan has no regex (`matches` is Business+), so the hash
+ *  charset can't be checked; suffix allowlists plus length floors carry the
+ *  weight:
+ *  - .narinfo: the store-path hash is exactly 32 chars (serveNarInfo rejects
+ *    others), so a valid path is at least "/<32>.narinfo" = 41 chars; the
+ *    per-cache form only adds length.
+ *  - NAR paths: every emitter — buildNarInfo (64-hex or 52-base32 nar hash),
+ *    standard upstreams (52-char base32 file hash), FlakeHub-style deep paths
+ *    (nar/<32>/sha256:<64-hex>.nar) — yields at least "/nar/<52>.nar" = 61
+ *    chars, and the compression suffix set is fixed (compressionExtension in
+ *    attic/narinfo.ts, plus legacy .bz2 upstream paths).
+ *  A ≥52-char junk hash with a valid suffix still clears both floors — that
+ *  residue is the worker's cheap 404/400, not the WAF's problem to solve.
+ *  Non-GET/HEAD methods are only legitimate under /_api/ (upload + admin
+ *  API), so elsewhere they block outright. `nix log` fetches (/log/<drv>)
+ *  are deliberately absent: the router has always 404ed them.
+ */
+const NAR_SUFFIXES = ['.nar', '.nar.zst', '.nar.xz', '.nar.gz', '.nar.br', '.nar.bz2'];
+const CACHE_READ_SHAPES =
+	`http.request.uri.path eq "/" or ` +
+	// Browsers landing on the cache host (redirected to the app by the router)
+	// ask for this; let it 404 in the worker rather than surface a WAF block.
+	`http.request.uri.path eq "/favicon.ico" or ` +
+	`ends_with(http.request.uri.path, "/nix-cache-info") or ` +
+	`ends_with(http.request.uri.path, "/attic-cache-info") or ` +
+	`starts_with(http.request.uri.path, "/_api/") or ` +
+	`(ends_with(http.request.uri.path, ".narinfo") and len(http.request.uri.path) >= 41) or ` +
+	`(http.request.uri.path contains "/nar/" and len(http.request.uri.path) >= 61 and (` +
+	NAR_SUFFIXES.map((s) => `ends_with(http.request.uri.path, "${s}")`).join(' or ') +
+	`))`;
+
 // One rule per host rather than one over both: the cache host adds a
 // query-string clause the dashboard cannot take (it uses ?page/?q/?cache
 // legitimately). Same action throughout, so the clauses OR-combine losslessly.
 // Both are kept separate from the geo gate below so Security > Events can
 // distinguish shape junk from geography when hunting false positives —
-// geography is the only clause a legit user could ever trip.
+// geography is the only clause a legit user could ever trip. The Free plan
+// caps this phase at 5 rules; this file deploys 3 with the geo gate off,
+// 4 with it on.
 const customRules = [
 	{
 		description: 'cache: junk shapes (query-string, method, oversized path, bots)',
@@ -187,6 +220,16 @@ const customRules = [
 			`(http.host eq "${cacheHost}" and (` +
 			`(not starts_with(http.request.uri.path, "/_api/") and http.request.uri.query ne "") or ` +
 			`${JUNK_SHAPES}))`,
+		action: 'block',
+		enabled: true
+	},
+	{
+		description: 'cache: paths outside the binary-cache protocol shapes',
+		expression:
+			`(http.host eq "${cacheHost}" and (` +
+			`(http.request.method in {"GET" "HEAD"} and not (${CACHE_READ_SHAPES})) or ` +
+			`(not http.request.method in {"GET" "HEAD"} and not starts_with(http.request.uri.path, "/_api/"))` +
+			`))`,
 		action: 'block',
 		enabled: true
 	}
