@@ -180,12 +180,17 @@ const JUNK_SHAPES =
  *  - .narinfo: the store-path hash is exactly 32 chars (serveNarInfo rejects
  *    others), so a valid path is at least "/<32>.narinfo" = 41 chars; the
  *    per-cache form only adds length.
- *  - NAR paths: every emitter — buildNarInfo (64-hex or 52-base32 nar hash),
- *    standard upstreams (52-char base32 file hash), FlakeHub-style deep paths
- *    (nar/<32>/sha256:<64-hex>.nar) — yields at least "/nar/<52>.nar" = 61
- *    chars, and the compression suffix set is fixed (compressionExtension in
- *    attic/narinfo.ts, plus legacy .bz2 upstream paths).
- *  A ≥52-char junk hash with a valid suffix still clears both floors — that
+ *  - NAR paths: the shortest legitimate name is a cachix UUID —
+ *    "/nar/<36-char uuid>.nar" = 45 chars. Do NOT raise this floor to fit the
+ *    hash-shaped emitters (buildNarInfo's 64-hex/52-base32, cache.nixos.org's
+ *    52-char base32, FlakeHub's nar/<32>/sha256:<64-hex>.nar, all ≥61): an
+ *    upstream narinfo is proxied through verbatim, so its relative `URL:` is
+ *    resolved by the client against THIS host, and a 61-char floor 403s every
+ *    cachix-backed NAR — which nix reports as "does not exist in binary
+ *    cache", not as a block. The compression suffix set is fixed
+ *    (compressionExtension in attic/narinfo.ts, plus legacy .bz2 upstream
+ *    paths).
+ *  A ≥45-char junk hash with a valid suffix still clears both floors — that
  *  residue is the worker's cheap 404/400, not the WAF's problem to solve.
  *  Non-GET/HEAD methods are only legitimate under /_api/ (upload + admin
  *  API), so elsewhere they block outright. `nix log` fetches (/log/<drv>)
@@ -201,7 +206,7 @@ const CACHE_READ_SHAPES =
 	`ends_with(http.request.uri.path, "/attic-cache-info") or ` +
 	`starts_with(http.request.uri.path, "/_api/") or ` +
 	`(ends_with(http.request.uri.path, ".narinfo") and len(http.request.uri.path) >= 41) or ` +
-	`(http.request.uri.path contains "/nar/" and len(http.request.uri.path) >= 61 and (` +
+	`(http.request.uri.path contains "/nar/" and len(http.request.uri.path) >= 45 and (` +
 	NAR_SUFFIXES.map((s) => `ends_with(http.request.uri.path, "${s}")`).join(' or ') +
 	`))`;
 
