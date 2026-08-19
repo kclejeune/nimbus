@@ -31,12 +31,14 @@
 		"head_sampling_rate": 1,
 		"logs": {
 			"enabled": true,
+			"destinations": [ "traceway-logs" ],
 			"head_sampling_rate": 1,
 			"persist": true,
 			"invocation_logs": true
 		},
 		"traces": {
 			"enabled": true,
+			"destinations": [ "traceway" ],
 			"persist": true,
 			"head_sampling_rate": 1
 		}
