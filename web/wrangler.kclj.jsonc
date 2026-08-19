@@ -38,7 +38,7 @@
 		},
 		"traces": {
 			"enabled": true,
-			"destinations": [ "traceway" ],
+			"destinations": [ "traceway-traces" ],
 			"persist": true,
 			"head_sampling_rate": 1
 		}
