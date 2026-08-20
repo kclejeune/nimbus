@@ -461,6 +461,12 @@ export async function filterUpstreamPaths(
  * Returns the narinfo text plus the upstream that served it, so callers can
  * apply the upstream's TTL to the response and trigger pull-through
  * persistence via `persistInto`.
+ *
+ * Fetches fan out concurrently but are awaited in priority order, so the
+ * highest-priority hit still wins while a slow upstream ahead of it costs
+ * max(latencies) instead of the old staircase's sum — the observed multi-
+ * second cold misses were exactly one 2-3s upstream serialized before the
+ * winner.
  */
 export async function fetchUpstreamNarInfo(
 	db: D1,
@@ -470,14 +476,15 @@ export async function fetchUpstreamNarInfo(
 	guard?: ProbeGuard
 ): Promise<{ text: string; upstream: Upstream } | null | typeof PROBE_REFUSED> {
 	const cached = await cachedVerdictsAcrossUpstreams(db, upstreams, storePathHash);
-	let allowed: boolean | undefined;
-	for (const upstream of upstreams) {
-		const verdict = cached.get(upstream.id);
-		if (verdict === VERDICT_ABSENT) continue;
-		// Every non-absent case fetches the upstream live (narinfo bodies are
-		// never stored in D1), so the whole loop rides one budget take.
-		if (!(allowed ??= await takeProbeBudget(guard))) return PROBE_REFUSED;
+	const candidates = upstreams.filter((u) => cached.get(u.id) !== VERDICT_ABSENT);
+	if (candidates.length === 0) return null;
+	// Every non-absent case fetches the upstream live (narinfo bodies are
+	// never stored in D1), so the whole fan-out rides one budget take.
+	if (!(await takeProbeBudget(guard))) return PROBE_REFUSED;
 
+	const attempt = async (
+		upstream: Upstream
+	): Promise<{ text: string; upstream: Upstream } | null> => {
 		try {
 			const res = await probeFetch(`${upstream.url}/${storePathHash}.narinfo`);
 			if (res.status === 200) {
@@ -486,16 +493,14 @@ export async function fetchUpstreamNarInfo(
 				// ingestibility knowledge (e.g. a redirect-mode HEAD before the
 				// upstream flipped to persist), and records mis-signed bodies absent
 				// (rechecked daily), so a re-signed upstream entry recovers on its
-				// own. The ABSENT case always differs from `verdict` — the loop
-				// skipped upstreams already known absent.
+				// own. The ABSENT case always differs from the cached verdict —
+				// known-absent upstreams were filtered out of the candidates.
 				const fresh = await classifyNarinfo(upstream, text);
-				if (verdict !== fresh) {
+				if (cached.get(upstream.id) !== fresh) {
 					recordVerdictDeferred(db, ctx, upstream.id, storePathHash, fresh, guard?.env);
 				}
-				if (fresh === VERDICT_ABSENT) continue;
-				return { text, upstream };
-			}
-			if (res.status === 404) {
+				if (fresh !== VERDICT_ABSENT) return { text, upstream };
+			} else if (res.status === 404) {
 				recordVerdictDeferred(db, ctx, upstream.id, storePathHash, VERDICT_ABSENT, guard?.env);
 			} else {
 				// Unexpected status (rate limit, block, outage): worth surfacing,
@@ -506,6 +511,29 @@ export async function fetchUpstreamNarInfo(
 			// transient upstream trouble: fall through to the next upstream
 			console.warn(`upstream ${upstream.url} fetch failed for ${storePathHash}: ${e}`);
 		}
+		return null;
+	};
+
+	// Fan out only up to (and including) the first upstream already believed
+	// to hold the entry: the sequential path would not have probed past it
+	// unless that belief proved stale live, so anything beyond stays lazy and
+	// steady-state upstream traffic matches the old loop (typically one fetch).
+	const firstBelieved = candidates.findIndex((u) => cached.has(u.id));
+	const eager = firstBelieved === -1 ? candidates : candidates.slice(0, firstBelieved + 1);
+	const inFlight = eager.map(attempt);
+	for (let i = 0; i < inFlight.length; i++) {
+		const hit = await inFlight[i];
+		if (hit) {
+			// Losing probes outlive the early return so their verdicts still
+			// record: the fan-out's extra fetches warm the verdict cache once
+			// instead of repeating on every future cold read of this path.
+			for (const p of inFlight.slice(i + 1)) ctx?.waitUntil(p);
+			return hit;
+		}
+	}
+	for (const upstream of candidates.slice(eager.length)) {
+		const hit = await attempt(upstream);
+		if (hit) return hit;
 	}
 	return null;
 }
@@ -526,22 +554,43 @@ export async function findUpstreamNar(
 ): Promise<string | null | typeof PROBE_REFUSED> {
 	const key = `nar:${narPath}`;
 	const cached = await cachedVerdictsAcrossUpstreams(db, upstreams, key);
-	let allowed: boolean | undefined;
+	// A cached non-absent verdict is trusted without a live probe, so only the
+	// unknowns ranked above the first such upstream need probing at all; it
+	// doubles as the fallback when they all miss.
+	let fallback: string | null = null;
+	const unknowns: Upstream[] = [];
 	for (const upstream of upstreams) {
-		const url = `${upstream.url}/${narPath}`;
 		const verdict = cached.get(upstream.id);
 		if (verdict === VERDICT_ABSENT) continue;
-		if (verdict !== undefined) return url;
-		if (!(allowed ??= await takeProbeBudget(guard))) return PROBE_REFUSED;
-		// No signature check on NARs: the client verifies the downloaded bytes
-		// against the NarHash of the (signature-checked) narinfo that named them.
+		if (verdict !== undefined) {
+			fallback = `${upstream.url}/${narPath}`;
+			break;
+		}
+		unknowns.push(upstream);
+	}
+	if (unknowns.length === 0) return fallback;
+	if (!(await takeProbeBudget(guard))) return PROBE_REFUSED;
+
+	// Concurrent probes, awaited in priority order: same winner as the old
+	// sequential loop, without serializing a slow upstream ahead of it.
+	// No signature check on NARs: the client verifies the downloaded bytes
+	// against the NarHash of the (signature-checked) narinfo that named them.
+	const inFlight = unknowns.map(async (upstream) => {
 		const probed = await probeUpstream(upstream, key);
 		if (probed !== null) {
 			recordVerdictDeferred(db, ctx, upstream.id, key, probed, guard?.env);
 		}
-		if (probed === VERDICT_PRESENT) return url;
+		return probed === VERDICT_PRESENT ? `${upstream.url}/${narPath}` : null;
+	});
+	for (let i = 0; i < inFlight.length; i++) {
+		const url = await inFlight[i];
+		if (url) {
+			// Losers keep running via waitUntil so their verdicts still record.
+			for (const p of inFlight.slice(i + 1)) ctx?.waitUntil(p);
+			return url;
+		}
 	}
-	return null;
+	return fallback;
 }
 
 // Per-isolate memo of upstream-NAR redirect resolution. The 302 for an

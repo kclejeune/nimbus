@@ -3,6 +3,7 @@ import {
 	allLiveUpstreams,
 	clearUpstreamsMemo,
 	effectiveUpstreamMode,
+	fetchUpstreamNarInfo,
 	findUpstreamNar,
 	PERSIST_MAX_NAR_BYTES,
 	probeUpstream,
@@ -204,6 +205,118 @@ describe('findUpstreamNar verdict writes', () => {
 		expect(await findUpstreamNar(db, up, path, ctx)).toBe(null);
 		await Promise.all(tasks);
 		expect(batches).toHaveLength(2);
+	});
+});
+
+describe('concurrent upstream probing', () => {
+	afterEach(() => vi.unstubAllGlobals());
+
+	// Fresh hashes/paths per test: the verdict-write coalescing memo is
+	// module-level and would otherwise leak across tests.
+	let seq = 100;
+	const freshHash = () => `h${(seq++).toString(36).padStart(8, '0')}`;
+
+	function deferred() {
+		let resolve!: (r: Response) => void;
+		const promise = new Promise<Response>((r) => (resolve = r));
+		return { promise, resolve };
+	}
+
+	/** A db whose upstream_check reads return the given rows; writes vanish. */
+	function dbWithVerdicts(rows: { upstream_id: number; present: number }[] = []) {
+		const checkedAt = new Date().toISOString();
+		return {
+			prepare: (sql: string) => ({
+				bind: () => ({
+					all: async () => ({
+						results: sql.includes('FROM upstream_check')
+							? rows.map((r) => ({ ...r, checked_at: checkedAt }))
+							: []
+					})
+				})
+			}),
+			batch: async (stmts: unknown[]) => stmts.map(() => ({ results: [] }))
+		} as never;
+	}
+
+	const ups = [
+		upstream({ id: 1, url: 'https://a.example' }),
+		upstream({ id: 2, url: 'https://b.example' })
+	];
+
+	it('findUpstreamNar fires all unknown probes at once; priority still wins', async () => {
+		const slow = deferred();
+		const spy = stubFetch((url) =>
+			url.startsWith('https://a.example') ? slow.promise : new Response(null, { status: 200 })
+		);
+		const path = `nar/${freshHash()}.nar.xz`;
+		const result = findUpstreamNar(dbWithVerdicts(), ups, path, undefined);
+		// Both probes are in flight before the higher-priority one resolves.
+		await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+		slow.resolve(new Response(null, { status: 200 }));
+		expect(await result).toBe(`https://a.example/${path}`);
+	});
+
+	it('findUpstreamNar falls through to a lower-priority hit when the first misses', async () => {
+		const slow = deferred();
+		stubFetch((url) =>
+			url.startsWith('https://a.example') ? slow.promise : new Response(null, { status: 200 })
+		);
+		const path = `nar/${freshHash()}.nar.xz`;
+		const result = findUpstreamNar(dbWithVerdicts(), ups, path, undefined);
+		slow.resolve(new Response(null, { status: 404 }));
+		expect(await result).toBe(`https://b.example/${path}`);
+	});
+
+	it('findUpstreamNar trusts a cached verdict as fallback and only probes above it', async () => {
+		const three = [...ups, upstream({ id: 3, url: 'https://c.example' })];
+		const spy = stubFetch(() => new Response(null, { status: 404 }));
+		const path = `nar/${freshHash()}.nar.xz`;
+		const result = await findUpstreamNar(
+			dbWithVerdicts([{ upstream_id: 2, present: VERDICT_PRESENT }]),
+			three,
+			path,
+			undefined
+		);
+		// Only the unknown above the cached hit is probed; c is never reached.
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][0]).toContain('https://a.example');
+		expect(result).toBe(`https://b.example/${path}`);
+	});
+
+	it('fetchUpstreamNarInfo fetches concurrently; priority still wins', async () => {
+		const slow = deferred();
+		const spy = stubFetch((url) =>
+			url.startsWith('https://a.example') ? slow.promise : new Response('B: b', { status: 200 })
+		);
+		const hash = freshHash();
+		const result = fetchUpstreamNarInfo(dbWithVerdicts(), ups, hash, undefined);
+		await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+		slow.resolve(new Response('A: a', { status: 200 }));
+		expect(await result).toMatchObject({ text: 'A: a', upstream: { id: 1 } });
+	});
+
+	it('fetchUpstreamNarInfo serves the lower-priority body when the first 404s', async () => {
+		stubFetch((url) =>
+			url.startsWith('https://a.example')
+				? new Response(null, { status: 404 })
+				: new Response('B: b', { status: 200 })
+		);
+		const result = await fetchUpstreamNarInfo(dbWithVerdicts(), ups, freshHash(), undefined);
+		expect(result).toMatchObject({ text: 'B: b', upstream: { id: 2 } });
+	});
+
+	it('fetchUpstreamNarInfo skips known-absent upstreams entirely', async () => {
+		const spy = stubFetch(() => new Response('B: b', { status: 200 }));
+		const result = await fetchUpstreamNarInfo(
+			dbWithVerdicts([{ upstream_id: 1, present: VERDICT_ABSENT }]),
+			ups,
+			freshHash(),
+			undefined
+		);
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][0]).toContain('https://b.example');
+		expect(result).toMatchObject({ upstream: { id: 2 } });
 	});
 });
 
