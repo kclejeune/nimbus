@@ -136,7 +136,7 @@
 		"sharp@0.34.5": true,
 		"esbuild@0.25.12": true,
 		"fsevents@2.3.3": true,
-		"workerd@1.20260722.1": true
+		"workerd@1.20260801.1": true
 	},
 	"dependencies": {
 		"better-auth": "^1.6.26",
