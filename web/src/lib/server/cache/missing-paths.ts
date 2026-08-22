@@ -14,9 +14,9 @@
 // present if its narinfo carries a valid signature from that key.
 
 import { parseNarInfo, parsedNarInfoSignatureValid, type ParsedNarInfo } from '../attic/narinfo';
-import { dbAll, dbBatch, readSession } from './db';
+import { dbAll, dbBatch, readSession, runBatched } from './db';
 import { recordGuard } from './metrics';
-import { type ExecutionContext } from './platform';
+import { sleep, type ExecutionContext } from './platform';
 import { TtlMemo } from './ttl-memo';
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
 
@@ -226,7 +226,16 @@ export async function recordVerdicts(
 	upstreamId: number,
 	verdicts: { hash: string; verdict: Verdict }[]
 ): Promise<void> {
-	const now = new Date().toISOString();
+	const stmts = verdictStmts(db, upstreamId, verdicts, new Date().toISOString());
+	await runBatched(db, stmts);
+}
+
+function verdictStmts(
+	db: D1,
+	upstreamId: number,
+	verdicts: { hash: string; verdict: Verdict }[],
+	now: string
+): D1PreparedStatement[] {
 	// 4 bind params per row, stay under D1's 100-param limit.
 	const ROWS_PER_STMT = 24;
 	const stmts: D1PreparedStatement[] = [];
@@ -245,7 +254,7 @@ export async function recordVerdicts(
 				.bind(...params)
 		);
 	}
-	if (stmts.length > 0) await dbBatch(db, stmts);
+	return stmts;
 }
 
 // Coalescing for the single-row verdict writes on the read paths below. Each
@@ -321,6 +330,39 @@ async function takeAbsentVerdictBudget(env: Env): Promise<boolean> {
 	}
 }
 
+// Cross-request batching for the deferred writes: the per-key coalescing
+// above cannot help a mass-query burst (its keys are all distinct), and one
+// single-row write-txn per cold path is what queued the primary into
+// "requests queued for too long" (2026-08-22). Only shared *data* crosses
+// requests here — the flusher's delay and writes stay in its own request's
+// context, since waiting on another request's promise is the 1101 trap
+// (platform.ts, Semaphore). Rows stranded by a cancelled flusher ride the
+// next enqueue's flush, or at worst are re-probed. Verdict-specific on
+// purpose: a second deferred-write consumer is the trigger for extracting
+// this into db.ts, not before.
+const VERDICT_FLUSH_DELAY_MS = 250;
+// Early-flush threshold: bounds the buffer (the only module-global that
+// would otherwise grow with a burst) and keeps any one flush a modest txn.
+const VERDICT_FLUSH_MAX_ROWS = 500;
+const pendingVerdicts = new Map<number, Map<string, Verdict>>();
+let pendingVerdictRows = 0;
+let verdictFlushArmed = false;
+
+async function flushPendingVerdicts(db: D1): Promise<void> {
+	const now = new Date().toISOString();
+	const stmts = [...pendingVerdicts].flatMap(([upstreamId, rows]) =>
+		verdictStmts(
+			db,
+			upstreamId,
+			Array.from(rows, ([hash, verdict]) => ({ hash, verdict })),
+			now
+		)
+	);
+	pendingVerdicts.clear();
+	pendingVerdictRows = 0;
+	await runBatched(db, stmts);
+}
+
 function recordVerdictDeferred(
 	db: D1,
 	ctx: ExecutionContext | undefined,
@@ -343,7 +385,24 @@ function recordVerdictDeferred(
 			recentVerdictWrites.delete(key);
 			return;
 		}
-		await recordVerdicts(db, upstreamId, [{ hash, verdict }]);
+		const bucket = pendingVerdicts.get(upstreamId) ?? new Map<string, Verdict>();
+		pendingVerdicts.set(upstreamId, bucket);
+		if (!bucket.has(hash)) pendingVerdictRows++;
+		bucket.set(hash, verdict);
+		if (pendingVerdictRows >= VERDICT_FLUSH_MAX_ROWS) {
+			await flushPendingVerdicts(db);
+			return;
+		}
+		// One armed flusher per window; later enqueues ride its flush instead
+		// of each holding their invocation open on a redundant timer.
+		if (verdictFlushArmed) return;
+		verdictFlushArmed = true;
+		try {
+			await sleep(VERDICT_FLUSH_DELAY_MS);
+		} finally {
+			verdictFlushArmed = false;
+		}
+		await flushPendingVerdicts(db);
 	})().catch(() => {});
 	ctx?.waitUntil(write);
 }

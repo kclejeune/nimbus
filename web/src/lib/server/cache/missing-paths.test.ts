@@ -201,10 +201,26 @@ describe('findUpstreamNar verdict writes', () => {
 
 		stubFetch(() => new Response(null, { status: 200 }));
 		expect(await findUpstreamNar(db, up, path, ctx)).toBe(`https://up.example/${path}`);
+		await Promise.all(tasks);
+		expect(batches).toHaveLength(1);
 		stubFetch(() => new Response(null, { status: 404 }));
 		expect(await findUpstreamNar(db, up, path, ctx)).toBe(null);
 		await Promise.all(tasks);
 		expect(batches).toHaveLength(2);
+	});
+
+	it('coalesces concurrent writes for distinct paths into one flush', async () => {
+		const { db, batches } = verdictDb();
+		const { tasks, ctx } = collectingCtx();
+		stubFetch(() => new Response(null, { status: 200 }));
+
+		const up = [upstream({ url: 'https://up.example' })];
+		expect(await findUpstreamNar(db, up, freshPath(), ctx)).toContain('https://up.example/');
+		expect(await findUpstreamNar(db, up, freshPath(), ctx)).toContain('https://up.example/');
+		expect(tasks).toHaveLength(2);
+		await Promise.all(tasks);
+		// One batch, not one write-txn per path.
+		expect(batches).toHaveLength(1);
 	});
 });
 

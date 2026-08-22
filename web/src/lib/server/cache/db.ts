@@ -34,7 +34,18 @@ export function isTransientD1Error(e: unknown): boolean {
  * jittered exponential backoff (~40/80/160 ms). Non-transient errors rethrow
  * on the first failure. */
 export const withD1Retry = <T>(op: () => Promise<T>, attempts = 4): Promise<T> =>
-	withRetry(op, { attempts, baseMs: 40, shouldRetry: isTransientD1Error });
+	withRetry(op, {
+		attempts,
+		baseMs: 40,
+		shouldRetry: (e) => {
+			const transient = isTransientD1Error(e);
+			// Surface queue pressure even when the retry succeeds: the
+			// 2026-08-22 primary stalls were invisible until reads failed
+			// outright, because absorbed retries logged nothing.
+			if (transient) console.warn(`transient D1 error, retrying: ${e}`);
+			return transient;
+		}
+	});
 
 /** Prepared-statement execution wrappers that retry transient D1 errors.
  * Every read-path and upload-path query goes through these; the remaining raw

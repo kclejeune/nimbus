@@ -4,7 +4,7 @@
 
 import { permissionForCache, type VerifiedToken } from '../attic/token';
 import { generateKeypair } from '../attic/signing';
-import { TOUCH_GRANULARITY_MS, type LiveCacheRow } from './db';
+import { dbFirst, dbRun, readSession, TOUCH_GRANULARITY_MS, type LiveCacheRow } from './db';
 import { TtlMemo } from './ttl-memo';
 
 type Env = App.Platform['env'];
@@ -110,21 +110,26 @@ export function getProxyKeypair(env: Env): Promise<string> {
 }
 
 async function loadProxyKeypair(env: Env): Promise<string> {
-	const read = () =>
-		env.ATTIC_DB.prepare("SELECT value FROM server_config WHERE key = 'proxy_keypair'").first<{
-			value: string;
-		}>();
+	const read = (db: Env['ATTIC_DB']) =>
+		dbFirst<{ value: string }>(
+			db.prepare("SELECT value FROM server_config WHERE key = 'proxy_keypair'")
+		);
 
-	const existing = await read();
+	// Replica read: the key never changes once written, and the raw binding
+	// routes to the primary — whose queue this per-cold-isolate read helped
+	// back up during mass-query bursts (2026-08-22, "queued for too long").
+	const existing = await read(readSession(env.ATTIC_DB));
 	if (existing) return existing.value;
 
 	const keypair = await generateKeypair(proxyKeyName(env));
-	await env.ATTIC_DB.prepare(
-		"INSERT OR IGNORE INTO server_config (key, value) VALUES ('proxy_keypair', ?1)"
-	)
-		.bind(keypair)
-		.run();
-	const row = await read();
+	await dbRun(
+		env.ATTIC_DB.prepare(
+			"INSERT OR IGNORE INTO server_config (key, value) VALUES ('proxy_keypair', ?1)"
+		).bind(keypair)
+	);
+	// Read-your-write: the raw binding sees the row this isolate (or a
+	// concurrent winner) just inserted; a replica might not yet.
+	const row = await read(env.ATTIC_DB);
 	if (!row) throw new Error('proxy keypair write failed');
 	return row.value;
 }

@@ -115,7 +115,9 @@ export async function persistUpstreamPath(
 	try {
 		// The persist marker rode an edge-cached response, so re-check the
 		// registry before acting on it: an upstream removed (or re-keyed) since
-		// the entry was cached is revoked trust — do not ingest from it.
+		// the entry was cached is revoked trust — do not ingest from it. Raw
+		// binding on purpose: a lagging replica could still show the removed
+		// upstream, so this revocation check must read the primary.
 		const registered = await env.ATTIC_DB.prepare('SELECT id FROM upstream WHERE url = ?1')
 			.bind(upstreamUrl)
 			.first<{ id: number }>();

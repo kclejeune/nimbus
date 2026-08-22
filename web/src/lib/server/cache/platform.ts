@@ -31,6 +31,11 @@ export function newDigestStream(): DigestStreamLike {
 	return new workersCrypto.DigestStream('SHA-256');
 }
 
+/** A timer is a request's own I/O and thus the only context-safe wait on
+ * Workers (see Semaphore below); every delay in this package routes through
+ * here so that invariant has one home. */
+export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 /** Retry an async operation with jittered exponential backoff. shouldRetry
  * gates which failures are worth re-attempting (default: all). */
 export async function withRetry<T>(
@@ -44,7 +49,7 @@ export async function withRetry<T>(
 			return await op();
 		} catch (e) {
 			if (attempt >= attempts || !shouldRetry(e)) throw e;
-			await new Promise((r) => setTimeout(r, backoff + Math.random() * backoff));
+			await sleep(backoff + Math.random() * backoff);
 			backoff *= 2;
 		}
 	}
@@ -76,7 +81,7 @@ export class Semaphore {
 		// sustained contention backs off toward a steady ~40-80 ms.
 		let interval = 5;
 		while (this.free <= 0) {
-			await new Promise((r) => setTimeout(r, interval + Math.random() * interval));
+			await sleep(interval + Math.random() * interval);
 			interval = Math.min(interval * 2, 40);
 		}
 		this.free--;
