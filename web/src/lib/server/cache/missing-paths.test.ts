@@ -4,6 +4,7 @@ import {
 	clearUpstreamsMemo,
 	effectiveUpstreamMode,
 	fetchUpstreamNarInfo,
+	filterUpstreamPaths,
 	findUpstreamNar,
 	PERSIST_MAX_NAR_BYTES,
 	probeUpstream,
@@ -333,6 +334,84 @@ describe('concurrent upstream probing', () => {
 		expect(spy).toHaveBeenCalledTimes(1);
 		expect(spy.mock.calls[0][0]).toContain('https://b.example');
 		expect(result).toMatchObject({ upstream: { id: 2 } });
+	});
+});
+
+describe('filterUpstreamPaths', () => {
+	afterEach(() => vi.unstubAllGlobals());
+
+	const h1 = 'a'.repeat(32);
+	const h2 = 'b'.repeat(32);
+
+	/** A db whose upstream_check reads answer per upstream id (the statement's
+	 * first bound param); verdict writes vanish. */
+	function dbWithUpstreamVerdicts(rowsByUpstream: Record<number, Record<string, number>>) {
+		const checkedAt = new Date().toISOString();
+		return {
+			prepare: (sql: string) => ({
+				bind: (...params: unknown[]) => ({ sql, params })
+			}),
+			batch: async (stmts: { sql: string; params: unknown[] }[]) =>
+				stmts.map((s) => ({
+					results: s.sql.includes('FROM upstream_check')
+						? Object.entries(rowsByUpstream[s.params[0] as number] ?? {}).map(
+								([store_path_hash, present]) => ({
+									store_path_hash,
+									present,
+									checked_at: checkedAt
+								})
+							)
+						: []
+				}))
+		} as never;
+	}
+
+	it('filters cached-present paths and probes only the unknowns', async () => {
+		const spy = stubFetch(() => new Response(null, { status: 404 }));
+		const db = dbWithUpstreamVerdicts({ 1: { [h1]: VERDICT_PRESENT } });
+		const result = await filterUpstreamPaths(
+			db,
+			[upstream({ id: 1, url: 'https://a.example' })],
+			[h1, h2]
+		);
+		expect(result).toEqual([h2]);
+		// Only the unknown hash is probed; the cached one costs no fetch.
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][0]).toContain(h2);
+	});
+
+	it('paths covered by an earlier upstream are not re-probed on later ones', async () => {
+		const spy = stubFetch(() => new Response(null, { status: 404 }));
+		const db = dbWithUpstreamVerdicts({ 1: { [h1]: VERDICT_PRESENT } });
+		const ups = [
+			upstream({ id: 1, url: 'https://a.example' }),
+			upstream({ id: 2, url: 'https://b.example' })
+		];
+		expect(await filterUpstreamPaths(db, ups, [h1, h2])).toEqual([h2]);
+		// h1 was covered by upstream 1's cached verdict — no probe anywhere.
+		for (const call of spy.mock.calls) expect(call[0]).not.toContain(h1);
+	});
+
+	it('unpersistable verdicts cover for redirect upstreams but not persist ones', async () => {
+		stubFetch(() => new Response(null, { status: 404 }));
+		const cached = { 1: { [h1]: VERDICT_UNPERSISTABLE } };
+		const redirect = [upstream({ id: 1, url: 'https://a.example' })];
+		expect(await filterUpstreamPaths(dbWithUpstreamVerdicts(cached), redirect, [h1])).toEqual([]);
+		const persist = [upstream({ id: 1, url: 'https://a.example', mode: 'persist' })];
+		expect(await filterUpstreamPaths(dbWithUpstreamVerdicts(cached), persist, [h1])).toEqual([h1]);
+	});
+
+	it('live probe hits cover the path', async () => {
+		stubFetch((url) =>
+			url.includes(h1) ? new Response(null, { status: 200 }) : new Response(null, { status: 404 })
+		);
+		const db = dbWithUpstreamVerdicts({});
+		const result = await filterUpstreamPaths(
+			db,
+			[upstream({ id: 1, url: 'https://a.example' })],
+			[h1, h2]
+		);
+		expect(result).toEqual([h2]);
 	});
 });
 

@@ -216,11 +216,13 @@ export async function warmNarinfoAfterUpload(
 	ctx: ExecutionContext | undefined,
 	origin: string,
 	cache: { name: string; keypair: string | null },
-	storePathHash: string
+	storePathHash: string,
+	narHash: string
 ): Promise<void> {
 	// The root proxy's negative memo is per-isolate; this clears it where the
-	// upload landed, and the TTL bounds the others.
-	clearAbsent(storePathHash);
+	// upload landed, along with both candidate lookups. The TTL bounds the
+	// other isolates.
+	clearAbsent(storePathHash, narHash);
 	const store = ctx?.exports?.CachedStore;
 	if (!store) return;
 	try {
@@ -628,23 +630,54 @@ async function serveNar(
 	}
 
 	// Multi-chunk: stream the stored files back to back (zstd and gzip both
-	// concatenate cleanly), prefetching the next object while the current one
-	// is piped, like the reference server's chunk prefetcher.
+	// concatenate cleanly), keeping a small window of R2 gets in flight ahead
+	// of the chunk being piped, like the reference server's chunk prefetcher.
+	// Two ahead rather than one: with one, an R2 TTFB slower than the current
+	// chunk's pipe time stalls the stream at every boundary; two absorbs one
+	// slow get without stacking connections against the platform's concurrent
+	// outbound cap (pipe + 2 gets = 3).
+	const PUMP_LOOKAHEAD = 2;
 	const totalSize = chunks.every((c) => c.file_size != null)
 		? chunks.reduce((sum, c) => sum + (c.file_size ?? 0), 0)
 		: null;
 	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
 	const pump = async () => {
-		let next = withR2Retry(() => env.CACHE_BUCKET.get(keys[0]));
-		for (let i = 0; i < keys.length; i++) {
-			const object = await next;
-			if (i + 1 < keys.length) next = withR2Retry(() => env.CACHE_BUCKET.get(keys[i + 1]));
-			if (!object) throw new Error(`File not found in storage: ${keys[i]}`);
-			await (object.body as unknown as ReadableStream<Uint8Array>).pipeTo(writable, {
-				preventClose: true
-			});
+		// Queue of gets for chunks not yet piped, in key order; fill() tops it
+		// up to the lookahead window.
+		const getChunk = (key: string) => withR2Retry(() => env.CACHE_BUCKET.get(key));
+		const inFlight: ReturnType<typeof getChunk>[] = [];
+		let next = 0;
+		const fill = () => {
+			while (next < keys.length && inFlight.length < PUMP_LOOKAHEAD) {
+				const get = getChunk(keys[next++]);
+				// Mark handled: when the pump aborts on an earlier chunk, a late
+				// rejection here must not surface as an unhandled rejection. The
+				// real await below still observes it.
+				get.catch(() => {});
+				inFlight.push(get);
+			}
+		};
+		try {
+			fill();
+			for (let i = 0; i < keys.length; i++) {
+				const object = await inFlight.shift()!;
+				fill();
+				if (!object) throw new Error(`File not found in storage: ${keys[i]}`);
+				await (object.body as unknown as ReadableStream<Uint8Array>).pipeTo(writable, {
+					preventClose: true
+				});
+			}
+			await writable.close();
+		} catch (e) {
+			// Cancel prefetched bodies so their connections don't linger for the
+			// rest of the invocation.
+			for (const get of inFlight) {
+				get
+					.then((o) => (o?.body as unknown as ReadableStream<Uint8Array> | undefined)?.cancel())
+					.catch(() => {});
+			}
+			throw e;
 		}
-		await writable.close();
 	};
 	const pumping = pump().catch((e) => writable.abort(e).catch(() => {}));
 	ctx?.waitUntil(pumping);

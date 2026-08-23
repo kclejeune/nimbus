@@ -2,9 +2,19 @@
 // serves a given hash. Pure logic here; HTTP handlers live in router.ts and
 // the re-signing store path in store.ts.
 
+import type { D1Database } from '@cloudflare/workers-types';
 import { permissionForCache, type VerifiedToken } from '../attic/token';
 import { generateKeypair } from '../attic/signing';
-import { dbFirst, dbRun, readSession, TOUCH_GRANULARITY_MS, type LiveCacheRow } from './db';
+import {
+	cachesWithNarHash,
+	cachesWithStorePathHash,
+	dbFirst,
+	dbRun,
+	readSession,
+	TOUCH_GRANULARITY_MS,
+	type LiveCacheRow
+} from './db';
+import { sleep } from './platform';
 import { TtlMemo } from './ttl-memo';
 
 type Env = App.Platform['env'];
@@ -49,9 +59,137 @@ export function recordAbsent(storePathHash: string): void {
 	absentStorePaths.set(storePathHash, true);
 }
 
-/** Called after an upload lands the path, so this isolate stops 404ing it. */
-export function clearAbsent(storePathHash: string): void {
+/** Called after an upload lands the path, so this isolate stops 404ing it
+ * and re-resolves which caches hold both the store path and its NAR. */
+export function clearAbsent(storePathHash: string, narHash?: string): void {
 	absentStorePaths.delete(storePathHash);
+	storePathCandidates.delete(storePathHash);
+	invalidateLoading(storePathCandidateLoads, storePathHash);
+	if (narHash !== undefined) {
+		const key = narCandidateKey(narHash);
+		narHashCandidates.delete(key);
+		invalidateLoading(narHashCandidateLoads, key);
+	}
+}
+
+// Candidate-set memo for root-proxy resolution. The readable winner determines
+// the edge key, so the gateway resolves candidates on EVERY unified-endpoint
+// read — including edge hits, which skip D1 everywhere else. Under a fleet
+// mass-pull through the root that replica read per request is the dominant
+// remaining D1 load on the read path; this memo collapses it to one read per
+// hash per window per isolate, like findCacheCached does for cache rows.
+//
+// Candidate rows contain visibility and priority, so cache-config mutations
+// clear these memos in their isolate. Other isolates retain the same bounded
+// staleness as findCacheCached rather than extending the authorization window.
+// Uploads evict the affected store-path and NAR keys through clearAbsent.
+const CANDIDATES_TTL_MS = 30_000;
+const CANDIDATES_MAX_ENTRIES = 50_000;
+const storePathCandidates = new TtlMemo<LiveCacheRow[]>(CANDIDATES_TTL_MS, CANDIDATES_MAX_ENTRIES);
+const narHashCandidates = new TtlMemo<LiveCacheRow[]>(CANDIDATES_TTL_MS, CANDIDATES_MAX_ENTRIES);
+
+interface CandidateLoad {
+	invalidated: boolean;
+	deadlineAt: number;
+}
+
+const storePathCandidateLoads = new Map<string, CandidateLoad>();
+const narHashCandidateLoads = new Map<string, CandidateLoad>();
+
+function invalidateLoading(loads: Map<string, CandidateLoad>, key?: string): void {
+	if (key !== undefined) {
+		const load = loads.get(key);
+		if (load) load.invalidated = true;
+		return;
+	}
+	for (const load of loads.values()) load.invalidated = true;
+}
+
+/** Cache-config rows contribute visibility and priority to every candidate
+ * result, so any mutation drops both candidate sets in this isolate. */
+export function invalidateProxyCandidates(): void {
+	storePathCandidates.clear();
+	narHashCandidates.clear();
+	invalidateLoading(storePathCandidateLoads);
+	invalidateLoading(narHashCandidateLoads);
+}
+
+/** Coalesce a cold-key burst without sharing an I/O promise between Workers
+ * request contexts. Waiters poll on their own timers, like Semaphore, and the
+ * leader publishes only the completed plain value.
+ *
+ * Waiters are deadline-bounded: a leader whose request context is torn down
+ * mid-load (client abort) never reaches its finally, so its marker would
+ * otherwise wedge the key for the isolate's lifetime — every later request
+ * polling forever. Past the deadline a waiter issues its own load, replacing
+ * the stale marker; a duplicate replica read in that rare case is exactly the
+ * cost the memo exists to save. The backoff cap stays under a typical replica
+ * read so a waiter's last poll interval doesn't dominate the cold-key tail. */
+const LOAD_WAIT_DEADLINE_MS = 500;
+
+async function candidatesCached(
+	memo: TtlMemo<LiveCacheRow[]>,
+	loads: Map<string, CandidateLoad>,
+	key: string,
+	load: () => Promise<LiveCacheRow[]>
+): Promise<LiveCacheRow[]> {
+	let interval = 5;
+	for (;;) {
+		const cached = memo.get(key);
+		if (cached !== undefined) return cached;
+
+		const active = loads.get(key);
+		if (active && Date.now() < active.deadlineAt) {
+			const delay = interval + Math.random() * interval;
+			await sleep(delay);
+			interval = Math.min(interval * 2, 20);
+			continue;
+		}
+
+		// Expiry belongs to the marker rather than each waiter. The first waiter
+		// to observe an expired load replaces it synchronously; every other
+		// waiter then observes the replacement's fresh deadline instead of
+		// starting another replica read. Prevent the superseded leader from
+		// publishing if its request unexpectedly resumes later.
+		if (active) active.invalidated = true;
+		const marker: CandidateLoad = {
+			invalidated: false,
+			deadlineAt: Date.now() + LOAD_WAIT_DEADLINE_MS
+		};
+		loads.set(key, marker);
+		try {
+			const rows = await load();
+			if (!marker.invalidated) memo.set(key, rows);
+			return rows;
+		} finally {
+			if (loads.get(key) === marker) loads.delete(key);
+		}
+	}
+}
+
+function narCandidateKey(narHash: string): string {
+	return narHash.startsWith('sha256:') ? narHash.slice('sha256:'.length) : narHash;
+}
+
+/** Memoized cachesWithStorePathHash over a replica session derived here (the
+ * memo is isolate-wide, so a per-caller session could not buy freshness).
+ * Returned rows are shared across callers — treat them read-only. */
+export async function candidatesForStorePath(
+	db: D1Database,
+	storePathHash: string
+): Promise<LiveCacheRow[]> {
+	return candidatesCached(storePathCandidates, storePathCandidateLoads, storePathHash, () =>
+		cachesWithStorePathHash(readSession(db), storePathHash)
+	);
+}
+
+/** Memoized cachesWithNarHash, with raw and sha256:-prefixed spellings folded
+ * onto one key. Successful uploads evict that key via clearAbsent. */
+export async function candidatesForNar(db: D1Database, narHash: string): Promise<LiveCacheRow[]> {
+	const key = narCandidateKey(narHash);
+	return candidatesCached(narHashCandidates, narHashCandidateLoads, key, () =>
+		cachesWithNarHash(readSession(db), [`sha256:${key}`, key])
+	);
 }
 
 // Download-touch coalescing, first of two layers. Retention is

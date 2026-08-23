@@ -506,7 +506,13 @@ export async function handleUploadPath(
 		// transfers it (the possession proof), so it holds for both branches.
 		recordPush(env, info.cache, { deduplicated: !!existing, narBytes: narLength ?? 0 });
 		ctx?.waitUntil(
-			warmNarinfoAfterUpload(ctx, new URL(request.url).origin, cache, info.store_path_hash)
+			warmNarinfoAfterUpload(
+				ctx,
+				new URL(request.url).origin,
+				cache,
+				info.store_path_hash,
+				info.nar_hash
+			)
 		);
 	}
 	return response;
@@ -725,7 +731,7 @@ export async function handleCdcQuery(
 	if (existing) {
 		const response = await finishDeduplicated(env, info, cache.id, existing.id);
 		if (response.ok) recordPush(env, info.cache, { deduplicated: true, narBytes: body.nar_size });
-		ctx?.waitUntil(warmNarinfoAfterUpload(ctx, origin, cache, info.store_path_hash));
+		ctx?.waitUntil(warmNarinfoAfterUpload(ctx, origin, cache, info.store_path_hash, info.nar_hash));
 		return response;
 	}
 
@@ -832,7 +838,7 @@ export async function handleCdcComplete(
 	const cache = await findCacheCached(env.ATTIC_DB, info.cache);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
 	const warm = () =>
-		ctx?.waitUntil(warmNarinfoAfterUpload(ctx, origin, cache, info.store_path_hash));
+		ctx?.waitUntil(warmNarinfoAfterUpload(ctx, origin, cache, info.store_path_hash, info.nar_hash));
 
 	const existingNar = await tryLockNarProbed(env, info.nar_hash);
 	if (existingNar) {

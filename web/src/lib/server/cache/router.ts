@@ -29,6 +29,8 @@ import {
 } from './missing-paths';
 import { type ExecutionContext } from './platform';
 import {
+	candidatesForNar,
+	candidatesForStorePath,
 	getProxyKeypair,
 	isKnownAbsent,
 	pickReadableWinner,
@@ -81,6 +83,18 @@ const REVOCATION_TTL_MS = 30_000;
 const REVOCATION_MEMO_MAX_ENTRIES = 10_000;
 const revocationMemo = new TtlMemo<boolean>(REVOCATION_TTL_MS, REVOCATION_MEMO_MAX_ENTRIES);
 
+// Per-isolate memo of successful signature verifications, keyed by the raw
+// bearer string. A CI fleet re-presents one token for hundreds of pulls/sec,
+// and each verification is a WebCrypto await (worst on RS256) — pure CPU
+// repeated for an unchanged input. Only successes are memoized (a failure
+// re-verifies, so transient key-import errors never stick), the entry TTL is
+// capped by the token's own exp so expiry is still enforced to the second,
+// and the revocation check below runs on memo hits too. Keys are whole JWTs
+// (~1 KB), hence the smaller entry cap than the revocation memo.
+const VERIFY_TTL_MS = 30_000;
+const VERIFY_MEMO_MAX_ENTRIES = 2_000;
+const verifiedTokens = new TtlMemo<VerifiedToken>(VERIFY_TTL_MS, VERIFY_MEMO_MAX_ENTRIES);
+
 async function isJtiDisabled(env: Env, jti: string): Promise<boolean> {
 	const cached = revocationMemo.get(jti);
 	if (cached !== undefined) return cached;
@@ -108,17 +122,27 @@ async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedT
 		throw new MisconfigError('JWT secret not configured');
 	}
 
-	const token = await verifyAtticToken(
-		bearer,
-		{
-			hs256SecretBase64: env.JWT_HS256_SECRET_BASE64,
-			rs256PubkeyBase64: env.JWT_RS256_PUBKEY_BASE64
-		},
-		{
-			issuer: env.JWT_BOUND_ISSUER || undefined,
-			audiences: env.JWT_BOUND_AUDIENCES?.split(',').filter(Boolean)
-		}
-	);
+	let token = verifiedTokens.get(bearer);
+	if (!token) {
+		token = await verifyAtticToken(
+			bearer,
+			{
+				hs256SecretBase64: env.JWT_HS256_SECRET_BASE64,
+				rs256PubkeyBase64: env.JWT_RS256_PUBKEY_BASE64
+			},
+			{
+				issuer: env.JWT_BOUND_ISSUER || undefined,
+				audiences: env.JWT_BOUND_AUDIENCES?.split(',').filter(Boolean)
+			}
+		);
+		// Expire the memo entry no later than the token: a hit must never
+		// outlive what a fresh verification would reject.
+		const ttl =
+			token.exp !== undefined
+				? Math.min(VERIFY_TTL_MS, token.exp * 1000 - Date.now())
+				: VERIFY_TTL_MS;
+		if (ttl > 0) verifiedTokens.set(bearer, token, ttl);
+	}
 
 	// Admin-issued tokens carry a jti and can be revoked, or suspended while
 	// the owner's account is deactivated. A failed lookup is logged and
@@ -148,6 +172,16 @@ async function authorizeCacheRead(
 	env: Env,
 	cacheName: string
 ): Promise<{ cache: db.CacheRow } | { response: Response }> {
+	// The cache row is token-independent, so its lookup runs concurrently with
+	// token verification: each is a replica round-trip on its memo-miss window
+	// (the row read here, the jti revocation check inside verifyRequestToken),
+	// and cold windows land on exactly the burst traffic where serializing them
+	// showed up in the tail. Every path below awaits cachePromise, so a lookup
+	// failure surfaces as before; the side .catch only marks the rejection
+	// handled during the token-verification window so workerd doesn't report
+	// it as unhandled in the interim.
+	const cachePromise = findCacheCached(env.ATTIC_DB, cacheName);
+	cachePromise.catch(() => {});
 	let permission: Permission;
 	let authError: unknown = null;
 	try {
@@ -163,7 +197,7 @@ async function authorizeCacheRead(
 	// flip) taking effect with replica lag — now bounded by the memo TTL rather
 	// than sub-second — is acceptable for read authorization, and collapses the
 	// per-path lookups of a mass-query burst to one row read per window.
-	const cache = await findCacheCached(env.ATTIC_DB, cacheName);
+	const cache = await cachePromise;
 	if (!cache) {
 		if (hasDiscovery) {
 			return { response: errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache') };
@@ -393,9 +427,15 @@ async function handleProxyNarInfo(
 		return errorResponse(404, 'Not found', 'NoSuchObject');
 	}
 
-	const token = await proxyToken(request, env);
-	const session = db.readSession(env.ATTIC_DB);
-	const candidates = await db.cachesWithStorePathHash(session, storePathHash);
+	// Token verification (CPU plus, at worst, a memoized revocation read) and
+	// candidate resolution (memoized replica read) are independent — run them
+	// concurrently. The candidates memo is what keeps edge hits off D1: the
+	// winner determines the edge key, so this resolution runs on every root
+	// read, cached or not.
+	const [token, candidates] = await Promise.all([
+		proxyToken(request, env),
+		candidatesForStorePath(env.ATTIC_DB, storePathHash)
+	]);
 	const winner = pickReadableWinner(token, candidates);
 	// No local winner (not stored anywhere, or stored only in caches this
 	// requester can't read): fall back to the union of live caches' upstreams.
@@ -446,12 +486,12 @@ async function handleProxyNar(
 	const narHashRaw = filename.split('.')[0];
 	if (!narHashRaw) return errorResponse(400, 'Invalid NAR path');
 
-	const token = await proxyToken(request, env);
-	const session = db.readSession(env.ATTIC_DB);
-	const winner = pickReadableWinner(
-		token,
-		await db.cachesWithNarHash(session, [`sha256:${narHashRaw}`, narHashRaw])
-	);
+	// Same concurrent shape (and memo rationale) as handleProxyNarInfo above.
+	const [token, narCandidates] = await Promise.all([
+		proxyToken(request, env),
+		candidatesForNar(env.ATTIC_DB, narHashRaw)
+	]);
+	const winner = pickReadableWinner(token, narCandidates);
 	// NAR URLs served by root-proxy upstream passthrough narinfos resolve here
 	// with no local winner, so the root needs the same upstream redirect as the
 	// per-cache route — against the union of live caches' upstreams.
@@ -535,18 +575,31 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	// Replica reads throughout: staleness at worst re-reports a just-pushed
 	// path as missing, and the upload path dedups the re-push. Keeps this
 	// run-start read burst (nix-fast-build checks every path up front) off the
-	// write primary, which is where the push writes contend.
+	// write primary, which is where the push writes contend. The cache row
+	// rides the same memo as the serve and upload paths.
+	//
+	// The three reads are only partially dependent — the existing-paths scan
+	// keys on the cache NAME while the upstream list needs the row — so the
+	// scan overlaps both the row lookup and the upstream read instead of
+	// serializing three replica round-trips. Side .catch marks the scan's
+	// rejection handled while the row lookup is outstanding; the real await
+	// below still rethrows it. A missing-cache return drains the speculative
+	// scan so no binding work outlives the request.
 	const session = db.readSession(env.ATTIC_DB);
-	const cache = await db.findCache(session, body.cache);
-	if (!cache) return errorResponse(404, `Cache not found: ${body.cache}`, 'NoSuchCache');
-
 	const hashes = body.store_path_hashes.filter((h) => typeof h === 'string' && h.length === 32);
-	const existing = await findExistingPaths(session, body.cache, hashes);
-	const missing = hashes.filter((h) => !existing.has(h));
+	const existingPromise = findExistingPaths(session, body.cache, hashes);
+	existingPromise.catch(() => {});
+	const cache = await findCacheCached(env.ATTIC_DB, body.cache);
+	if (!cache) {
+		await existingPromise.catch(() => {});
+		return errorResponse(404, `Cache not found: ${body.cache}`, 'NoSuchCache');
+	}
 
 	const upstreams = body.ignore_upstream_cache_filter
 		? []
 		: await upstreamsForCache(session, cache);
+	const existing = await existingPromise;
+	const missing = hashes.filter((h) => !existing.has(h));
 	const missingPaths =
 		upstreams.length > 0 && missing.length > 0
 			? await filterUpstreamPaths(session, upstreams, missing)

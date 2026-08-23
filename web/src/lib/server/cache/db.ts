@@ -694,7 +694,11 @@ export async function updateNarState(db: D1Database, narId: number, state: strin
 
 /**
  * Which of the given `sha256:`-prefixed chunk hashes exist as valid chunks
- * under the given compression. Batched IN queries; input order not preserved.
+ * under the given compression. Input order not preserved. The IN-list windows
+ * ride one db.batch round-trip (findExistingPaths pattern) instead of a
+ * sequential await per window — a manifest at the 2000-chunk serving cap is
+ * ~21 windows, which cost that many serialized replica round-trips on the CDC
+ * query path before.
  */
 export async function findExistingChunkHashes(
 	db: D1Database,
@@ -702,10 +706,11 @@ export async function findExistingChunkHashes(
 	compression: string
 ): Promise<Set<string>> {
 	const existing = new Set<string>();
+	const stmts: D1PreparedStatement[] = [];
 	for (let i = 0; i < chunkHashes.length; i += PARAM_BATCH) {
 		const batch = chunkHashes.slice(i, i + PARAM_BATCH);
 		const placeholders = batch.map((_, j) => `?${j + 2}`).join(', ');
-		const { results } = await dbAll<{ chunk_hash: string }>(
+		stmts.push(
 			db
 				.prepare(
 					`SELECT chunk_hash FROM chunk WHERE compression = ?1 AND state = 'V' ` +
@@ -713,7 +718,14 @@ export async function findExistingChunkHashes(
 				)
 				.bind(compression, ...batch)
 		);
-		for (const row of results) existing.add(row.chunk_hash);
+	}
+	for (let i = 0; i < stmts.length; i += STMT_BATCH) {
+		for (const result of await dbBatch<{ chunk_hash: string }>(
+			db,
+			stmts.slice(i, i + STMT_BATCH)
+		)) {
+			for (const row of result.results) existing.add(row.chunk_hash);
+		}
 	}
 	return existing;
 }

@@ -1,13 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+	candidatesForNar,
+	candidatesForStorePath,
 	clearAbsent,
+	invalidateProxyCandidates,
 	isKnownAbsent,
 	pickReadableWinner,
 	proxyKeyName,
 	recordAbsent,
 	shouldTouch
 } from './proxy';
-import { TOUCH_GRANULARITY_MS } from './db';
+import { TOUCH_GRANULARITY_MS, type LiveCacheRow } from './db';
 import type { VerifiedToken, Permission } from '../attic/token';
 import { NO_PERMISSION } from '../attic/token';
 
@@ -66,6 +69,182 @@ describe('absent-path memo', () => {
 		recordAbsent('h1');
 		clearAbsent('h1');
 		expect(isKnownAbsent('h1')).toBe(false);
+	});
+});
+
+describe('root-proxy candidate memo', () => {
+	// The memos are module-level and outlive each test, so every test resolves
+	// fresh hashes instead of resetting shared state (same pattern as the
+	// touch-coalescing tests below).
+	let seq = 0;
+	const freshHash = () => `hash-${seq++}`;
+	afterEach(() => vi.useRealTimers());
+
+	/** Minimal D1 stub for the prepare().bind().all() chain the candidate
+	 * queries use, counting reads so the memo's effect is observable. */
+	function candidateDb(rows: LiveCacheRow[]) {
+		let reads = 0;
+		const db = {
+			prepare: () => ({
+				bind: () => ({
+					all: async () => {
+						reads++;
+						return { results: rows };
+					}
+				})
+			})
+		} as never;
+		return { db, reads: () => reads };
+	}
+
+	it('resolves store-path candidates once per TTL window', async () => {
+		vi.useFakeTimers();
+		const { db, reads } = candidateDb(rows);
+		const hash = freshHash();
+		expect(await candidatesForStorePath(db, hash)).toHaveLength(3);
+		await candidatesForStorePath(db, hash);
+		expect(reads()).toBe(1);
+		vi.advanceTimersByTime(31_000);
+		await candidatesForStorePath(db, hash);
+		expect(reads()).toBe(2);
+	});
+
+	it('memoizes empty candidate sets too', async () => {
+		const { db, reads } = candidateDb([]);
+		const hash = freshHash();
+		expect(await candidatesForStorePath(db, hash)).toEqual([]);
+		await candidatesForStorePath(db, hash);
+		expect(reads()).toBe(1);
+	});
+
+	it('coalesces concurrent misses without issuing duplicate D1 reads', async () => {
+		const { db, reads } = candidateDb(rows);
+		const hash = freshHash();
+		const results = await Promise.all(
+			Array.from({ length: 8 }, () => candidatesForStorePath(db, hash))
+		);
+		expect(results.every((result) => result.length === 3)).toBe(true);
+		expect(reads()).toBe(1);
+	});
+
+	it('clearAbsent evicts the store-path entry so an upload re-resolves', async () => {
+		const { db, reads } = candidateDb(rows);
+		const hash = freshHash();
+		await candidatesForStorePath(db, hash);
+		clearAbsent(hash);
+		await candidatesForStorePath(db, hash);
+		expect(reads()).toBe(2);
+	});
+
+	it('an upload evicts both store-path and NAR candidates', async () => {
+		const { db, reads } = candidateDb(rows);
+		const storePathHash = freshHash();
+		const narHash = freshHash();
+		await candidatesForStorePath(db, storePathHash);
+		await candidatesForNar(db, narHash);
+		expect(reads()).toBe(2);
+		clearAbsent(storePathHash, `sha256:${narHash}`);
+		await candidatesForStorePath(db, storePathHash);
+		await candidatesForNar(db, narHash);
+		expect(reads()).toBe(4);
+	});
+
+	it('cache-config invalidation clears both candidate memos', async () => {
+		const { db, reads } = candidateDb(rows);
+		const storePathHash = freshHash();
+		const narHash = freshHash();
+		await candidatesForStorePath(db, storePathHash);
+		await candidatesForNar(db, narHash);
+		invalidateProxyCandidates();
+		await candidatesForStorePath(db, storePathHash);
+		await candidatesForNar(db, narHash);
+		expect(reads()).toBe(4);
+	});
+
+	it('coalesces takeover when a leader never settles', async () => {
+		vi.useFakeTimers();
+		let reads = 0;
+		const db = {
+			prepare: () => ({
+				bind: () => ({
+					all: async () => {
+						reads++;
+						// The leader's read never settles — the shape of a request
+						// context torn down mid-load, whose finally never runs.
+						if (reads === 1) return await new Promise<never>(() => {});
+						return { results: rows };
+					}
+				})
+			})
+		} as never;
+		const hash = freshHash();
+		void candidatesForStorePath(db, hash);
+		const waiters = Array.from({ length: 8 }, () => candidatesForStorePath(db, hash));
+		await vi.advanceTimersByTimeAsync(2_000);
+		const results = await Promise.all(waiters);
+		expect(results.every((result) => result.length === 3)).toBe(true);
+		expect(reads).toBe(2);
+	});
+
+	it('does not let a superseded leader overwrite the takeover result', async () => {
+		vi.useFakeTimers();
+		let reads = 0;
+		let releaseLeader!: (value: { results: LiveCacheRow[] }) => void;
+		const staleRows = [rows[1]];
+		const freshRows = [rows[0]];
+		const db = {
+			prepare: () => ({
+				bind: () => ({
+					all: async () => {
+						reads++;
+						if (reads === 1) {
+							return await new Promise<{ results: LiveCacheRow[] }>((resolve) => {
+								releaseLeader = resolve;
+							});
+						}
+						return { results: freshRows };
+					}
+				})
+			})
+		} as never;
+		const hash = freshHash();
+		const leader = candidatesForStorePath(db, hash);
+		const waiters = Array.from({ length: 8 }, () => candidatesForStorePath(db, hash));
+		await vi.advanceTimersByTimeAsync(2_000);
+		expect(await Promise.all(waiters)).toEqual(Array.from({ length: 8 }, () => freshRows));
+		expect(reads).toBe(2);
+
+		releaseLeader({ results: staleRows });
+		expect(await leader).toEqual(staleRows);
+		expect(await candidatesForStorePath(db, hash)).toEqual(freshRows);
+		expect(reads).toBe(2);
+	});
+
+	it('does not re-memoize a lookup invalidated while it is in flight', async () => {
+		let reads = 0;
+		let release!: (value: { results: LiveCacheRow[] }) => void;
+		const db = {
+			prepare: () => ({
+				bind: () => ({
+					all: async () => {
+						reads++;
+						if (reads === 1) {
+							return await new Promise<{ results: LiveCacheRow[] }>((resolve) => {
+								release = resolve;
+							});
+						}
+						return { results: rows };
+					}
+				})
+			})
+		} as never;
+		const hash = freshHash();
+		const stale = candidatesForStorePath(db, hash);
+		invalidateProxyCandidates();
+		release({ results: rows });
+		await stale;
+		await candidatesForStorePath(db, hash);
+		expect(reads).toBe(2);
 	});
 });
 

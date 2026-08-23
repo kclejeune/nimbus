@@ -8,6 +8,7 @@ import * as db from './db';
 import { purgeTagsBestEffort } from './gc';
 import { extractPublicKey, generateKeypair } from '../attic/signing';
 import type { ExecutionContext } from './platform';
+import { invalidateProxyCandidates } from './proxy';
 import { cacheTag } from './store';
 import { FULL_CONTROL, insertGrant } from '$lib/server/auth/grants';
 
@@ -75,6 +76,7 @@ export async function createCache(
 	});
 	// Evict any brief negative memo left by a serve that raced ahead of create.
 	invalidateCacheRow(name);
+	invalidateProxyCandidates();
 
 	if (grantFullControlTo) {
 		const user = await env.ATTIC_DB.prepare('SELECT 1 AS x FROM user WHERE id = ?1')
@@ -179,6 +181,9 @@ export async function configureCache(
 	// row — but staleness stays bounded by the memo TTL, here and in other
 	// isolates alike.
 	invalidateCacheRow(name);
+	if (options.is_public !== undefined || options.priority !== undefined) {
+		invalidateProxyCandidates();
+	}
 
 	if (!keypair) return {};
 	// A rotated keypair re-signs every narinfo; evict the cache's cached
@@ -192,6 +197,7 @@ export async function destroyCache(env: Env, name: string, ctx?: ExecutionContex
 	const deleted = await db.softDeleteCache(env.ATTIC_DB, name);
 	if (!deleted) throw new CacheConfigError(404, `Cache not found: ${name}`);
 	invalidateCacheRow(name);
+	invalidateProxyCandidates();
 	// Admin-table side effect (deliberate boundary exception, like the creator
 	// grant above): exact-name grants die with the cache, so re-creating the
 	// name never inherits the old access list.
@@ -217,6 +223,7 @@ export async function renameCache(env: Env, oldName: string, newName: string): P
 	}
 	invalidateCacheRow(oldName);
 	invalidateCacheRow(newName);
+	invalidateProxyCandidates();
 	// Exact-name grants follow the cache (glob grants are untouched). Minted
 	// tokens are snapshots and do not follow — existing rule.
 	await env.ATTIC_DB.prepare('UPDATE permission_grant SET pattern = ?2 WHERE pattern = ?1')

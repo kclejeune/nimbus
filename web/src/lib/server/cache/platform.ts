@@ -101,6 +101,42 @@ export async function withSlot<T>(sem: Semaphore, fn: () => Promise<T> | T): Pro
 	}
 }
 
+/**
+ * Map items with bounded concurrency and rolling admission: a finished task
+ * immediately admits the next item, unlike fixed Promise.all batches where the
+ * slowest member stalls its whole batch (with heterogeneous latencies — e.g.
+ * upstream probes racing a 5s timeout — that sync tax is the difference).
+ * Results keep input order. A rejection stops the admission of new items and
+ * propagates after the in-flight tasks settle; callers whose fn never throws
+ * (the probe paths) see every result.
+ */
+export async function mapConcurrent<T, R>(
+	items: T[],
+	limit: number,
+	fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+	const results = new Array<R>(items.length);
+	let next = 0;
+	let stopped = false;
+	const worker = async () => {
+		while (!stopped) {
+			const i = next++;
+			if (i >= items.length) return;
+			try {
+				results[i] = await fn(items[i], i);
+			} catch (e) {
+				stopped = true;
+				throw e;
+			}
+		}
+	};
+	const workers = Array.from({ length: Math.min(limit, items.length) }, worker);
+	const settled = await Promise.allSettled(workers);
+	const failed = settled.find((s) => s.status === 'rejected');
+	if (failed) throw failed.reason;
+	return results;
+}
+
 /** Collect a stream into memory, or null once it exceeds `limit` bytes. */
 export async function readAll(
 	body: ReadableStream<Uint8Array>,

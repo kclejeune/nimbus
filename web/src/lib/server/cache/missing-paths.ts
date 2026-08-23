@@ -16,7 +16,7 @@
 import { parseNarInfo, parsedNarInfoSignatureValid, type ParsedNarInfo } from '../attic/narinfo';
 import { dbAll, dbBatch, readSession, runBatched } from './db';
 import { recordGuard } from './metrics';
-import { sleep, type ExecutionContext } from './platform';
+import { mapConcurrent, sleep, type ExecutionContext } from './platform';
 import { TtlMemo } from './ttl-memo';
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
 
@@ -476,25 +476,37 @@ export async function filterUpstreamPaths(
 	let remaining = missing;
 	let probeBudget = MAX_UPSTREAM_PROBES;
 
+	// Prefetch every upstream's cached verdicts concurrently, over the full
+	// missing set, before the sequential filter loop: fetched per upstream
+	// inside the loop, upstream N+1's verdict READ waited on upstream N's live
+	// probes (worst case seconds against the 5s timeout) for no reason. The
+	// cost is reading verdict rows for paths an earlier upstream ends up
+	// covering — replica reads, cheap next to the round-trips saved.
+	const verdictsByUpstream = new Map<number, Map<string, Verdict>>();
+	await Promise.all(
+		upstreams.map(async (u) => {
+			verdictsByUpstream.set(u.id, await cachedVerdicts(db, u, missing));
+		})
+	);
+
 	for (const upstream of upstreams) {
 		if (remaining.length === 0) break;
 
-		const cached = await cachedVerdicts(db, upstream, remaining);
+		const cached = verdictsByUpstream.get(upstream.id) ?? new Map<string, Verdict>();
 		const unknown = remaining.filter((h) => !cached.has(h));
 
 		const toProbe = unknown.slice(0, probeBudget);
 		probeBudget -= toProbe.length;
-		const probed: { hash: string; verdict: Verdict }[] = [];
-		for (let i = 0; i < toProbe.length; i += PROBE_CONCURRENCY) {
-			const batch = toProbe.slice(i, i + PROBE_CONCURRENCY);
-			const results = await Promise.all(
-				batch.map(async (hash) => {
-					const verdict = await probeUpstream(upstream, hash);
-					return verdict === null ? null : { hash, verdict };
-				})
-			);
-			probed.push(...results.filter((r): r is { hash: string; verdict: Verdict } => r !== null));
-		}
+		// Rolling admission: a resolved probe immediately admits the next hash
+		// instead of waiting out the slowest member of a fixed batch. The
+		// platform caps concurrent outbound connections (~6) below this limit,
+		// so the win is dropping the batch-sync stalls, not more parallelism.
+		const probed = (
+			await mapConcurrent(toProbe, PROBE_CONCURRENCY, async (hash) => {
+				const verdict = await probeUpstream(upstream, hash);
+				return verdict === null ? null : { hash, verdict };
+			})
+		).filter((r): r is { hash: string; verdict: Verdict } => r !== null);
 		if (probed.length > 0) {
 			await recordVerdicts(db, upstream.id, probed).catch((e) =>
 				console.warn(`upstream_check record failed: ${e}`)

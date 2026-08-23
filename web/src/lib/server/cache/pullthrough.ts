@@ -173,7 +173,7 @@ export async function persistUpstreamPath(
 		const existingNar = await tryLockNarProbed(env, info.nar_hash);
 		if (existingNar) {
 			await finishDeduplicated(env, info, cache.id, existingNar.id);
-			await warmNarinfoAfterUpload(ctx, origin, cache, storePathHash);
+			await warmNarinfoAfterUpload(ctx, origin, cache, storePathHash, info.nar_hash);
 			return;
 		}
 
@@ -240,7 +240,7 @@ export async function persistUpstreamPath(
 		// upstream namespace — both purged by the warm) and cache the re-signed
 		// local entry, so clients flip to local serving without waiting out the
 		// TTL.
-		await warmNarinfoAfterUpload(ctx, origin, cache, storePathHash);
+		await warmNarinfoAfterUpload(ctx, origin, cache, storePathHash, info.nar_hash);
 		console.log(
 			`pullthrough: persisted ${parsed.storePath} (${raw.length} bytes raw) into ${cacheName}`
 		);

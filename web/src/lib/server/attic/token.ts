@@ -31,6 +31,9 @@ export const NO_PERMISSION: Permission = {
 export interface VerifiedToken {
 	sub?: string;
 	jti?: string;
+	/** exp claim (epoch seconds); lets a verification memo expire no later
+	 * than the token itself. */
+	exp?: number;
 	/** cache name pattern -> permission */
 	caches: Map<string, Permission>;
 	/** nimbus extension: may trigger garbage collection */
@@ -179,6 +182,7 @@ export async function verifyAtticToken(
 	return {
 		sub: claims.sub,
 		jti: claims.jti,
+		exp: claims.exp,
 		caches,
 		gc: flag(claims[NIMBUS_CLAIM_NAMESPACE]?.gc),
 		ct: flag(claims[NIMBUS_CLAIM_NAMESPACE]?.ct)
