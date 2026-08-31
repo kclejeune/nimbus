@@ -43,16 +43,10 @@ func watchStoreCmd() *cobra.Command {
 			if err := requireToken(ref); err != nil {
 				return err
 			}
-			pusher := &push.Pusher{
-				Client: client,
-				Cache:  ref.Cache,
-				Jobs:   jobs,
-				Out:    os.Stdout,
-				Err:    os.Stderr,
-				// Unfinished builds and GC casualties are routine while watching;
-				// skipping them must not fail the run.
-				SkipInvalid: true,
-			}
+			pusher := newPusher(client, ref.Cache, jobs)
+			// Unfinished builds and GC casualties are routine while watching;
+			// skipping them must not fail the run.
+			pusher.SkipInvalid = true
 			fmt.Printf("👀 Watching %s; pushing new paths to %q\n", nix.StoreDir, ref.Cache)
 			return watchAndPush(cmd.Context(), pusher, nil, false, 0, nil)
 		},
@@ -90,16 +84,14 @@ while COMMAND is still running.`,
 			if err := requireToken(ref); err != nil {
 				return err
 			}
-			pusher := &push.Pusher{
-				Client: client,
-				Cache:  ref.Cache,
-				Jobs:   jobs,
-				Out:    os.Stdout,
-				Err:    os.Stderr,
-				// Unfinished builds and GC casualties are routine while watching;
-				// skipping them must not fail the run.
-				SkipInvalid: true,
-			}
+			pusher := newPusher(client, ref.Cache, jobs)
+			// The child owns stdout while it runs. Streaming and idle-batch pushes
+			// can overlap its output, so a cursor-moving renderer would overwrite
+			// command output that Bubble Tea does not know about.
+			pusher.NewProgress = nil
+			// Unfinished builds and GC casualties are routine while watching;
+			// skipping them must not fail the run.
+			pusher.SkipInvalid = true
 			if batch {
 				fmt.Printf("👀 Watching %s; will push new paths to %q after the command exits\n",
 					nix.StoreDir, ref.Cache)

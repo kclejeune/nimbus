@@ -144,19 +144,12 @@ async function findZone(host) {
 
 // --- desired state ----------------------------------------------------------
 
-/** Geo gate by continent — OFF by default. The shape allowlist above kills
- *  junk at the edge regardless of origin, the per-IP rate limit bounds
- *  honest-shaped floods, and a worldwide cache beats the lockout risk (the
- *  gate covered the ADMIN host too, stranding a travelling admin). Kept
- *  wired because it is the one lever the other rules cannot replace: a
- *  distributed flood of protocol-VALID requests bills a worker invocation
- *  each no matter what the shape rules say, and blocking whole continents at
- *  the edge is what actually cuts that bill. Under sustained attack: set
- *  true, narrow the list, `npm run deploy:waf`. (ip.src.continent codes
- *  NA/SA/EU/AS/AF/OC/AN; Tor exits report "T1" and are implicitly blocked
- *  while the gate is on.) */
-const GEO_RESTRICT = false;
-const ALLOWED_CONTINENTS = ['NA', 'SA', 'EU'];
+/** Country origins that should never reach either Worker hostname. Keep this
+ *  targeted: the old continent allowlist stranded travelling admins and
+ *  legitimate Asia/Oceania CI, while the current abuse is concentrated in
+ *  these two countries. `ip.src.country` is Cloudflare's current rules field;
+ *  add ISO 3166-1 alpha-2 codes here and redeploy to extend the denylist. */
+const BLOCKED_COUNTRIES = ['CN', 'RU'];
 
 /** Always-block junk shared by both hosts: non-protocol methods (the allowlist
  *  omits OPTIONS, which is fine only while the app is same-origin — add it
@@ -213,11 +206,10 @@ const CACHE_READ_SHAPES =
 // One rule per host rather than one over both: the cache host adds a
 // query-string clause the dashboard cannot take (it uses ?page/?q/?cache
 // legitimately). Same action throughout, so the clauses OR-combine losslessly.
-// Both are kept separate from the geo gate below so Security > Events can
+// Both are kept separate from the country gate below so Security > Events can
 // distinguish shape junk from geography when hunting false positives —
 // geography is the only clause a legit user could ever trip. The Free plan
-// caps this phase at 5 rules; this file deploys 3 with the geo gate off,
-// 4 with it on.
+// caps this phase at 5 rules; this file deploys 4 when APP_URL is configured.
 const customRules = [
 	{
 		description: 'cache: junk shapes (query-string, method, oversized path, bots)',
@@ -249,12 +241,12 @@ if (appHost) {
 	});
 }
 
-if (GEO_RESTRICT) {
-	const list = ALLOWED_CONTINENTS.map((c) => `"${c}"`).join(' ');
+if (BLOCKED_COUNTRIES.length > 0) {
+	const list = BLOCKED_COUNTRIES.map((c) => `"${c}"`).join(' ');
 	const hostSet = hosts.map((h) => `"${h}"`).join(' ');
 	customRules.push({
-		description: 'geo gate by continent, both hosts (GEO_RESTRICT in deploy-waf.mjs)',
-		expression: `(http.host in {${hostSet}} and not ip.src.continent in {${list}})`,
+		description: 'geo: block configured country origins on both hosts',
+		expression: `(http.host in {${hostSet}} and ip.src.country in {${list}})`,
 		action: 'block',
 		enabled: true
 	});

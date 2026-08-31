@@ -7,8 +7,22 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kclejeune/nimbus/internal/api"
 	"github.com/kclejeune/nimbus/internal/push"
 )
+
+// newPusher wires the plumbing shared by every pushing command; callers set
+// the per-command policy fields (SkipInvalid, NoClosure, ...) on the result.
+func newPusher(client *api.Client, cache string, jobs int) *push.Pusher {
+	return &push.Pusher{
+		Client:      client,
+		Cache:       cache,
+		Jobs:        jobs,
+		Out:         os.Stdout,
+		Err:         os.Stderr,
+		NewProgress: pushProgressFactory(os.Stdout),
+	}
+}
 
 func pushCmd() *cobra.Command {
 	var jobs int
@@ -46,16 +60,10 @@ func pushCmd() *cobra.Command {
 				return fmt.Errorf("no paths to push; pass store paths or use --stdin")
 			}
 
-			pusher := &push.Pusher{
-				Client:               client,
-				Cache:                ref.Cache,
-				Jobs:                 jobs,
-				Out:                  os.Stdout,
-				Err:                  os.Stderr,
-				SkipInvalid:          skipInvalid,
-				NoClosure:            noClosure,
-				IgnoreUpstreamFilter: ignoreUpstreamFilter,
-			}
+			pusher := newPusher(client, ref.Cache, jobs)
+			pusher.SkipInvalid = skipInvalid
+			pusher.NoClosure = noClosure
+			pusher.IgnoreUpstreamFilter = ignoreUpstreamFilter
 			return pusher.Push(cmd.Context(), paths)
 		},
 	}

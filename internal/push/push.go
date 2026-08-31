@@ -45,6 +45,63 @@ type Pusher struct {
 	// IgnoreUpstreamFilter asks the server not to drop paths that are already
 	// fetchable from the cache's configured upstreams.
 	IgnoreUpstreamFilter bool
+	// NewProgress enables interactive progress for each Push call. Leave nil
+	// for the line-oriented output used by pipes and non-interactive callers.
+	NewProgress func() ProgressReporter
+}
+
+// ProgressReporter receives coarse-grained push events. Upload completion is
+// intentionally path-based: simple uploads stream and chunked uploads make
+// multiple NAR passes, so counting transport bytes would exceed 100% on retry.
+type ProgressReporter interface {
+	Start(cache string)
+	Stage(label string)
+	Ready(total int, totalBytes int64, alreadyPresent int)
+	PathStarted(path string)
+	PathFinished(result PathProgress)
+	Stop()
+}
+
+type PathProgress struct {
+	Path         string
+	NarSize      int64
+	Elapsed      time.Duration
+	Deduplicated bool
+	Err          error
+}
+
+func (p PathProgress) Suffix() string {
+	if p.Deduplicated {
+		return "(deduplicated)"
+	}
+	speed := float64(p.NarSize) / max(p.Elapsed.Seconds(), 0.001)
+	return fmt.Sprintf("(%s/s)", FormatBytes(int64(speed)))
+}
+
+// textProgress is the line-oriented reporter used when no interactive one is
+// configured — pipes, dumb terminals, CI logs.
+type textProgress struct {
+	out   io.Writer
+	err   io.Writer
+	cache string
+}
+
+func (t *textProgress) Start(cache string) { t.cache = cache }
+func (t *textProgress) Stage(string)       {}
+func (t *textProgress) PathStarted(string) {}
+func (t *textProgress) Stop()              {}
+
+func (t *textProgress) Ready(total int, _ int64, alreadyPresent int) {
+	_, _ = fmt.Fprintf(t.out, "→ Pushing %d paths to %q (%d already present or upstream)\n",
+		total, t.cache, alreadyPresent)
+}
+
+func (t *textProgress) PathFinished(result PathProgress) {
+	if result.Err != nil {
+		_, _ = fmt.Fprintf(t.err, "✗ %s: %v\n", nix.BaseName(result.Path), result.Err)
+		return
+	}
+	_, _ = fmt.Fprintf(t.out, "✓ %s %s\n", nix.BaseName(result.Path), result.Suffix())
 }
 
 // Push uploads the closures of the given paths, skipping whatever the server
@@ -77,10 +134,22 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 		return nil
 	}
 
+	var progress ProgressReporter
+	if p.NewProgress != nil {
+		progress = p.NewProgress()
+	}
+	if progress == nil {
+		progress = &textProgress{out: p.Out, err: p.errw()}
+	}
+	progress.Start(p.Cache)
+	progress.Stage("Resolving closure")
+	defer progress.Stop()
+
 	infos, err := p.pathInfos(ctx, paths)
 	if err != nil {
 		return err
 	}
+	progress.Stage("Checking cache")
 
 	hashes := make([]string, len(infos))
 	byHash := make(map[string]nix.PathInfo, len(infos))
@@ -95,9 +164,16 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 		return fmt.Errorf("querying %q for missing paths: %w", p.Cache, err)
 	}
 
-	_, _ = fmt.Fprintf(p.Out, "⚙️  Pushing %d paths to %q (%d already present or upstream)\n",
-		len(missing), p.Cache, len(infos)-len(missing))
-	if len(missing) == 0 {
+	var totalBytes int64
+	uploadInfos := make([]nix.PathInfo, 0, len(missing))
+	for _, hash := range missing {
+		if info, ok := byHash[hash]; ok {
+			uploadInfos = append(uploadInfos, info)
+			totalBytes += info.NarSize
+		}
+	}
+	progress.Ready(len(uploadInfos), totalBytes, len(infos)-len(uploadInfos))
+	if len(uploadInfos) == 0 {
 		return invalidErr
 	}
 
@@ -110,15 +186,18 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 	for range jobs {
 		wg.Go(func() {
 			for info := range queue {
-				if err := p.uploadOne(ctx, info); err != nil {
-					// Context cancellation (Ctrl-C) ends the worker; any other
-					// failure is per-path — report it like the ✅ line, keep
-					// draining the queue, and aggregate for the exit status
-					// instead of abandoning every path still pending.
-					if ctx.Err() != nil {
-						return
-					}
-					_, _ = fmt.Fprintf(p.errw(), "❌ %s: %v\n", nix.BaseName(info.Path), err)
+				progress.PathStarted(info.Path)
+				result, err := p.uploadOne(ctx, info)
+				// Context cancellation (Ctrl-C) ends the worker; any other
+				// failure is per-path — report it like the success line, keep
+				// draining the queue, and aggregate for the exit status
+				// instead of abandoning every path still pending.
+				if err != nil && ctx.Err() != nil {
+					return
+				}
+				result.Err = err
+				progress.PathFinished(result)
+				if err != nil {
 					mu.Lock()
 					pathErrs = append(pathErrs, fmt.Errorf("%s: %w", nix.BaseName(info.Path), err))
 					mu.Unlock()
@@ -128,11 +207,7 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 	}
 
 feed:
-	for _, hash := range missing {
-		info, ok := byHash[hash]
-		if !ok {
-			continue
-		}
+	for _, info := range uploadInfos {
 		select {
 		case queue <- info:
 		case <-ctx.Done():
@@ -141,13 +216,16 @@ feed:
 	}
 	close(queue)
 	wg.Wait()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if len(pathErrs) > 0 {
-		// Per-path detail already printed as ❌ lines; the summary wraps the
-		// first error so errors.As classification (exit codes) still works.
+		// Per-path detail is emitted by the selected reporter; the summary wraps
+		// the first error so errors.As classification (exit codes) still works.
 		return fmt.Errorf(
 			"%d of %d paths failed; first: %w",
 			len(pathErrs),
-			len(missing),
+			len(uploadInfos),
 			pathErrs[0],
 		)
 	}
@@ -163,8 +241,9 @@ func (p *Pusher) pathInfos(ctx context.Context, paths []string) ([]nix.PathInfo,
 	return nix.ClosurePathInfo(ctx, paths)
 }
 
-func (p *Pusher) uploadOne(ctx context.Context, info nix.PathInfo) error {
+func (p *Pusher) uploadOne(ctx context.Context, info nix.PathInfo) (PathProgress, error) {
 	start := time.Now()
+	pathProgress := PathProgress{Path: info.Path, NarSize: info.NarSize}
 
 	var result *api.UploadResult
 	var err error
@@ -173,17 +252,13 @@ func (p *Pusher) uploadOne(ctx context.Context, info nix.PathInfo) error {
 	} else {
 		result, err = p.uploadSimple(ctx, info)
 	}
+	pathProgress.Elapsed = time.Since(start)
 	if err != nil {
-		return err
+		return pathProgress, err
 	}
 
-	speed := float64(info.NarSize) / max(time.Since(start).Seconds(), 0.001)
-	suffix := fmt.Sprintf("(%s/s)", FormatBytes(int64(speed)))
-	if result.Kind == "deduplicated" {
-		suffix = "(deduplicated)"
-	}
-	_, _ = fmt.Fprintf(p.Out, "✅ %s %s\n", nix.BaseName(info.Path), suffix)
-	return nil
+	pathProgress.Deduplicated = result.Kind == "deduplicated"
+	return pathProgress, nil
 }
 
 func (p *Pusher) narInfo(info nix.PathInfo) *api.NarInfo {

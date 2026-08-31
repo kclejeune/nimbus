@@ -67,11 +67,10 @@
 
 	// Eventually-consistent rate limiters (best-effort backstops, not
 	// accounting). Every one is scoped PER COLO, not per instance — so the
-	// ceiling a limit actually buys is `limit x colos the traffic can reach`,
-	// and the geo gate in scripts/deploy-waf.mjs admits NA+SA+EU, well over
-	// 100 of them. Size against that product, not against the number written
-	// here: a distributed flood is precisely the threat these exist for, and
-	// it arrives spread across colos by construction.
+	// ceiling a limit actually buys is `limit x colos the traffic can reach`.
+	// The country denylist in scripts/deploy-waf.mjs only removes selected
+	// origins, so size against that product, not against the number written
+	// here: a distributed flood arrives spread across colos by construction.
 	//
 	// Prefetch: speculative loopback fan-out across every isolate in a colo
 	// (guardrail block in store.ts). The most permissive of the set on purpose
