@@ -12,6 +12,9 @@ import {
 } from './cache-config';
 import { findCacheCached } from './cache-lookup';
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
+import { readDeviceCode, readMissingPaths } from './request-input';
+import { RequestBodyError } from '../request-body';
+import { checkRateLimit } from '../rate-limit';
 import * as db from './db';
 import { listPins, runGc } from './gc';
 import {
@@ -555,19 +558,7 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	}
 	if (!token) return errorResponse(401, 'No token provided');
 
-	let body: {
-		cache?: string;
-		store_path_hashes?: string[];
-		ignore_upstream_cache_filter?: boolean;
-	};
-	try {
-		body = await request.json();
-	} catch (e) {
-		return errorResponse(400, `Invalid JSON: ${e}`);
-	}
-	if (!body.cache || !Array.isArray(body.store_path_hashes)) {
-		return errorResponse(400, 'Missing cache or store_path_hashes');
-	}
+	const body = await readMissingPaths(request);
 	if (!permissionForCache(token, body.cache).push) {
 		return errorResponse(403, 'Permission denied: push');
 	}
@@ -586,7 +577,7 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	// below still rethrows it. A missing-cache return drains the speculative
 	// scan so no binding work outlives the request.
 	const session = db.readSession(env.ATTIC_DB);
-	const hashes = body.store_path_hashes.filter((h) => typeof h === 'string' && h.length === 32);
+	const hashes = body.hashes;
 	const existingPromise = findExistingPaths(session, body.cache, hashes);
 	existingPromise.catch(() => {});
 	const cache = await findCacheCached(env.ATTIC_DB, body.cache);
@@ -595,9 +586,7 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 		return errorResponse(404, `Cache not found: ${body.cache}`, 'NoSuchCache');
 	}
 
-	const upstreams = body.ignore_upstream_cache_filter
-		? []
-		: await upstreamsForCache(session, cache);
+	const upstreams = body.ignoreUpstream ? [] : await upstreamsForCache(session, cache);
 	const existing = await existingPromise;
 	const missing = hashes.filter((h) => !existing.has(h));
 	const missingPaths =
@@ -692,6 +681,7 @@ async function requireToken(
  * worker-entry.ts so both halves speak one retryability contract.
  */
 export function caughtResponse(prefix: string, request: Request, e: unknown): Response {
+	if (e instanceof RequestBodyError) return e.response();
 	if (e instanceof CacheConfigError) {
 		return errorResponse(e.status, e.message, e.status === 404 ? 'NoSuchCache' : undefined);
 	}
@@ -726,27 +716,21 @@ async function handleV1(
 		return handleAuthConfig(env);
 	}
 	if (method === 'POST' && route === 'cli' && segments.length === 4) {
-		// These are the only unauthenticated endpoints that touch the D1
-		// primary (device start INSERTs a row; token polls read one), so they
-		// get a best-effort backstop before any work. Keyed per client IP and
-		// endpoint — there is no authenticated identity here, and per-IP keeps
-		// one client from consuming everyone else's budget. The limit is a
-		// runaway backstop, not traffic shaping: ~25x one login flow's polling
-		// rate (~12/min), so even a shared/CGNAT IP with many simultaneous
-		// logins never trips it. User-facing, so a limiter error fails open
-		// (contrast the prefetch budget, which fails closed).
-		if (env.DEVICE_AUTH_LIMITER) {
-			const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
-			const { success } = await env.DEVICE_AUTH_LIMITER.limit({
-				key: `device:${segments[3]}:${ip}`
-			}).catch(() => ({ success: true }));
-			if (!success) return errorResponse(429, 'Too many requests; retry shortly');
+		if (segments[3] === 'device') {
+			const limited = await checkRateLimit(request, env.DEVICE_START_LIMITER);
+			if (limited) return limited;
+			const globalLimit = await checkRateLimit(
+				request,
+				env.DEVICE_START_GLOBAL_LIMITER,
+				'device-start'
+			);
+			if (globalLimit) return globalLimit;
+			return handleDeviceStart(env);
 		}
-		if (segments[3] === 'device') return handleDeviceStart(env);
 		if (segments[3] === 'token') {
-			const body = await (request.json() as Promise<{ device_code?: string }>).catch(() => null);
-			if (!body?.device_code) return errorResponse(400, 'Missing device_code');
-			return handleDeviceToken(env, body.device_code);
+			const limited = await checkRateLimit(request, env.DEVICE_AUTH_LIMITER);
+			if (limited) return limited;
+			return handleDeviceToken(env, await readDeviceCode(request));
 		}
 	}
 	if (method === 'GET' && route === 'cache-config' && segments.length === 4) {

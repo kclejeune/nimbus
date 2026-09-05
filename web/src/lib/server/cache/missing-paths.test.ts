@@ -68,6 +68,15 @@ describe('probeUpstream', () => {
 
 	const keyless = upstream({ url: 'https://up.example' });
 
+	it.each([404, 429, 500])('cancels unused GET bodies on %s', async (status) => {
+		const cancel = vi.fn();
+		stubFetch(() => new Response(new ReadableStream({ cancel }), { status }));
+		expect(
+			await probeUpstream(upstream({ url: 'https://up.example', mode: 'persist' }), 'a'.repeat(32))
+		).toBe(status === 404 ? VERDICT_ABSENT : null);
+		expect(cancel).toHaveBeenCalledOnce();
+	});
+
 	it('HEADs the narinfo when no key is configured', async () => {
 		const spy = stubFetch(() => new Response(null, { status: 200 }));
 		expect(await probeUpstream(keyless, 'h'.repeat(32))).toBe(VERDICT_PRESENT);
@@ -260,6 +269,17 @@ describe('concurrent upstream probing', () => {
 		upstream({ id: 1, url: 'https://a.example' }),
 		upstream({ id: 2, url: 'https://b.example' })
 	];
+
+	it.each([404, 503])('cancels unsuccessful passthrough bodies on %s', async (status) => {
+		const cancel = vi.fn();
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		stubFetch(() => new Response(new ReadableStream({ cancel }), { status }));
+		expect(
+			await fetchUpstreamNarInfo(dbWithVerdicts(), [ups[0]], freshHash(), undefined)
+		).toBeNull();
+		expect(cancel).toHaveBeenCalledOnce();
+		vi.restoreAllMocks();
+	});
 
 	it('findUpstreamNar fires all unknown probes at once; priority still wins', async () => {
 		const slow = deferred();

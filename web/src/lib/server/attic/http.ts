@@ -8,6 +8,7 @@ const KIND_BY_STATUS: Record<number, string> = {
 	403: 'AccessError',
 	404: 'NotFound',
 	409: 'CacheAlreadyExists',
+	413: 'RequestError',
 	429: 'TooManyRequests',
 	500: 'InternalServerError',
 	// Attic's incomplete-NAR 503 passes its kind explicitly (store.ts);

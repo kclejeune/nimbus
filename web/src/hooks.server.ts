@@ -5,6 +5,7 @@ import { createAuth, type Auth } from '$lib/server/auth/auth';
 import { resolveCfAccessUser } from '$lib/server/auth/cf-access';
 import { isActiveUser } from '$lib/server/auth/guard';
 import type { SessionUser, UserRole, UserStatus } from '$lib/server/auth/types';
+import { checkRateLimit } from '$lib/server/rate-limit';
 
 // Cache the better-auth instance per D1 binding (stable per isolate).
 // Nothing in createAuth() closes over per-request state: baseURL comes from
@@ -30,6 +31,14 @@ export const handle: Handle = async ({ event, resolve }) => {
 		return resolve(event);
 	}
 
+	if (
+		event.route.id === '/api/auth/[...all]' ||
+		event.url.pathname === '/api/auth' ||
+		event.url.pathname.startsWith('/api/auth/')
+	) {
+		const limited = await checkRateLimit(event.request, env.AUTH_LIMITER);
+		if (limited) return limited;
+	}
 	const auth = getAuth(env);
 
 	// Prefer an established better-auth (OIDC) session.

@@ -449,6 +449,7 @@ export async function probeUpstream(upstream: Upstream, hash: string): Promise<V
 			return headVerdict(res);
 		}
 		const res = await probeFetch(url);
+		if (res.status !== 200) await res.body?.cancel();
 		if (res.status === 404) return VERDICT_ABSENT;
 		if (res.status !== 200) return null;
 		return await classifyNarinfo(upstream, await res.text());
@@ -558,6 +559,8 @@ export async function fetchUpstreamNarInfo(
 	): Promise<{ text: string; upstream: Upstream } | null> => {
 		try {
 			const res = await probeFetch(`${upstream.url}/${storePathHash}.narinfo`);
+			// Error bodies still occupy a connection until consumed or cancelled.
+			if (res.status !== 200) await res.body?.cancel();
 			if (res.status === 200) {
 				const text = await res.text();
 				// Recording on any change actively corrects verdicts probed without

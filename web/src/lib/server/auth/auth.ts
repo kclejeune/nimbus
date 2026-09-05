@@ -27,6 +27,7 @@ export function createAuth(env: Env) {
 		secret: env.SESSION_SECRET,
 		baseURL: env.APP_URL,
 		trustedOrigins: env.APP_URL ? [env.APP_URL] : undefined,
+		advanced: { ipAddress: { ipAddressHeaders: ['cf-connecting-ip'] } },
 		// One user, many provider accounts. Providers can disagree on email
 		// (e.g. the OIDC IdP vs GitHub), so explicit linking from /account is
 		// allowed across emails — identity is anchored to the signed-in

@@ -242,17 +242,32 @@ func (c *Client) GetMissingPaths(
 	hashes []string,
 	ignoreUpstreamFilter bool,
 ) ([]string, error) {
-	var out struct {
-		MissingPaths []string `json:"missing_paths"`
+	// Match the server's per-request cap without limiting closure size.
+	const batchSize = 10_000
+	var missing []string
+	for start := 0; start < len(hashes); start += batchSize {
+		var out struct {
+			MissingPaths []string `json:"missing_paths"`
+		}
+		body := map[string]any{
+			"cache":             cache,
+			"store_path_hashes": hashes[start:min(start+batchSize, len(hashes))],
+		}
+		if ignoreUpstreamFilter {
+			body["ignore_upstream_cache_filter"] = true
+		}
+		if err := c.doJSON(
+			ctx,
+			http.MethodPost,
+			"/_api/v1/get-missing-paths",
+			body,
+			&out,
+		); err != nil {
+			return nil, err
+		}
+		missing = append(missing, out.MissingPaths...)
 	}
-	body := map[string]any{"cache": cache, "store_path_hashes": hashes}
-	if ignoreUpstreamFilter {
-		body["ignore_upstream_cache_filter"] = true
-	}
-	if err := c.doJSON(ctx, http.MethodPost, "/_api/v1/get-missing-paths", body, &out); err != nil {
-		return nil, err
-	}
-	return out.MissingPaths, nil
+	return missing, nil
 }
 
 // NarInfo describes an upload, matching the server's UploadNarInfo shape.

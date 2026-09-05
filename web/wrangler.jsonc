@@ -77,11 +77,8 @@
 	// — each warm is ~2 replica reads and zero primary work, and prefetch is
 	// off entirely unless PREFETCH_DEPTH is set — so the colo multiplier is
 	// affordable here in a way it is not below.
-	// Device-auth: the only unauthenticated endpoints that touch the D1
-	// primary, keyed per client IP + endpoint (router.ts) — 300/min/IP is ~25x
-	// one login flow's polling rate, so even a shared/CGNAT IP with many
-	// simultaneous logins never trips it, while an abuser is capped at ~5
-	// primary ops/sec/IP. Keyed per IP, so not colo-multiplied in practice.
+	// Device polling keeps 300/min/IP for shared CI egress; creation uses
+	// separate per-IP and aggregate budgets because each start inserts a row.
 	//
 	// Abuse guards for the unauthenticated read path (missing-paths.ts,
 	// pullthrough.ts): a distinct-hash flood bypasses every per-hash defense
@@ -105,6 +102,19 @@
 	// keeps serving by redirect — just slow). Lower it if you rely on
 	// pull-through little and want the flood ceiling tighter.
 	"ratelimits": [
+		// Auth spans all endpoints per IP; device creation is much rarer than polling.
+		{ "name": "AUTH_LIMITER", "namespace_id": "1006", "simple": { "limit": 120, "period": 60 } },
+		{
+			"name": "DEVICE_START_LIMITER",
+			"namespace_id": "1007",
+			"simple": { "limit": 10, "period": 60 }
+		},
+		// Stops rotating IPs from creating unlimited rows within a colo.
+		{
+			"name": "DEVICE_START_GLOBAL_LIMITER",
+			"namespace_id": "1008",
+			"simple": { "limit": 120, "period": 60 }
+		},
 		{
 			"name": "PREFETCH_LIMITER",
 			"namespace_id": "1001",

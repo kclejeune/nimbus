@@ -16,6 +16,7 @@
 // Must be an API token (Bearer auth), not the legacy global API key.
 //
 // Usage:
+//   node scripts/deploy-waf.mjs --dry-run   # print desired rules, no API calls
 //   node scripts/deploy-waf.mjs             # also fail on an unconfigured token
 //   node scripts/deploy-waf.mjs --optional  # skip (exit 0) when no token is set,
 //                                           # so `npm run deploy` never breaks on
@@ -41,6 +42,7 @@ import { fileURLToPath } from 'node:url';
 
 const API = 'https://api.cloudflare.com/client/v4';
 const optional = process.argv.includes('--optional');
+const dryRun = process.argv.includes('--dry-run');
 
 /** Unconfigured: not an error under --optional. */
 function skip(message) {
@@ -109,7 +111,7 @@ const appHost = appUrl ? new URL(appUrl).host : null;
 const hosts = appHost ? [cacheHost, appHost] : [cacheHost];
 
 const token = process.env.WAF_API_TOKEN;
-if (!token) {
+if (!token && !dryRun) {
 	skip('WAF_API_TOKEN is not set (needs Zone:Read + Zone WAF:Edit); skipping WAF deploy');
 }
 
@@ -190,6 +192,33 @@ const JUNK_SHAPES =
  *  are deliberately absent: the router has always 404ed them.
  */
 const NAR_SUFFIXES = ['.nar', '.nar.zst', '.nar.xz', '.nar.gz', '.nar.br', '.nar.bz2'];
+// Match family boundaries: /tokensfoo is not /tokens. Dynamic suffixes remain
+// the router's responsibility; this rejects arbitrary /_api/ scanner paths.
+const CACHE_API_SHAPES = [
+	...[
+		'auth-config',
+		'caches',
+		'get-missing-paths',
+		'gc',
+		'cli/device',
+		'cli/token',
+		'upload-path'
+	].map((p) => `http.request.uri.path eq "/_api/v1/${p}"`),
+	`starts_with(http.request.uri.path, "/_api/v1/upload-path/chunks/")`,
+	`http.request.uri.path eq "/_api/v1/upload-path/chunks"`,
+	`http.request.uri.path eq "/_api/v1/tokens"`,
+	...['tokens', 'cache-config', 'gc-root', 'pin', 'path'].map(
+		(p) => `starts_with(http.request.uri.path, "/_api/v1/${p}/")`
+	)
+].join(' or ');
+
+// This private app serves none of these files or WordPress endpoints. Match
+// root path boundaries so cache names and ordinary app query strings survive.
+const APP_SCANNER_PATHS =
+	`lower(http.request.uri.path) in {"/.env" "/.git" "/wp-login.php" "/wp-admin" "/xmlrpc.php"} or ` +
+	['/.env.', '/.git/', '/wp-admin/', '/wp-content/', '/wp-includes/']
+		.map((p) => `starts_with(lower(http.request.uri.path), "${p}")`)
+		.join(' or ');
 const CACHE_READ_SHAPES =
 	`http.request.uri.path eq "/" or ` +
 	// Browsers landing on the cache host (redirected to the app by the router)
@@ -212,9 +241,10 @@ const CACHE_READ_SHAPES =
 // caps this phase at 5 rules; this file deploys 4 when APP_URL is configured.
 const customRules = [
 	{
-		description: 'cache: junk shapes (query-string, method, oversized path, bots)',
+		description: 'cache: junk shapes and unsupported API paths',
 		expression:
 			`(http.host eq "${cacheHost}" and (` +
+			`(starts_with(http.request.uri.path, "/_api/") and not (${CACHE_API_SHAPES})) or ` +
 			`(not starts_with(http.request.uri.path, "/_api/") and http.request.uri.query ne "") or ` +
 			`${JUNK_SHAPES}))`,
 		action: 'block',
@@ -234,8 +264,8 @@ const customRules = [
 
 if (appHost) {
 	customRules.push({
-		description: 'app: junk shapes (method, oversized path, bots)',
-		expression: `(http.host eq "${appHost}" and (${JUNK_SHAPES}))`,
+		description: 'app: junk shapes and scanner paths',
+		expression: `(http.host eq "${appHost}" and (${JUNK_SHAPES} or ${APP_SCANNER_PATHS}))`,
 		action: 'block',
 		enabled: true
 	});
@@ -257,15 +287,9 @@ if (BLOCKED_COUNTRIES.length > 0) {
 // the phase http_ratelimit: 2 out of 1"). The slot goes to the read path
 // because that is where volume and spend actually are.
 //
-// What that leaves uncovered is /api/auth/* — the app's unauthenticated
-// surface (sign-in, OAuth callbacks, verification), and the one place a
-// request does D1 work with no session cookie to short-circuit it. It cannot
-// be merged into the rule below: one rule means one threshold, and 5000/10s
-// is meaningless for a login flow while auth's ~200/10s would sever nix
-// pulls. Covering it needs either a paid plan (more rules in the phase) or a
-// worker-level `ratelimits` binding in wrangler.jsonc, which still bills the
-// request but keeps the flood off D1 — the same tier DEVICE_AUTH_LIMITER
-// already occupies for the device-auth endpoints.
+// /api/auth/* uses AUTH_LIMITER in the Worker before session/auth work. It
+// cannot share this threshold: 5000/10s is meaningless for a login flow,
+// while an auth-sized threshold would sever nix pulls.
 const ratelimitRules = [
 	{
 		// 5000/10s clears a single honest client's mass-substitution burst:
@@ -297,6 +321,12 @@ async function putPhase(zoneId, phase, description, rules) {
 }
 
 const hostLabel = hosts.join(' + ');
+
+// Review the exact payload locally without credentials or any API requests.
+if (dryRun) {
+	console.log(JSON.stringify({ hosts, customRules, ratelimitRules }, null, 2));
+	process.exit(0);
+}
 
 try {
 	const zone = await findZone(cacheHost);

@@ -56,9 +56,12 @@ declare global {
 				PREFETCH_BUDGET?: string;
 				/** Colo-wide prefetch fan-out limiter (wrangler.jsonc ratelimits). */
 				PREFETCH_LIMITER?: RateLimit;
-				/** Colo-wide backstop for the unauthenticated CLI device-auth
-				 * endpoints (the only anonymous D1-primary writes). */
+				/** Per-IP device token polling budget. */
 				DEVICE_AUTH_LIMITER?: RateLimit;
+				AUTH_LIMITER?: RateLimit;
+				DEVICE_START_LIMITER?: RateLimit;
+				/** Aggregate device creation budget per colo, not globally exact. */
+				DEVICE_START_GLOBAL_LIMITER?: RateLimit;
 				/** Per-IP budget for live upstream fetches on edge-missed reads
 				 * (missing-paths.ts); unbound = unguarded. */
 				UPSTREAM_PROBE_LIMITER?: RateLimit;
