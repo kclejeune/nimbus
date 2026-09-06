@@ -68,6 +68,14 @@ export const handle: Handle = async ({ event, resolve }) => {
 	const user = event.locals.user;
 	const routeId = event.route.id;
 	const gated = routeId != null && (routeId.startsWith('/(app)') || routeId.startsWith('/cli'));
+	// Layout and child loads run concurrently; a layout redirect cannot
+	// protect a child's database work.
+	if (gated && !user) {
+		if (event.request.method === 'GET' || event.request.method === 'HEAD') {
+			redirect(302, `/login?redirect=${encodeURIComponent(event.url.pathname + event.url.search)}`);
+		}
+		return new Response('Authentication required', { status: 401 });
+	}
 	if (gated && user && !isActiveUser(user)) {
 		if (event.request.method === 'GET') redirect(302, '/pending');
 		return new Response('Account pending approval', { status: 403 });
