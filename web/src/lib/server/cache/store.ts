@@ -9,6 +9,7 @@
 // Worker-returned 206 would never be stored, so no range logic lives here.
 
 import { errorResponse, withVisibility } from '../attic/http';
+import { CLIENT_IP_HEADER, clientKey, requireBudget } from './admission';
 import { buildNarInfo } from '../attic/narinfo';
 import { extractPublicKey } from '../attic/signing';
 import { findCacheCached } from './cache-lookup';
@@ -199,8 +200,10 @@ export function narStoreUrl(
 	filename: string
 ): URL {
 	const url = new URL(request.url);
+	// serveNar resolves only the prefix. Extension aliases must share its key.
+	const canonical = `${filename.split('.')[0]}.nar`;
 	url.pathname =
-		cache.is_public === 1 ? `/_nar/${filename}` : `/_nar_scoped/${cache.id}/${filename}`;
+		cache.is_public === 1 ? `/_nar/${canonical}` : `/_nar_scoped/${cache.id}/${canonical}`;
 	url.search = '';
 	return url;
 }
@@ -251,6 +254,26 @@ export async function serveStore(
 	ctx?: ExecutionContext
 ): Promise<Response> {
 	const segments = new URL(request.url).pathname.split('/').filter(Boolean);
+	// Internal-only: the gateway exposes no route to individual shared chunks.
+	if (segments.length === 2 && segments[0] === '_chunk') {
+		const key = decodeURIComponent(segments[1]);
+		const object = await withR2Retry(() => env.CACHE_BUCKET.get(key));
+		if (!object) return errorResponse(404, 'Chunk not found');
+		return new Response(object.body as unknown as BodyInit, {
+			headers: {
+				'Content-Type': 'application/octet-stream',
+				'Content-Length': String(object.size),
+				'Cache-Control': NAR_CACHE_CONTROL
+			}
+		});
+	}
+	// Every invocation here is an edge miss about to touch D1/R2. Charged per
+	// client (the gateway stamps the IP; a limiter key is not a response
+	// variation, so CachedStore stays caller-independent), and not at all
+	// for internal loopbacks — prefetch has its own budget, and a constant
+	// colo-wide key here made one CI fleet's cold closure everyone's 503.
+	const clientIp = request.headers.get(CLIENT_IP_HEADER);
+	if (clientIp) await requireBudget(env.BACKEND_READ_LIMITER, clientKey('backend-read', clientIp));
 
 	// Root-proxy upstream fallback: the hash resolves to no local cache, so try
 	// the union of every live cache's upstreams. Cached at the edge under this
@@ -355,7 +378,10 @@ async function serveRootUpstreamNarInfo(
 	// A refused probe budget must not become an edge-cached 404 shared by
 	// every client: errorResponse is no-store, so the refusal dies with this
 	// response.
-	if (hit === PROBE_REFUSED) return errorResponse(404, 'Not found', 'NoSuchObject');
+	if (hit === PROBE_REFUSED)
+		return errorResponse(503, 'Upstream probe budget exhausted', undefined, {
+			'Retry-After': '60'
+		});
 	if (hit) return withVisibility(upstreamNarinfoResponse(hit, tag), true);
 	const absent = errorResponse(404, 'Not found', 'NoSuchObject');
 	absent.headers.set('Cache-Control', NARINFO_404_CACHE_CONTROL);
@@ -557,7 +583,10 @@ async function serveNarInfo(
 		// Uncacheable by design (errorResponse is no-store): a budget refusal
 		// must never poison the shared edge cache with a false 404.
 		if (hit === PROBE_REFUSED) {
-			return withVisibility(errorResponse(404, 'Not found', 'NoSuchObject'), isPublic);
+			return withVisibility(
+				errorResponse(503, 'Upstream probe budget exhausted', undefined, { 'Retry-After': '60' }),
+				isPublic
+			);
 		}
 		if (hit) {
 			return withVisibility(
@@ -640,11 +669,31 @@ async function serveNar(
 	const totalSize = chunks.every((c) => c.file_size != null)
 		? chunks.reduce((sum, c) => sum + (c.file_size ?? 0), 0)
 		: null;
+	// Workers Paid does not raise the zone's 512 MB cacheable-object cap.
+	// Cache individual chunks when the assembled response cannot be cached.
+	const chunkStore =
+		totalSize === null || totalSize > 512 * 1024 * 1024 ? ctx?.exports?.CachedStore : undefined;
 	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
 	const pump = async () => {
 		// Queue of gets for chunks not yet piped, in key order; fill() tops it
 		// up to the lookahead window.
-		const getChunk = (key: string) => withR2Retry(() => env.CACHE_BUCKET.get(key));
+		const getChunk = async (key: string): Promise<{ body: ReadableStream<Uint8Array> } | null> => {
+			if (chunkStore) {
+				const response = await chunkStore.fetch(
+					new Request(
+						new URL(
+							`/_chunk/${encodeURIComponent(key)}`,
+							env.CACHE_BASE_URL || 'https://chunks.internal'
+						)
+					)
+				);
+				if (response.ok && response.body) return { body: response.body };
+				await response.body?.cancel().catch(() => {});
+				if (response.status !== 502) throw new Error(`Chunk cache returned ${response.status}`);
+			}
+			const object = await withR2Retry(() => env.CACHE_BUCKET.get(key));
+			return object ? { body: object.body as unknown as ReadableStream<Uint8Array> } : null;
+		};
 		const inFlight: ReturnType<typeof getChunk>[] = [];
 		let next = 0;
 		const fill = () => {

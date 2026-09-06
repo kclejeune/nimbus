@@ -38,6 +38,18 @@ function fakeDb(row: CacheRow | null): { db: D1Database; reads: () => number } {
 }
 
 describe('findCacheCached', () => {
+	it('guards cold cache names before D1, but does not charge memo hits', async () => {
+		const { db, reads } = fakeDb(ROW);
+		const refuse = vi.fn(async () => {
+			throw new Error('budget exhausted');
+		});
+		await expect(findCacheCached(db, 'guarded', refuse)).rejects.toThrow('budget exhausted');
+		expect(reads()).toBe(0);
+		await findCacheCached(db, 'guarded');
+		await expect(findCacheCached(db, 'guarded', refuse)).resolves.toEqual(ROW);
+		expect(reads()).toBe(1);
+		expect(refuse).toHaveBeenCalledOnce();
+	});
 	afterEach(() => {
 		vi.useRealTimers();
 		invalidateCacheRow();

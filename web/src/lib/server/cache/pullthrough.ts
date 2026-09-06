@@ -35,7 +35,7 @@ import {
 	recordVerdicts,
 	VERDICT_UNPERSISTABLE
 } from './missing-paths';
-import { readAll, withSlot, type ExecutionContext } from './platform';
+import { readAll, withSlot, uploadMemory, type ExecutionContext } from './platform';
 import { warmNarinfoAfterUpload } from './store';
 import { TtlMemo } from './ttl-memo';
 import {
@@ -112,6 +112,11 @@ export async function persistUpstreamPath(
 		return;
 	}
 
+	// Bytes are only buffered from the NAR fetch onward, so the memory slot
+	// is taken there (below), after the D1 checks that decide whether this
+	// ingest happens at all; taking it here held it through five round-trips
+	// and an upstream TTFB while pushes queued behind nothing.
+	let holdsSlot = false;
 	try {
 		// The persist marker rode an edge-cached response, so re-check the
 		// registry before acting on it: an upstream removed (or re-keyed) since
@@ -130,9 +135,12 @@ export async function persistUpstreamPath(
 		// so get-missing-paths stops relying on an ingestion that cannot happen
 		// (this also corrects verdicts probed without ingestibility knowledge).
 		if (!persistIngestible(parsed)) {
-			await recordVerdicts(env.ATTIC_DB, registered.id, [
-				{ hash: storePathHash, verdict: VERDICT_UNPERSISTABLE }
-			]).catch(() => {});
+			await recordVerdicts(
+				env.ATTIC_DB,
+				registered.id,
+				[{ hash: storePathHash, verdict: VERDICT_UNPERSISTABLE }],
+				env
+			).catch(() => {});
 			return;
 		}
 
@@ -177,10 +185,18 @@ export async function persistUpstreamPath(
 			return;
 		}
 
+		// Speculative work yields to pushes: a short bounded wait, then give
+		// up and let a later marker re-ask (the memo is cleared so it can).
+		holdsSlot = await uploadMemory.acquireBounded(2, 10_000);
+		if (!holdsSlot) {
+			recentIngests.delete(memoKey);
+			return;
+		}
 		const res = await fetch(`${upstreamUrl}/${parsed.url}`, {
 			signal: AbortSignal.timeout(NAR_FETCH_TIMEOUT_MS)
 		});
 		if (res.status !== 200 || !res.body) {
+			await res.body?.cancel().catch(() => {});
 			console.warn(`pullthrough: NAR fetch ${upstreamUrl}/${parsed.url} returned ${res.status}`);
 			return;
 		}
@@ -246,5 +262,7 @@ export async function persistUpstreamPath(
 		);
 	} catch (e) {
 		console.warn(`pullthrough: ingest into ${cacheName} from ${upstreamUrl} failed: ${e}`);
+	} finally {
+		if (holdsSlot) uploadMemory.release();
 	}
 }

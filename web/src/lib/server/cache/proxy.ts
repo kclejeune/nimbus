@@ -131,7 +131,8 @@ async function candidatesCached(
 	memo: TtlMemo<LiveCacheRow[]>,
 	loads: Map<string, CandidateLoad>,
 	key: string,
-	load: () => Promise<LiveCacheRow[]>
+	load: () => Promise<LiveCacheRow[]>,
+	admit?: () => Promise<void>
 ): Promise<LiveCacheRow[]> {
 	let interval = 5;
 	for (;;) {
@@ -158,6 +159,7 @@ async function candidatesCached(
 		};
 		loads.set(key, marker);
 		try {
+			if (admit) await admit();
 			const rows = await load();
 			if (!marker.invalidated) memo.set(key, rows);
 			return rows;
@@ -176,19 +178,32 @@ function narCandidateKey(narHash: string): string {
  * Returned rows are shared across callers — treat them read-only. */
 export async function candidatesForStorePath(
 	db: D1Database,
-	storePathHash: string
+	storePathHash: string,
+	admit?: () => Promise<void>
 ): Promise<LiveCacheRow[]> {
-	return candidatesCached(storePathCandidates, storePathCandidateLoads, storePathHash, () =>
-		cachesWithStorePathHash(readSession(db), storePathHash)
+	return candidatesCached(
+		storePathCandidates,
+		storePathCandidateLoads,
+		storePathHash,
+		() => cachesWithStorePathHash(readSession(db), storePathHash),
+		admit
 	);
 }
 
 /** Memoized cachesWithNarHash, with raw and sha256:-prefixed spellings folded
  * onto one key. Successful uploads evict that key via clearAbsent. */
-export async function candidatesForNar(db: D1Database, narHash: string): Promise<LiveCacheRow[]> {
+export async function candidatesForNar(
+	db: D1Database,
+	narHash: string,
+	admit?: () => Promise<void>
+): Promise<LiveCacheRow[]> {
 	const key = narCandidateKey(narHash);
-	return candidatesCached(narHashCandidates, narHashCandidateLoads, key, () =>
-		cachesWithNarHash(readSession(db), [`sha256:${key}`, key])
+	return candidatesCached(
+		narHashCandidates,
+		narHashCandidateLoads,
+		key,
+		() => cachesWithNarHash(readSession(db), [`sha256:${key}`, key]),
+		admit
 	);
 }
 

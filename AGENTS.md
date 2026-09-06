@@ -108,8 +108,9 @@ net loss — the arithmetic for the one we rejected is at the end of
 
 **Tests.** `web/vitest.config.ts` is plain node plus a `$lib` alias — no
 SvelteKit plugin, no workerd. Only pure server modules are testable; anything
-touching bindings, D1, or R2 has no harness, which is why `store.ts`, `gc.ts`,
-and `upload.ts` have none. On the Go side, macOS auto-GC reaps unrooted
+touching bindings runs against `cache/test-db.ts` (node:sqlite over the real
+schema, mocked R2/compression — SQL semantics, not D1 replication or workerd);
+`gc.ts` still has none. On the Go side, macOS auto-GC reaps unrooted
 `nix store add-path` fixtures mid-run, and the failure reads as a push bug.
 
 ## Traps

@@ -34,13 +34,13 @@
 			"destinations": ["traceway-logs"],
 			"head_sampling_rate": 1,
 			"persist": true,
-			"invocation_logs": true
+			"invocation_logs": false
 		},
 		"traces": {
 			"enabled": true,
 			"destinations": ["traceway-traces"],
 			"persist": true,
-			"head_sampling_rate": 1
+			"head_sampling_rate": 0.1
 		}
 	},
 
@@ -104,6 +104,42 @@
 	// keeps serving by redirect — just slow). Revisit if pull-through becomes
 	// load-bearing enough that the flood ceiling matters more than warm-up.
 	"ratelimits": [
+		// Work budgets: per client (CF-Connecting-IP) and per colo, so one
+		// abuser's refusals never land on the honest clients sharing its colo.
+		// Not global quotas. Sized so a single honest cold burst clears:
+		// BACKEND_READ is charged once per D1-touching miss and nix drives up
+		// to ~25 parallel misses at ~50 ms each (~500/s), matching the WAF's
+		// per-IP read backstop (deploy-waf.mjs); BATCH_QUERY is one unit per
+		// get-missing-paths request plus one per 1000 hashes (a full 10k batch
+		// is 11); STORAGE_WRITE is one unit per started MiB actually written.
+		{
+			"name": "BACKEND_READ_LIMITER",
+			"namespace_id": "1009",
+			"simple": { "limit": 30000, "period": 60 }
+		},
+		{ "name": "UPLOAD_LIMITER", "namespace_id": "1010", "simple": { "limit": 600, "period": 60 } },
+		{
+			"name": "BATCH_QUERY_LIMITER",
+			"namespace_id": "1011",
+			"simple": { "limit": 300, "period": 60 }
+		},
+		// Colo-wide; batch callers pay one unit per 50 rows, read-path
+		// deferred writes one per row (plus ABSENT_VERDICT_LIMITER below).
+		{
+			"name": "VERDICT_WRITE_LIMITER",
+			"namespace_id": "1012",
+			"simple": { "limit": 300, "period": 60 }
+		},
+		{
+			"name": "UPSTREAM_GLOBAL_LIMITER",
+			"namespace_id": "1013",
+			"simple": { "limit": 3000, "period": 60 }
+		},
+		{
+			"name": "STORAGE_WRITE_LIMITER",
+			"namespace_id": "1014",
+			"simple": { "limit": 512, "period": 60 }
+		},
 		// Auth spans all endpoints per IP; device creation is much rarer than polling.
 		{ "name": "AUTH_LIMITER", "namespace_id": "1006", "simple": { "limit": 120, "period": 60 } },
 		{
@@ -144,6 +180,7 @@
 		}
 	],
 	"vars": {
+		"CACHE_METRICS_SAMPLE": "100",
 		"APP_URL": "https://app.cache.kclj.io",
 		"CACHE_BASE_URL": "https://cache.kclj.io",
 		"OIDC_ISSUER": "https://auth.kclj.io",
@@ -170,7 +207,8 @@
 	// sustained read rates it becomes a real line item. Set the
 	// CACHE_METRICS_SAMPLE var to N to record 1-in-N reads weighted by N
 	// (cache/metrics.ts); the monitoring page's totals stay correct because
-	// the query weights by double1. Push/chunk/guard points are never sampled.
+	// the query weights by double1. Guard points share this sampling; push/chunk
+	// points are recorded whole.
 	"analytics_engine_datasets": [
 		{
 			"binding": "CACHE_METRICS",

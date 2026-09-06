@@ -16,8 +16,9 @@
 import { parseNarInfo, parsedNarInfoSignatureValid, type ParsedNarInfo } from '../attic/narinfo';
 import { dbAll, dbBatch, readSession, runBatched } from './db';
 import { recordGuard } from './metrics';
-import { mapConcurrent, sleep, type ExecutionContext } from './platform';
+import { mapConcurrent, readAll, sleep, type ExecutionContext } from './platform';
 import { TtlMemo } from './ttl-memo';
+import { AdmissionError, clientKey, requireBudget, takeBudget, takeBudgetUnits } from './admission';
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
 
 type Env = App.Platform['env'];
@@ -69,9 +70,9 @@ export type Verdict = typeof VERDICT_ABSENT | typeof VERDICT_PRESENT | typeof VE
  * and the decompressed NAR are buffered (zstd decompression is buffer-only,
  * and its WASM heap holds source + destination at once) inside the isolate's
  * 128 MB, alongside the pipeline's chunk buffers. Sized so the worst case
- * (incompressible 16 MB file, 32 MB NAR) peaks well under the limit. */
+ * includes the compressed file, raw NAR, chunker, and retained WASM heap. */
 export const PERSIST_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
-export const PERSIST_MAX_NAR_BYTES = 32 * 1024 * 1024;
+export const PERSIST_MAX_NAR_BYTES = 16 * 1024 * 1024;
 
 /** Whether pull-through can ingest this narinfo's NAR server-side (see
  * pullthrough.ts): decompressible compression and within the memory caps. */
@@ -224,8 +225,25 @@ async function cachedVerdictsAcrossUpstreams(
 export async function recordVerdicts(
 	db: D1,
 	upstreamId: number,
-	verdicts: { hash: string; verdict: Verdict }[]
+	verdicts: { hash: string; verdict: Verdict }[],
+	env?: Env
 ): Promise<void> {
+	if (verdicts.length === 0) return;
+	// Batch writes are charged per 50 rows, not per row: these come from
+	// authenticated push preflights (and GC), where each PRESENT verdict
+	// saves a live upstream fetch on every later preflight and cold read.
+	// Silently dropping most of a batch — what a per-row charge at the
+	// read-path rate did — re-created the amplification the table prevents.
+	// The read path's single-row deferred writes keep their own per-row and
+	// absent-verdict budgets (recordVerdictDeferred).
+	if (
+		env &&
+		!(await takeBudgetUnits(env.VERDICT_WRITE_LIMITER, 'verdict', Math.ceil(verdicts.length / 50)))
+	) {
+		recordGuard(env, 'verdict');
+		console.warn(`upstream_check: verdict budget refused ${verdicts.length} rows`);
+		return;
+	}
 	const stmts = verdictStmts(db, upstreamId, verdicts, new Date().toISOString());
 	await runBatched(db, stmts);
 }
@@ -279,10 +297,9 @@ const recentVerdictWrites = new TtlMemo<Verdict>(
 // Every per-hash defense (edge-cached 404s, the verdict cache, the memos) is
 // keyed by the hash, so a distinct-hash flood bypasses them all: each miss
 // would fan out to live upstream fetches and an absent-verdict primary write.
-// These budgets bound that amplification. The batch push path
-// (filterUpstreamPaths) is authenticated and keeps its own unguarded writes.
+// HTTP batch callers use the same budgets; trusted nightly GC can omit them.
 
-/** What read-path guards need; omitted (tests, batch callers) = unguarded. */
+/** Omitted for tests and trusted scheduled work. */
 export interface ProbeGuard {
 	env: Env;
 	/** Client IP keying the probe budget; null degrades to a shared key. */
@@ -290,27 +307,24 @@ export interface ProbeGuard {
 }
 
 /** Distinguishes "budget refused" from a genuine miss, so callers emit an
- *  uncacheable 404 instead of poisoning the shared edge cache (narinfo) or
+ *  uncacheable 503 instead of poisoning the shared edge cache (narinfo) or
  *  the redirect memo (NARs) with false negatives that would outlive the
  *  refusal. */
 export const PROBE_REFUSED = Symbol('upstream probe budget refused');
 
-/**
- * One unit of per-IP upstream-fetch budget for an edge-missed read. Fails
- * open (binding absent in dev/tests, or erroring): a refusal 404s paths that
- * exist upstream, so this is a generous abuse backstop, not admission
- * control.
- */
+/** Charge each outbound fetch against both per-IP and colo-wide budgets. */
 async function takeProbeBudget(guard: ProbeGuard | undefined): Promise<boolean> {
-	const limiter = guard?.env.UPSTREAM_PROBE_LIMITER;
-	if (!limiter) return true;
-	try {
-		const { success } = await limiter.limit({ key: `probe:${guard.ip ?? 'unknown'}` });
-		if (!success) recordGuard(guard.env, 'probe');
-		return success;
-	} catch {
-		return true;
-	}
+	if (!guard) return true;
+	const success =
+		(await takeBudget(guard.env.UPSTREAM_PROBE_LIMITER, `probe:${guard.ip ?? 'unknown'}`)) &&
+		(await takeBudget(guard.env.UPSTREAM_GLOBAL_LIMITER, 'probe'));
+	if (!success) recordGuard(guard.env, 'probe');
+	return success;
+}
+
+async function takeVerdictBudget(env: Env, verdict: Verdict): Promise<boolean> {
+	if (!(await takeBudget(env.VERDICT_WRITE_LIMITER, 'verdict'))) return false;
+	return verdict !== VERDICT_ABSENT || (await takeAbsentVerdictBudget(env));
 }
 
 /**
@@ -379,7 +393,7 @@ function recordVerdictDeferred(
 	if (recentVerdictWrites.get(key) === verdict) return;
 	recentVerdictWrites.set(key, verdict);
 	const write = (async () => {
-		if (verdict === VERDICT_ABSENT && env && !(await takeAbsentVerdictBudget(env))) {
+		if (env && !(await takeVerdictBudget(env, verdict))) {
 			// Undo the coalesce marker so an organic miss can record once the
 			// budget window rolls.
 			recentVerdictWrites.delete(key);
@@ -452,15 +466,23 @@ export async function probeUpstream(upstream: Upstream, hash: string): Promise<V
 		if (res.status !== 200) await res.body?.cancel();
 		if (res.status === 404) return VERDICT_ABSENT;
 		if (res.status !== 200) return null;
-		return await classifyNarinfo(upstream, await res.text());
+		return await classifyNarinfo(upstream, await readNarinfo(res));
 	} catch {
 		return null;
 	}
 }
 
+async function readNarinfo(response: Response): Promise<string> {
+	if (!response.body) return '';
+	const body = await readAll(response.body, 1024 * 1024);
+	if (!body) throw new Error('Upstream narinfo exceeds size limit');
+	return new TextDecoder().decode(body);
+}
+
 /**
  * Filter out hashes that exist in any configured upstream. Probes are capped
- * per request; anything over the cap is conservatively treated as missing
+ * per request and by the caller's probe budget; anything over either cap is
+ * conservatively treated as missing
  * (worst case the client pushes a path we could have skipped).
  *
  * mode=persist upstreams only filter paths that server-side pull-through can
@@ -472,7 +494,8 @@ export async function probeUpstream(upstream: Upstream, hash: string): Promise<V
 export async function filterUpstreamPaths(
 	db: D1,
 	upstreams: Upstream[],
-	missing: string[]
+	missing: string[],
+	guard?: ProbeGuard
 ): Promise<string[]> {
 	let remaining = missing;
 	let probeBudget = MAX_UPSTREAM_PROBES;
@@ -502,14 +525,24 @@ export async function filterUpstreamPaths(
 		// instead of waiting out the slowest member of a fixed batch. The
 		// platform caps concurrent outbound connections (~6) below this limit,
 		// so the win is dropping the batch-sync stalls, not more parallelism.
+		// A refused budget degrades, never fails: the unprobed remainder is
+		// reported missing (the client uploads a few paths an upstream also
+		// has) and the verdicts already gathered are still recorded. A 503
+		// here threw away that work and failed the whole push.
+		let refused = false;
 		const probed = (
 			await mapConcurrent(toProbe, PROBE_CONCURRENCY, async (hash) => {
+				if (refused) return null;
+				if (!(await takeProbeBudget(guard))) {
+					refused = true;
+					return null;
+				}
 				const verdict = await probeUpstream(upstream, hash);
 				return verdict === null ? null : { hash, verdict };
 			})
 		).filter((r): r is { hash: string; verdict: Verdict } => r !== null);
 		if (probed.length > 0) {
-			await recordVerdicts(db, upstream.id, probed).catch((e) =>
+			await recordVerdicts(db, upstream.id, probed, guard?.env).catch((e) =>
 				console.warn(`upstream_check record failed: ${e}`)
 			);
 		}
@@ -550,19 +583,16 @@ export async function fetchUpstreamNarInfo(
 	const cached = await cachedVerdictsAcrossUpstreams(db, upstreams, storePathHash);
 	const candidates = upstreams.filter((u) => cached.get(u.id) !== VERDICT_ABSENT);
 	if (candidates.length === 0) return null;
-	// Every non-absent case fetches the upstream live (narinfo bodies are
-	// never stored in D1), so the whole fan-out rides one budget take.
-	if (!(await takeProbeBudget(guard))) return PROBE_REFUSED;
-
 	const attempt = async (
 		upstream: Upstream
-	): Promise<{ text: string; upstream: Upstream } | null> => {
+	): Promise<{ text: string; upstream: Upstream } | null | typeof PROBE_REFUSED> => {
+		if (!(await takeProbeBudget(guard))) return PROBE_REFUSED;
 		try {
 			const res = await probeFetch(`${upstream.url}/${storePathHash}.narinfo`);
 			// Error bodies still occupy a connection until consumed or cancelled.
 			if (res.status !== 200) await res.body?.cancel();
 			if (res.status === 200) {
-				const text = await res.text();
+				const text = await readNarinfo(res);
 				// Recording on any change actively corrects verdicts probed without
 				// ingestibility knowledge (e.g. a redirect-mode HEAD before the
 				// upstream flipped to persist), and records mis-signed bodies absent
@@ -643,13 +673,13 @@ export async function findUpstreamNar(
 		unknowns.push(upstream);
 	}
 	if (unknowns.length === 0) return fallback;
-	if (!(await takeProbeBudget(guard))) return PROBE_REFUSED;
 
 	// Concurrent probes, awaited in priority order: same winner as the old
 	// sequential loop, without serializing a slow upstream ahead of it.
 	// No signature check on NARs: the client verifies the downloaded bytes
 	// against the NarHash of the (signature-checked) narinfo that named them.
 	const inFlight = unknowns.map(async (upstream) => {
+		if (!(await takeProbeBudget(guard))) return PROBE_REFUSED;
 		const probed = await probeUpstream(upstream, key);
 		if (probed !== null) {
 			recordVerdictDeferred(db, ctx, upstream.id, key, probed, guard?.env);
@@ -705,13 +735,19 @@ export async function upstreamNarRedirect(
 	const upstreams = cache
 		? await upstreamsForCache(session, cache)
 		: await allLiveUpstreams(session);
+	// The registry read above is memoized (upstreamConfig); the work worth
+	// charging is the fan-out below, so a cache with no upstreams keeps its
+	// plain 404 even under budget pressure.
+	if (upstreams.length > 0) {
+		await requireBudget(env.BACKEND_READ_LIMITER, clientKey('backend-read', ip));
+	}
 	const url = await findUpstreamNar(session, upstreams, `nar/${filename}`, ctx, {
 		env,
 		ip: ip ?? null
 	});
 	// A refused budget is not a verdict: skip the memo so organic requests
 	// keep resolving once the window rolls.
-	if (url === PROBE_REFUSED) return null;
+	if (url === PROBE_REFUSED) throw new AdmissionError('Upstream probe budget exhausted');
 	narRedirectMemo.set(key, url);
 	return url;
 }

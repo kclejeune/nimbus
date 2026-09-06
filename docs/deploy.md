@@ -186,3 +186,52 @@ database) and the WAF step.
 
 Upstream caches (e.g. `cache.nixos.org`) are configured per-cache from the
 dashboard, not at deploy time.
+
+### Cost and overload controls
+
+The tracked Wrangler configs set budgets before cold D1 lookups, batch
+existence queries (one unit per request plus one per 1000 hashes), upstream
+fetches (one unit per actual fetch), verdict writes, and uploads. Budgets that
+honest traffic can reach in a burst (backend reads, batch queries, upstream
+probes) are keyed per client IP as well as per colo, so a flood from one
+address never refuses the clients sharing its colo. Storage writes charge one
+unit per started MiB actually written, shared by pushes and pull-through;
+deduplicated chunks are free. Admission failures on the read path return
+uncacheable 503s with Retry-After; on the authenticated push preflight a
+refused upstream-probe budget degrades instead (unprobed paths are reported
+missing, so the client uploads a little more), and verdict writes and
+ingestion are skipped rather than failing the request. Binding errors fail
+closed; omitted bindings are unlimited for local development.
+
+These are eventually consistent rate limits, **not an account-wide byte or
+billing quota**. A distributed flood multiplies the budgets across colos, and
+requests still cost money when refused or served from cache. Retention byte
+targets remain nightly GC targets, not upload admission quotas. A strict global
+storage/spend ceiling requires globally coordinated reservations and an explicit
+operator-selected cap; do not treat the rate settings as that guarantee.
+
+Uploads and ingestion share two memory slots per isolate, taken only by
+requests that carry NAR bytes (CDC manifest calls are not gated). Up to 64
+uploads can wait, without buffering bodies, for up to two minutes — enough for
+the CLI's full fan-out on one connection; excess work receives a five-second
+Retry-After. Speculative ingestion waits briefly and otherwise yields. Body
+reads have a 30-second idle deadline and a 30-minute absolute backstop
+(matching the CLI's request timeout) so stalled senders cannot retain a slot
+indefinitely. Pull-through is limited to 16 MiB decompressed; larger upstream
+NARs remain available by redirect and can be pushed by clients. Chunk rows are
+staged before R2 writes, so interrupted or rejected uploads are discoverable
+by the orphan reaper, and a NAR's fresh chunks publish in one batch with its
+metadata. Identical retries share pending chunks; a pending or GC-claimed row
+nobody holds (or whose hold is over an hour old) is taken over by the next
+upload of that chunk, so a failed or killed upload never blocks a re-push
+until the nightly GC. This does not retroactively discover pre-existing R2
+objects with no D1 row.
+
+Workers Paid does not remove the zone's 512 MB cacheable-object limit. Oversized
+multi-chunk NARs use internal per-chunk caching; the assembled response still
+executes the store and its metadata lookup. Legacy oversized single-object NARs
+still stream directly from R2.
+
+Read and guard metrics are sampled 1-in-100 with weights; traces are sampled at
+10%. Automatic invocation logs are disabled, while application logs remain
+unsampled. Lower the sampling divisor temporarily when investigating sparse traffic.

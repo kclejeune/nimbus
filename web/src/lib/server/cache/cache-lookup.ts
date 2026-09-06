@@ -36,9 +36,14 @@ export function invalidateCacheRow(name?: string): void {
  * here — the memo is shared isolate-wide, so a per-caller source choice
  * could not buy freshness anyway. Serve and upload paths — admin and
  * cache-config paths take the live db.findCache. */
-export async function findCacheCached(db: D1Database, name: string): Promise<CacheRow | null> {
+export async function findCacheCached(
+	db: D1Database,
+	name: string,
+	admit?: () => Promise<void>
+): Promise<CacheRow | null> {
 	const cached = cacheRowMemo.get(name);
 	if (cached !== undefined) return cached;
+	if (admit) await admit();
 	const row = await findCache(readSession(db), name);
 	cacheRowMemo.set(name, row, row ? CACHE_ROW_TTL_MS : CACHE_ROW_MISS_TTL_MS);
 	return row;

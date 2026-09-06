@@ -13,7 +13,14 @@ import {
 import { findCacheCached } from './cache-lookup';
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import { readDeviceCode, readMissingPaths } from './request-input';
-import { RequestBodyError } from '../request-body';
+import { RequestBodyError, readJson } from '../request-body';
+import {
+	AdmissionError,
+	CLIENT_IP_HEADER,
+	clientKey,
+	requireBudget,
+	requireBudgetUnits
+} from './admission';
 import { checkRateLimit } from '../rate-limit';
 import * as db from './db';
 import { listPins, runGc } from './gc';
@@ -30,7 +37,7 @@ import {
 	upstreamNarRedirect,
 	upstreamsForCache
 } from './missing-paths';
-import { type ExecutionContext } from './platform';
+import { uploadMemory, type ExecutionContext } from './platform';
 import {
 	candidatesForNar,
 	candidatesForStorePath,
@@ -67,6 +74,7 @@ import {
 	handleCdcComplete,
 	handleCdcQuery,
 	handleUploadPath,
+	validateManifest,
 	type CdcManifest
 } from './upload';
 
@@ -183,7 +191,9 @@ async function authorizeCacheRead(
 	// failure surfaces as before; the side .catch only marks the rejection
 	// handled during the token-verification window so workerd doesn't report
 	// it as unhandled in the interim.
-	const cachePromise = findCacheCached(env.ATTIC_DB, cacheName);
+	const cachePromise = findCacheCached(env.ATTIC_DB, cacheName, () =>
+		requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request))
+	);
 	cachePromise.catch(() => {});
 	let permission: Permission;
 	let authError: unknown = null;
@@ -257,6 +267,11 @@ async function forwardToStore(
 ): Promise<Response> {
 	const forwarded = new Request(request);
 	forwarded.headers.delete('Authorization');
+	// Overwritten, never passed through: the store charges its D1/R2 work to
+	// this key, and a client must not be able to pick whose budget it spends.
+	const clientIp = request.headers.get('CF-Connecting-IP');
+	if (clientIp) forwarded.headers.set(CLIENT_IP_HEADER, clientIp);
+	else forwarded.headers.delete(CLIENT_IP_HEADER);
 	// Internal prefetch-loopback marker (store.ts); client-supplied, it would
 	// falsely mark the request as a prefetch and disable its upstream fallback.
 	forwarded.headers.delete(PREFETCH_MARKER_HEADER);
@@ -288,6 +303,11 @@ async function forwardToStore(
 	stripped.headers.delete(PERSIST_CACHE_HEADER);
 	stripped.headers.delete(PERSIST_UPSTREAM_HEADER);
 	return stripped;
+}
+
+/** Per-client key for cold gateway lookups (memo misses that reach D1). */
+function backendReadKey(request: Request): string {
+	return clientKey('backend-read', request.headers.get('CF-Connecting-IP'));
 }
 
 /** Edge-cache verdict of a store response, from the loopback's CF-Cache-Status. */
@@ -437,7 +457,9 @@ async function handleProxyNarInfo(
 	// read, cached or not.
 	const [token, candidates] = await Promise.all([
 		proxyToken(request, env),
-		candidatesForStorePath(env.ATTIC_DB, storePathHash)
+		candidatesForStorePath(env.ATTIC_DB, storePathHash, () =>
+			requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request))
+		)
 	]);
 	const winner = pickReadableWinner(token, candidates);
 	// No local winner (not stored anywhere, or stored only in caches this
@@ -492,7 +514,9 @@ async function handleProxyNar(
 	// Same concurrent shape (and memo rationale) as handleProxyNarInfo above.
 	const [token, narCandidates] = await Promise.all([
 		proxyToken(request, env),
-		candidatesForNar(env.ATTIC_DB, narHashRaw)
+		candidatesForNar(env.ATTIC_DB, narHashRaw, () =>
+			requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request))
+		)
 	]);
 	const winner = pickReadableWinner(token, narCandidates);
 	// NAR URLs served by root-proxy upstream passthrough narinfos resolve here
@@ -562,6 +586,15 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	if (!permissionForCache(token, body.cache).push) {
 		return errorResponse(403, 'Permission denied: push');
 	}
+	// One unit per request plus one per started 1000 hashes, charged
+	// together and per client: a full 10k batch (what the Go client sends)
+	// is 11 units, so the limit is expressed in requests, not hash windows,
+	// and one pusher's burst cannot exhaust the colo for everyone else.
+	await requireBudgetUnits(
+		env.BATCH_QUERY_LIMITER,
+		clientKey('batch-query', request.headers.get('CF-Connecting-IP')),
+		1 + Math.ceil(body.hashes.length / 1000)
+	);
 
 	// Replica reads throughout: staleness at worst re-reports a just-pushed
 	// path as missing, and the upload path dedups the re-push. Keeps this
@@ -591,7 +624,10 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	const missing = hashes.filter((h) => !existing.has(h));
 	const missingPaths =
 		upstreams.length > 0 && missing.length > 0
-			? await filterUpstreamPaths(session, upstreams, missing)
+			? await filterUpstreamPaths(session, upstreams, missing, {
+					env,
+					ip: request.headers.get('cf-connecting-ip')
+				})
 			: missing;
 
 	return new Response(JSON.stringify({ missing_paths: missingPaths }), {
@@ -681,6 +717,7 @@ async function requireToken(
  * worker-entry.ts so both halves speak one retryability contract.
  */
 export function caughtResponse(prefix: string, request: Request, e: unknown): Response {
+	if (e instanceof AdmissionError) return e.response();
 	if (e instanceof RequestBodyError) return e.response();
 	if (e instanceof CacheConfigError) {
 		return errorResponse(e.status, e.message, e.status === 404 ? 'NoSuchCache' : undefined);
@@ -774,45 +811,23 @@ async function handleV1(
 	}
 
 	if (route === 'upload-path') {
+		if (![...token.caches.values()].some((permission) => permission.push)) {
+			return errorResponse(403, 'Permission denied: push');
+		}
+		await requireBudget(env.UPLOAD_LIMITER, 'upload');
 		// The CDC endpoints are stateless, so authorization rides along on each
 		// request: the manifest body carries the cache for POSTs, and chunk PUTs
 		// carry it as a query param. Provenance is stamped server-side —
 		// client-supplied source/created_by fields are overwritten.
 		const parseManifest = async (): Promise<CdcManifest | Response> => {
-			const body = await (request.json() as Promise<CdcManifest>).catch(() => null);
-			if (!body?.nar_info?.cache || typeof body.nar_size !== 'number') {
-				return errorResponse(400, 'Invalid request body');
-			}
+			const body = (await readJson(request, 1024 * 1024)) as CdcManifest;
+			const invalid = validateManifest(body);
+			if (invalid) return invalid;
 			if (!canPush(body.nar_info.cache)) return errorResponse(403, 'Permission denied: push');
 			body.nar_info.source = 'push';
 			body.nar_info.created_by = token.sub ?? null;
 			return body;
 		};
-
-		let response: Response;
-		if (method === 'PUT' && segments.length === 3) {
-			response = await handleUploadPath(request, env, ctx, canPush, token.sub ?? null);
-		} else if (method === 'POST' && segments[3] === 'chunks' && segments.length === 4) {
-			const manifest = await parseManifest();
-			if (manifest instanceof Response) return manifest;
-			response = await handleCdcQuery(env, ctx, url.origin, manifest);
-		} else if (method === 'PUT' && segments[3] === 'chunks' && segments.length === 5) {
-			const cacheName = url.searchParams.get('cache');
-			if (!cacheName) return errorResponse(400, 'Missing cache parameter');
-			if (!canPush(cacheName)) return errorResponse(403, 'Permission denied: push');
-			response = await handleCdcChunkPut(request, env, segments[4]);
-		} else if (
-			method === 'POST' &&
-			segments[3] === 'chunks' &&
-			segments[4] === 'complete' &&
-			segments.length === 5
-		) {
-			const manifest = await parseManifest();
-			if (manifest instanceof Response) return manifest;
-			response = await handleCdcComplete(env, ctx, url.origin, manifest);
-		} else {
-			return errorResponse(404, 'Not found');
-		}
 
 		// Size-budget enforcement runs on the nightly GC cron (scheduled →
 		// runGc), not inline here: the budget check (a SUM over chunk) plus a
@@ -820,7 +835,41 @@ async function handleV1(
 		// upload starved concurrent pushes' writes — tipping the primary's queue
 		// into "D1 requests queued for too long". The tradeoff is that a size
 		// budget can be exceeded for up to a day between cron runs.
-		return response;
+		//
+		// Only bodies that get buffered or decompressed take the memory slot:
+		// the CDC query/complete manifests are ≤1 MiB JSON and touch no WASM,
+		// and gating them behind chunk PUTs stalled the client's pipeline.
+		const carriesNar =
+			method === 'PUT' &&
+			(segments.length === 3 || (segments[3] === 'chunks' && segments.length === 5));
+		if (carriesNar && !(await uploadMemory.acquireBounded()))
+			throw new AdmissionError('Upload memory busy; retry shortly', 5);
+		try {
+			if (method === 'PUT' && segments.length === 3) {
+				return await handleUploadPath(request, env, ctx, canPush, token.sub ?? null);
+			} else if (method === 'POST' && segments[3] === 'chunks' && segments.length === 4) {
+				const manifest = await parseManifest();
+				if (manifest instanceof Response) return manifest;
+				return await handleCdcQuery(env, ctx, url.origin, manifest);
+			} else if (method === 'PUT' && segments[3] === 'chunks' && segments.length === 5) {
+				const cacheName = url.searchParams.get('cache');
+				if (!cacheName) return errorResponse(400, 'Missing cache parameter');
+				if (!canPush(cacheName)) return errorResponse(403, 'Permission denied: push');
+				return await handleCdcChunkPut(request, env, segments[4]);
+			} else if (
+				method === 'POST' &&
+				segments[3] === 'chunks' &&
+				segments[4] === 'complete' &&
+				segments.length === 5
+			) {
+				const manifest = await parseManifest();
+				if (manifest instanceof Response) return manifest;
+				return await handleCdcComplete(env, ctx, url.origin, manifest);
+			}
+			return errorResponse(404, 'Not found');
+		} finally {
+			if (carriesNar) uploadMemory.release();
+		}
 	}
 
 	// nimbus extension: GC roots (pin/unpin) over the API. Pinning is a

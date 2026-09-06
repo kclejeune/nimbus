@@ -74,15 +74,13 @@ export function edgeEvent(cfCacheStatus: string | null): EdgeEvent {
 }
 
 /**
- * Client-side sampling divisor for read points. Reads are the only unbounded
- * point stream — one per gateway invocation, edge hits included — so at the
- * volumes the read path is built for they dominate Analytics Engine spend,
- * while push/chunk/guard points stay rare enough to be worth recording whole.
+ * Read points scale with every gateway invocation, including edge hits.
+ * Guard refusals share their sampling because they also scale with abuse.
  *
  * A sampled point carries its divisor as double1, so it stands for that many
  * events; every writer here sets double1 to its weight and traffic.ts sums
  * `_sample_interval * double1`. Unset or <= 1 records everything, which is the
- * default — turn this up only when the AE bill says to.
+ * development default; deployment configs sample 1-in-100.
  */
 function readSampleRate(env: Env): number {
 	const raw = Number(env.CACHE_METRICS_SAMPLE);
@@ -165,9 +163,11 @@ export function recordStoreWrite(
  *  monitoring page instead of only as absent load. */
 export function recordGuard(env: Env, event: GuardEvent): void {
 	try {
+		const sample = readSampleRate(env);
+		if (Math.random() * sample >= 1) return;
 		env.CACHE_METRICS?.writeDataPoint({
 			blobs: ['guard', event, GUARD_LABEL],
-			doubles: [1],
+			doubles: [sample],
 			indexes: [GUARD_LABEL]
 		});
 	} catch {
