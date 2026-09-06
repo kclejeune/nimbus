@@ -139,12 +139,12 @@
 		"workerd@1.20260801.1": true
 	},
 	"dependencies": {
-		"better-auth": "^1.6.26",
+		"better-auth": "^1.7.2",
 		"clsx": "^2.1.1",
 		"drizzle-orm": "^0.45.2",
-		"jose": "^6.2.8",
+		"jose": "^6.2.10",
 		"mode-watcher": "^1.1.0",
-		"svelte-sonner": "^1.1.1",
+		"svelte-sonner": "^1.2.1",
 		"tailwind-merge": "^3.6.0",
 		"tailwind-variants": "^3.3.1"
 	},
