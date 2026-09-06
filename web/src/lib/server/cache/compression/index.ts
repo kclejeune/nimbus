@@ -15,11 +15,9 @@ export { initZstd, zstdDecompress } from './zstd';
  * ~50 MB), the Emscripten heap never shrinks, and concurrent requests
  * multiplexed over one HTTP/2 connection land on the same isolate —
  * ungated, a large push exceeds the 128 MiB isolate limit and dies as a
- * Cloudflare 1101/1102. Uniform slots are an approximation: a cap-sized
- * pull-through decompress (~32 MiB output) alongside a chunk op can still
- * overshoot in the worst corner — accepted residual risk over a weighted
- * scheme, which would need reservation to avoid livelock on a polling
- * semaphore.
+ * Cloudflare 1101/1102. The outer uploadMemory slot covers the entire
+ * pipeline, including body buffering and the compressed output's R2 PUT.
+ * These inner slots only bound compression tasks within that admitted work.
  */
 export const wasmMemorySlots = new Semaphore(2);
 export {

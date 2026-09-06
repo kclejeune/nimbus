@@ -45,7 +45,7 @@ const GEAR = (() => {
 export class FastCdcChunker {
 	// Holds the current unfinished chunk plus incoming slack. A cut is forced
 	// at MAX_CHUNK, so len never exceeds MAX_CHUNK for long.
-	private buf = new Uint8Array(MAX_CHUNK * 2);
+	private buf = new Uint8Array(MAX_CHUNK);
 	private len = 0;
 	private scanned = 0;
 	private hash = 0;

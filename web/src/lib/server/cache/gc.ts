@@ -7,7 +7,7 @@
 // Every sweep is idempotent; passes are ordered so each exposes work for the
 // next (retention deletes objects -> orphans NARs -> orphans chunks -> R2).
 
-import { chunkKey, dbRun, PARAM_BATCH, runBatched } from './db';
+import { claimOrphanChunks, chunkKey, dbRun, PARAM_BATCH, runBatched } from './db';
 import { allLiveUpstreams, filterUpstreamPaths, VERDICT_ABSENT } from './missing-paths';
 import { type ExecutionContext } from './platform';
 import { narinfoTag } from './store';
@@ -1119,18 +1119,7 @@ async function reapOrphans(env: Env, stats: GcStats): Promise<void> {
 					'AND NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id)'
 			)
 			.run();
-		orphans = (
-			await db
-				.prepare(
-					// The grace period protects chunks of in-flight CDC uploads, whose
-					// chunkref rows only land once the whole NAR is finalized.
-					'SELECT id, remote_file FROM chunk ' +
-						'WHERE holders_count = 0 ' +
-						'AND NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id) ' +
-						"AND datetime(created_at) < datetime('now', '-1 hours')"
-				)
-				.all<{ id: number; remote_file: string }>()
-		).results;
+		orphans = await claimOrphanChunks(db);
 	} catch (e) {
 		console.warn(`gc: find orphan chunks failed: ${e}`);
 		return;
@@ -1154,8 +1143,10 @@ async function reapOrphans(env: Env, stats: GcStats): Promise<void> {
 			const ids = batch.slice(j, j + PARAM_BATCH).map((c) => c.id);
 			const placeholders = ids.map((_, k) => `?${k + 1}`).join(', ');
 			try {
+				// state = 'D' guards a row an upload took over after an earlier
+				// claim aged out (stageChunk): it is live again, not ours.
 				await db
-					.prepare(`DELETE FROM chunk WHERE id IN (${placeholders})`)
+					.prepare(`DELETE FROM chunk WHERE state = 'D' AND id IN (${placeholders})`)
 					.bind(...ids)
 					.run();
 				stats.orphan_chunks_reaped += ids.length;

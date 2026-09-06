@@ -561,38 +561,121 @@ export interface NewChunk {
 	remote_file_id: string;
 }
 
-/**
- * Insert a chunk row, converging on the existing row when a concurrent upload
- * of the same (chunk_hash, compression) already created one — both describe
- * the same content-addressed R2 object. holders_count starts at 0: newborn
- * rows are protected by the orphan reaper's grace period until a chunkref
- * lands. Statement form for use inside atomic batches.
- */
-export function insertChunkStmt(db: D1Database, chunk: NewChunk): D1PreparedStatement {
-	return db
-		.prepare(
-			'INSERT INTO chunk (state, chunk_hash, chunk_size, file_hash, file_size, ' +
-				'compression, remote_file, remote_file_id, holders_count, created_at) ' +
-				'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9) ' +
-				'ON CONFLICT (chunk_hash, compression) DO NOTHING'
-		)
-		.bind(
-			chunk.state,
-			chunk.chunk_hash,
-			chunk.chunk_size,
-			chunk.file_hash,
-			chunk.file_size,
-			chunk.compression,
-			chunk.remote_file,
-			chunk.remote_file_id,
-			nowRfc3339()
-		);
+// Share vs. take over on a (chunk_hash, compression) conflict. Sharing bumps
+// the hold on a row whose bytes match ours: a valid row, or a pending row
+// staged from the same compressed bytes (a concurrent identical upload). Any
+// other pending or deleted row is dead once nobody holds it or its hold has
+// aged past any live upload: a pending row from a different encoder (client
+// klauspost zstd vs. server wasm zstd yield different bytes for the same raw
+// chunk) whose PUT failed, a request killed mid-PUT, or a GC claim whose R2
+// delete failed. Taking it over rewrites the row for our bytes and restarts
+// the reaper's grace period; the R2 key is content-addressed by raw hash, so
+// our PUT simply overwrites. Without the takeover branch such rows blocked
+// every re-push of that chunk until the nightly GC (or, for held rows, the
+// stale-hold reset a day later).
+const CHUNK_SHARE =
+	"(chunk.state = 'V' OR (chunk.state = 'P' AND chunk.file_hash IS excluded.file_hash AND chunk.file_size IS excluded.file_size))";
+const CHUNK_HOLD_AGED =
+	"(chunk.held_at IS NULL OR datetime(chunk.held_at) < datetime('now', '-1 hours'))";
+// A D row always has holders_count 0 (that is what made it claimable), so
+// only age releases it: GC's R2 delete batch has long finished by then.
+const CHUNK_TAKEOVER =
+	`((chunk.state = 'P' AND (chunk.holders_count = 0 OR ${CHUNK_HOLD_AGED})) ` +
+	`OR (chunk.state = 'D' AND ${CHUNK_HOLD_AGED}))`;
+
+/** Record ownership before R2 PUT so an interrupted upload remains reapable.
+ * Returns null only for a live pending row with different compressed bytes
+ * (a concurrent upload from another encoder); that clears within seconds. */
+export async function stageChunk(db: D1Database, chunk: NewChunk): Promise<ChunkRow | null> {
+	const keep = (col: string) =>
+		`${col} = CASE WHEN ${CHUNK_SHARE} THEN chunk.${col} ELSE excluded.${col} END`;
+	return dbFirst<ChunkRow>(
+		db
+			.prepare(
+				'INSERT INTO chunk (state, chunk_hash, chunk_size, file_hash, file_size, compression, remote_file, remote_file_id, holders_count, held_at, created_at) ' +
+					"VALUES ('P', ?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8) " +
+					'ON CONFLICT (chunk_hash, compression) DO UPDATE SET ' +
+					`holders_count = CASE WHEN ${CHUNK_SHARE} THEN chunk.holders_count + 1 ELSE 1 END, ` +
+					`state = CASE WHEN ${CHUNK_SHARE} THEN chunk.state ELSE 'P' END, ` +
+					[
+						keep('chunk_size'),
+						keep('file_hash'),
+						keep('file_size'),
+						keep('remote_file'),
+						keep('remote_file_id'),
+						keep('created_at')
+					].join(', ') +
+					', held_at = excluded.held_at ' +
+					`WHERE ${CHUNK_SHARE} OR ${CHUNK_TAKEOVER} ` +
+					'RETURNING id, state, chunk_hash, chunk_size, file_hash, file_size, compression, remote_file'
+			)
+			.bind(
+				chunk.chunk_hash,
+				chunk.chunk_size,
+				chunk.file_hash,
+				chunk.file_size,
+				chunk.compression,
+				chunk.remote_file,
+				chunk.remote_file_id,
+				nowRfc3339()
+			)
+	);
 }
 
-/** Insert one chunk row; returns false when an existing row won the conflict. */
-export async function insertChunk(db: D1Database, chunk: NewChunk): Promise<boolean> {
-	const result = await dbRun(insertChunkStmt(db, chunk));
-	return (result.meta.changes ?? 0) > 0;
+/** Statement form so a NAR's fresh chunks publish inside the link batch —
+ * one primary transaction per NAR instead of one per chunk. Idempotent. */
+export function publishChunkStmt(db: D1Database, id: number): D1PreparedStatement {
+	return db.prepare("UPDATE chunk SET state = 'V' WHERE id = ?1 AND state = 'P'").bind(id);
+}
+
+export async function publishChunk(db: D1Database, id: number): Promise<void> {
+	await dbRun(publishChunkStmt(db, id));
+}
+
+/** Publish fresh rows and drop holds in one batch: the tail of every upload
+ * path, success or failure. A chunk whose bytes reached R2 is valid content
+ * whatever became of the NAR (content-addressed, adopted by any retry), so
+ * publishing on failure paths is deliberate. For a chunk stored ahead of the
+ * NAR that will reference it (CDC PUTs) the reaper's grace period protects
+ * the unheld row until complete links it. */
+export async function settleChunks(
+	db: D1Database,
+	chunks: { id: number; publish: boolean }[]
+): Promise<void> {
+	if (chunks.length === 0) return;
+	await runBatched(
+		db,
+		chunks.map(({ id, publish }) =>
+			publish
+				? db
+						.prepare(
+							"UPDATE chunk SET state = CASE WHEN state = 'P' THEN 'V' ELSE state END, " +
+								'holders_count = MAX(holders_count - 1, 0) WHERE id = ?1'
+						)
+						.bind(id)
+				: releaseChunkLockStmt(db, id)
+		)
+	);
+}
+
+/** The GC mutex serializes reapers; this claim serializes GC against uploads
+ * (stageChunk refuses a freshly claimed row). held_at stamps the claim so a
+ * D row whose R2 delete failed becomes adoptable again an hour later instead
+ * of blocking re-pushes until the next successful nightly run. */
+export async function claimOrphanChunks(
+	db: D1Database
+): Promise<{ id: number; remote_file: string }[]> {
+	return (
+		await dbAll<{ id: number; remote_file: string }>(
+			db
+				.prepare(
+					"UPDATE chunk SET state = 'D', held_at = ?1 WHERE holders_count = 0 " +
+						'AND NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id) ' +
+						"AND datetime(created_at) < datetime('now', '-1 hours') RETURNING id, remote_file"
+				)
+				.bind(nowRfc3339())
+		)
+	).results;
 }
 
 /** Valid chunk row for (hash, compression), without taking a hold. */
@@ -609,6 +692,22 @@ export async function findChunk(
 			)
 			.bind(chunkHash, compression)
 	);
+}
+
+/** An idempotent CDC retry must not take holds, upsert, or purge caches. */
+export async function hasAttachedNar(
+	db: D1Database,
+	cacheId: number,
+	pathHash: string,
+	narHash: string
+): Promise<boolean> {
+	return !!(await dbFirst(
+		db
+			.prepare(
+				"SELECT 1 FROM object o JOIN nar n ON n.id = o.nar_id WHERE o.cache_id = ?1 AND o.store_path_hash = ?2 AND o.detached_at IS NULL AND n.state = 'V' AND n.nar_hash = ?3 LIMIT 1"
+			)
+			.bind(cacheId, pathHash, narHash)
+	));
 }
 
 /**
@@ -658,7 +757,8 @@ export function insertObjectStmt(db: D1Database, object: NewObject): D1PreparedS
 				'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) ' +
 				// Re-pushing revives a detached (removed) path.
 				'ON CONFLICT (cache_id, store_path_hash) DO UPDATE SET nar_id = excluded.nar_id, ' +
-				'detached_at = NULL, source = excluded.source, created_by = excluded.created_by'
+				'detached_at = NULL, source = excluded.source, created_by = excluded.created_by ' +
+				'WHERE object.nar_id <> excluded.nar_id OR object.detached_at IS NOT NULL'
 		)
 		.bind(
 			object.cache_id,
