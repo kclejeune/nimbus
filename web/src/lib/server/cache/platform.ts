@@ -3,6 +3,7 @@
 // is standard Web APIs plus the D1/R2 bindings typed via App.Platform; the
 // remaining CF-specific piece is compression/zstd-setup.ts, whose .wasm
 // import only wrangler's bundler understands.
+import { bodyDeadline, readWithTimeout } from '../request-body';
 
 /**
  * Execution context extended with the loopback bindings for the entrypoints
@@ -73,8 +74,36 @@ export const withR2Retry = <T>(op: () => Promise<T>): Promise<T> => withRetry(op
  */
 export class Semaphore {
 	private free: number;
+	private waiters = 0;
 	constructor(slots: number) {
 		this.free = slots;
+	}
+	tryAcquire(): boolean {
+		if (this.free <= 0) return false;
+		this.free--;
+		return true;
+	}
+	/** Queue without buffering request bodies, but cap both queue length and
+	 * wait. Waiters hold no memory, so the queue is sized for a whole client
+	 * fan-out (the Go pusher sends up to 40 concurrent requests over one
+	 * HTTP/2 connection, all landing on this isolate) rather than for the
+	 * slot count; a refusal costs the client one of its three retries. */
+	async acquireBounded(maxWaiters = 64, timeoutMs = 120_000): Promise<boolean> {
+		if (this.tryAcquire()) return true;
+		if (this.waiters >= maxWaiters) return false;
+		this.waiters++;
+		const deadline = Date.now() + timeoutMs;
+		let interval = 5;
+		try {
+			while (Date.now() < deadline) {
+				await sleep(Math.min(interval + Math.random() * interval, deadline - Date.now()));
+				if (this.tryAcquire()) return true;
+				interval = Math.min(interval * 2, 40);
+			}
+			return false;
+		} finally {
+			this.waiters--;
+		}
 	}
 	async acquire(): Promise<void> {
 		// Adaptive interval: a handoff is noticed within ~5-10 ms while
@@ -90,6 +119,14 @@ export class Semaphore {
 		this.free++;
 	}
 }
+
+// Covers input buffering through R2 persistence, not just the WASM call.
+// Two slots match wasmMemorySlots: each admitted upload holds at most one raw
+// chunk (≤16 MiB) plus its compressed form, and the WASM heap is shared, so
+// two pipelines fit the 128 MiB isolate with the same margin the WASM gate
+// alone had. Body-carrying uploads queue via acquireBounded; speculative
+// ingestion takes a short bounded wait and otherwise yields.
+export const uploadMemory = new Semaphore(2);
 
 /** Run fn while holding one slot of sem. */
 export async function withSlot<T>(sem: Semaphore, fn: () => Promise<T> | T): Promise<T> {
@@ -145,8 +182,9 @@ export async function readAll(
 	const parts: Uint8Array[] = [];
 	let total = 0;
 	const reader = body.getReader();
+	const deadline = bodyDeadline();
 	for (;;) {
-		const { done, value } = await reader.read();
+		const { done, value } = await readWithTimeout(reader, deadline);
 		if (done) break;
 		if (!value || value.length === 0) continue;
 		total += value.length;

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { readJson } from './request-body';
+import { readJson, readWithTimeout } from './request-body';
 import { MAX_MISSING_PATHS, readDeviceCode, readMissingPaths } from './cache/request-input';
 
 function request(body: unknown) {
@@ -10,6 +10,23 @@ function request(body: unknown) {
 }
 
 describe('bounded JSON', () => {
+	it('cancels idle reads and rejects expired absolute deadlines even with bytes ready', async () => {
+		vi.useFakeTimers();
+		try {
+			const cancel = vi.fn();
+			const reader = new ReadableStream({ cancel }).getReader();
+			const stalled = expect(readWithTimeout(reader, Date.now() + 300_000)).rejects.toMatchObject({
+				status: 408
+			});
+			await vi.advanceTimersByTimeAsync(30_001);
+			await stalled;
+			expect(cancel).toHaveBeenCalledOnce();
+			const ready = new Response('ready').body!.getReader();
+			await expect(readWithTimeout(ready, Date.now() - 1)).rejects.toMatchObject({ status: 408 });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 	it('enforces actual stream bytes even with a false Content-Length', async () => {
 		const cancel = vi.fn();
 		const body = new ReadableStream({

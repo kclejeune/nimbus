@@ -69,10 +69,16 @@ declare global {
 				ABSENT_VERDICT_LIMITER?: RateLimit;
 				/** Per-colo cap on pull-through ingests (pullthrough.ts). */
 				INGEST_LIMITER?: RateLimit;
+				BACKEND_READ_LIMITER?: RateLimit;
+				UPLOAD_LIMITER?: RateLimit;
+				BATCH_QUERY_LIMITER?: RateLimit;
+				VERDICT_WRITE_LIMITER?: RateLimit;
+				UPSTREAM_GLOBAL_LIMITER?: RateLimit;
+				STORAGE_WRITE_LIMITER?: RateLimit;
 				/** Analytics Engine dataset for read-path traffic metrics
 				 * (narinfo/NAR hit/miss/upstream); unbound = metrics off. */
 				CACHE_METRICS?: AnalyticsEngineDataset;
-				/** Sampling divisor for read points only: 1-in-N recorded, each
+				/** Sampling divisor for read/guard points: 1-in-N recorded, each
 				 * weighted by N (cache/metrics.ts). Unset/<=1 records everything. */
 				CACHE_METRICS_SAMPLE?: string;
 				/** Account id + API token (Account Analytics read) for querying
