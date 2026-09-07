@@ -4,6 +4,7 @@ import type { RequestEvent } from '@sveltejs/kit';
 import { getDb, schema } from '$lib/server/db';
 import { base64urlDecode } from '$lib/server/attic/token';
 import { syncGroupsAndMaybeActivate } from './group-sync';
+import { refreshCachedUser } from './refresh';
 import { isActiveUser, type SessionUser, type UserRole, type UserStatus } from './types';
 
 type Env = App.Platform['env'];
@@ -60,7 +61,6 @@ function b64url(buf: ArrayBuffer): string {
 // gymnastics; the payload is HMAC-signed opaque data with no format constraint.
 interface SessionCookiePayload {
 	id: string;
-	role: UserRole;
 	/** Access subject the cookie was minted for; the caller must present the
 	 * same one (see resolveCfAccessUser). Without this the cookie is a bearer
 	 * credential for its user id and role independent of which Access identity
@@ -70,14 +70,13 @@ interface SessionCookiePayload {
 	exp: number;
 }
 
-async function mintSessionToken(
-	user: Pick<SessionUser, 'id' | 'role'>,
+export async function mintSessionToken(
+	userId: string,
 	sub: string,
 	secret: string
 ): Promise<string> {
 	const payload = JSON.stringify({
-		id: user.id,
-		role: user.role,
+		id: userId,
 		sub,
 		exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS
 	} satisfies SessionCookiePayload);
@@ -93,7 +92,7 @@ async function verifySessionToken(
 	value: string,
 	expectedSub: string,
 	secret: string
-): Promise<Pick<SessionUser, 'id' | 'role'> | null> {
+): Promise<string | null> {
 	const dotIdx = value.lastIndexOf('.');
 	if (dotIdx === -1) return null;
 	const payloadB64 = value.slice(0, dotIdx);
@@ -124,7 +123,6 @@ async function verifySessionToken(
 		return null;
 	}
 	if (typeof payload.id !== 'string' || !payload.id) return null;
-	if (payload.role !== 'admin' && payload.role !== 'member') return null;
 	// Pre-binding cookies carry no sub; they fail here and fall through to a
 	// full D1 resolution that re-mints, so the rollout costs one lookup. A
 	// mismatch is not an attack signal either — it is the normal shape of a
@@ -132,7 +130,7 @@ async function verifySessionToken(
 	if (payload.sub !== expectedSub) return null;
 	if (typeof payload.exp !== 'number' || Math.floor(Date.now() / 1000) > payload.exp) return null;
 
-	return { id: payload.id, role: payload.role };
+	return payload.id;
 }
 
 /**
@@ -147,9 +145,7 @@ async function verifySessionToken(
  * the D1 user lookup, and is bound to the Access subject so it cannot stand in
  * for one.
  *
- * The cookie carries `role`, so a role change (like a deactivation) takes up
- * to the cookie TTL to bite on this path — the same tradeoff better-auth's
- * cookieCache makes on the OIDC path.
+ * The cookie is identity only; refreshCachedUser supplies role and status.
  */
 export async function resolveCfAccessUser(
 	event: RequestEvent,
@@ -178,24 +174,20 @@ export async function resolveCfAccessUser(
 	const email = payload.email ?? null;
 	if (!sub) return null;
 
-	// Check session cookie before hitting D1. The cookie is only ever minted
-	// for active users (below), so status is implied — a deactivation takes at
-	// most the cookie TTL (15 min) to bite on this path.
+	// Session cookie first: it skips the D1 user upsert below.
 	const sessionSecret = env.SESSION_SECRET;
 	if (sessionSecret) {
 		const cookieValue = event.cookies.get(SESSION_COOKIE);
 		if (cookieValue) {
-			const cached = await verifySessionToken(cookieValue, sub, sessionSecret);
-			if (cached) {
-				return {
-					id: cached.id,
+			const id = await verifySessionToken(cookieValue, sub, sessionSecret);
+			if (id) {
+				return refreshCachedUser(env.ATTIC_DB, event.request.method, {
+					id,
 					sub,
 					provider: 'cf-access',
 					email,
-					name: payload.name ?? email,
-					role: cached.role,
-					status: 'active'
-				};
+					name: payload.name ?? email
+				});
 			}
 		}
 	}
@@ -222,7 +214,7 @@ export async function resolveCfAccessUser(
 	// Mint a fresh session cookie to skip D1 on subsequent requests. Pending
 	// users get no cookie: the cookie fast path implies active status.
 	if (sessionSecret && isActiveUser(user)) {
-		const cookieToken = await mintSessionToken(user, sub, sessionSecret);
+		const cookieToken = await mintSessionToken(user.id, sub, sessionSecret);
 		event.cookies.set(SESSION_COOKIE, cookieToken, {
 			httpOnly: true,
 			secure: true,

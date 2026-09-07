@@ -4,8 +4,9 @@ import { redirect, type Handle } from '@sveltejs/kit';
 import { createAuth, type Auth } from '$lib/server/auth/auth';
 import { resolveCfAccessUser } from '$lib/server/auth/cf-access';
 import { isActiveUser } from '$lib/server/auth/guard';
-import type { SessionUser, UserRole, UserStatus } from '$lib/server/auth/types';
+import type { UserRole, UserStatus } from '$lib/server/auth/types';
 import { checkRateLimit } from '$lib/server/rate-limit';
+import { refreshCachedUser } from '$lib/server/auth/refresh';
 
 // Cache the better-auth instance per D1 binding (stable per isolate).
 // Nothing in createAuth() closes over per-request state: baseURL comes from
@@ -44,18 +45,15 @@ export const handle: Handle = async ({ event, resolve }) => {
 	// Prefer an established better-auth (OIDC) session.
 	const session = await auth.api.getSession({ headers: event.request.headers });
 	if (session?.user) {
-		const u = session.user as typeof session.user & { role?: string; status?: string };
-		event.locals.user = {
-			id: u.id,
-			sub: u.id,
+		event.locals.user = await refreshCachedUser(env.ATTIC_DB, event.request.method, {
+			id: session.user.id,
+			sub: session.user.id,
 			provider: 'oidc',
-			email: u.email ?? null,
-			name: u.name ?? null,
-			role: (u.role as UserRole) ?? 'member',
-			status: (u.status as UserStatus) ?? 'pending'
-		} satisfies SessionUser;
+			email: session.user.email ?? null,
+			name: session.user.name ?? null
+		});
 	} else {
-		// Otherwise fall back to a per-request Cloudflare Access assertion.
+		// Otherwise a per-request Cloudflare Access assertion.
 		event.locals.user = await resolveCfAccessUser(event, env);
 	}
 
