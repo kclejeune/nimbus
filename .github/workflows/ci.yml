@@ -8,9 +8,7 @@ on:
       - "main"
   pull_request:
 
-# Read-only by default: the GitHub Actions app is a bypass actor on the main
-# ruleset, so any job holding `contents: write` can push to main unreviewed.
-# Only the jobs that genuinely need it declare it (release, below). pull-requests
+# Read-only by default; only the release job needs contents: write. pull-requests
 # is for golangci-lint's only-new-issues, which reads the PR diff.
 permissions:
   contents: read

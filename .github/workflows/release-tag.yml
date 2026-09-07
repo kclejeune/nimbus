@@ -5,36 +5,49 @@ name: Release tag
 # Releasing is: open a PR dropping the "-dev" suffix from VERSION. Merging it
 # lands a commit whose VERSION reads as a bare semver, this job tags that commit,
 # and the tag trigger in ci.yml runs goreleaser. Immediately afterwards the job
-# writes the next minor back as "-dev" so main stops reporting a bare release
+# writes the next patch back as "-dev" so main stops reporting a bare release
 # version the moment another commit lands.
 #
 # RELEASE_TOKEN (a PAT owned by a repo admin) is required for both writes here,
 # for two different reasons. The tag push starts the release, and a GITHUB_TOKEN
 # push does not trigger workflows. The reopen-development commit goes to main,
 # which the ruleset guards with a pull-request rule whose only bypass actor is
-# the admin role — GitHub will not grant that bypass to the Actions app on a
-# user-owned repo, so GITHUB_TOKEN is rejected outright. A PAT acts as the
-# admin and satisfies both.
+# the admin role. A PAT acts as that admin; contents: write on GITHUB_TOKEN
+# grants no ruleset bypass. See docs/releases.md for token setup and recovery.
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
     paths:
       - VERSION
 
+concurrency:
+  group: release-tag
+  cancel-in-progress: false
+
 jobs:
   tag:
     name: tag
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # Job-scoped so a later job in this file starts read-only.
     permissions:
-      contents: write
+      contents: read
     steps:
+      - name: Require release credentials
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if [[ -z "$RELEASE_TOKEN" ]]; then
+            echo "::error::Set RELEASE_TOKEN to a repository-admin PAT with Contents: write for this repository. GITHUB_TOKEN cannot bypass the main ruleset or trigger tag CI."
+            exit 1
+          fi
+
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Tag the release and reopen development
         run: |
@@ -50,17 +63,35 @@ jobs:
               ;;
           esac
 
-          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            echo "::notice::v$version already exists; nothing to do."
-            exit 0
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::VERSION must be a bare major.minor.patch release."
+            exit 1
           fi
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-          git tag -a "v$version" -m "v$version"
-          git push origin "v$version"
-          echo "::notice::tagged v$version"
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            # Resume a failed bump without moving or republishing the release tag.
+            if ! git merge-base --is-ancestor "v$version^{commit}" HEAD ||
+              [[ "$(git show "v$version:VERSION")" != "$version" ]]; then
+              echo "::error::Existing v$version does not match this release history."
+              exit 1
+            fi
+            echo "::notice::v$version already exists; resuming the development bump. This does not retrigger tag CI."
+          else
+            git tag -a "v$version" -m "v$version"
+            git push origin "v$version"
+            echo "::notice::tagged v$version"
+          fi
+
+          # Main may have advanced since the release or an earlier failed run.
+          git fetch origin main
+          git checkout --detach origin/main
+          if [[ "$(cat VERSION)" != "$version" ]]; then
+            echo "::notice::Main's VERSION has already changed; skipping the development bump."
+            exit 0
+          fi
 
           # Patch, not minor: at this instant the cycle has no commits in it, so
           # any bump is a guess about the future. Patch is the smallest claim
