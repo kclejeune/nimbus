@@ -63,8 +63,9 @@ export function edgeEvent(cfCacheStatus: string | null): EdgeEvent {
 		case 'HIT':
 		case 'STALE':
 		case 'UPDATING':
-		case 'REVALIDATED':
 			return 'hit';
+		case 'REVALIDATED':
+			return 'origin';
 		case 'MISS':
 		case 'EXPIRED':
 			return 'origin';
@@ -82,7 +83,7 @@ export function edgeEvent(cfCacheStatus: string | null): EdgeEvent {
  * `_sample_interval * double1`. Unset or <= 1 records everything, which is the
  * development default; deployment configs sample 1-in-100.
  */
-function readSampleRate(env: Env): number {
+export function readSampleRate(env: Env): number {
 	const raw = Number(env.CACHE_METRICS_SAMPLE);
 	return Number.isFinite(raw) && raw > 1 ? Math.floor(raw) : 1;
 }

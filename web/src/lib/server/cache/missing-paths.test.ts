@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	allLiveUpstreams,
+	UPSTREAM_UNAVAILABLE,
 	clearUpstreamsMemo,
 	effectiveUpstreamMode,
 	fetchUpstreamNarInfo,
@@ -156,7 +157,7 @@ describe('findUpstreamNar verdict writes', () => {
 	// The write-coalescing memo is module-level and outlives each test, so every
 	// test probes fresh NAR paths instead of resetting shared state.
 	let seq = 0;
-	const freshPath = () => `nar/${(seq++).toString(36).padStart(8, '0')}.nar.xz`;
+	const freshPath = () => `nar/${(seq++).toString(36).padStart(31, '0')}.nar.xz`;
 
 	/** A db whose reads return nothing and whose batches (verdict writes) are
 	 * captured for assertions. */
@@ -240,7 +241,7 @@ describe('concurrent upstream probing', () => {
 	// Fresh hashes/paths per test: the verdict-write coalescing memo is
 	// module-level and would otherwise leak across tests.
 	let seq = 100;
-	const freshHash = () => `h${(seq++).toString(36).padStart(8, '0')}`;
+	const freshHash = () => `h${(seq++).toString(36).padStart(31, '0')}`;
 
 	function deferred() {
 		let resolve!: (r: Response) => void;
@@ -274,9 +275,9 @@ describe('concurrent upstream probing', () => {
 		const cancel = vi.fn();
 		vi.spyOn(console, 'warn').mockImplementation(() => {});
 		stubFetch(() => new Response(new ReadableStream({ cancel }), { status }));
-		expect(
-			await fetchUpstreamNarInfo(dbWithVerdicts(), [ups[0]], freshHash(), undefined)
-		).toBeNull();
+		expect(await fetchUpstreamNarInfo(dbWithVerdicts(), [ups[0]], freshHash(), undefined)).toBe(
+			status === 404 ? null : UPSTREAM_UNAVAILABLE
+		);
 		expect(cancel).toHaveBeenCalledOnce();
 		vi.restoreAllMocks();
 	});
@@ -324,27 +325,46 @@ describe('concurrent upstream probing', () => {
 	it('fetchUpstreamNarInfo fetches concurrently; priority still wins', async () => {
 		const slow = deferred();
 		const spy = stubFetch((url) =>
-			url.startsWith('https://a.example') ? slow.promise : new Response('B: b', { status: 200 })
+			url.startsWith('https://a.example')
+				? slow.promise
+				: new Response(
+						`StorePath: /nix/store/${new URL(url).pathname.slice(1, -8)}-test\nNarHash: sha256:${'a'.repeat(64)}\nNarSize: 1`,
+						{ status: 200 }
+					)
 		);
 		const hash = freshHash();
 		const result = fetchUpstreamNarInfo(dbWithVerdicts(), ups, hash, undefined);
 		await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
-		slow.resolve(new Response('A: a', { status: 200 }));
-		expect(await result).toMatchObject({ text: 'A: a', upstream: { id: 1 } });
+		slow.resolve(
+			new Response(
+				`StorePath: /nix/store/${hash}-test\nNarHash: sha256:${'a'.repeat(64)}\nNarSize: 1`,
+				{ status: 200 }
+			)
+		);
+		expect(await result).toMatchObject({ upstream: { id: 1 } });
 	});
 
 	it('fetchUpstreamNarInfo serves the lower-priority body when the first 404s', async () => {
 		stubFetch((url) =>
 			url.startsWith('https://a.example')
 				? new Response(null, { status: 404 })
-				: new Response('B: b', { status: 200 })
+				: new Response(
+						`StorePath: /nix/store/${new URL(url).pathname.slice(1, -8)}-test\nNarHash: sha256:${'a'.repeat(64)}\nNarSize: 1`,
+						{ status: 200 }
+					)
 		);
 		const result = await fetchUpstreamNarInfo(dbWithVerdicts(), ups, freshHash(), undefined);
-		expect(result).toMatchObject({ text: 'B: b', upstream: { id: 2 } });
+		expect(result).toMatchObject({ upstream: { id: 2 } });
 	});
 
 	it('fetchUpstreamNarInfo skips known-absent upstreams entirely', async () => {
-		const spy = stubFetch(() => new Response('B: b', { status: 200 }));
+		const spy = stubFetch(
+			(url) =>
+				new Response(
+					`StorePath: /nix/store/${new URL(url).pathname.slice(1, -8)}-test\nNarHash: sha256:${'a'.repeat(64)}\nNarSize: 1`,
+					{ status: 200 }
+				)
+		);
 		const result = await fetchUpstreamNarInfo(
 			dbWithVerdicts([{ upstream_id: 1, present: VERDICT_ABSENT }]),
 			ups,
@@ -394,7 +414,7 @@ describe('filterUpstreamPaths', () => {
 			[upstream({ id: 1, url: 'https://a.example' })],
 			[h1, h2]
 		);
-		expect(result).toEqual([h2]);
+		expect(result).toEqual({ missing: [h2], deferred: [] });
 		// Only the unknown hash is probed; the cached one costs no fetch.
 		expect(spy).toHaveBeenCalledTimes(1);
 		expect(spy.mock.calls[0][0]).toContain(h2);
@@ -407,7 +427,7 @@ describe('filterUpstreamPaths', () => {
 			upstream({ id: 1, url: 'https://a.example' }),
 			upstream({ id: 2, url: 'https://b.example' })
 		];
-		expect(await filterUpstreamPaths(db, ups, [h1, h2])).toEqual([h2]);
+		expect((await filterUpstreamPaths(db, ups, [h1, h2])).missing).toEqual([h2]);
 		// h1 was covered by upstream 1's cached verdict — no probe anywhere.
 		for (const call of spy.mock.calls) expect(call[0]).not.toContain(h1);
 	});
@@ -416,9 +436,13 @@ describe('filterUpstreamPaths', () => {
 		stubFetch(() => new Response(null, { status: 404 }));
 		const cached = { 1: { [h1]: VERDICT_UNPERSISTABLE } };
 		const redirect = [upstream({ id: 1, url: 'https://a.example' })];
-		expect(await filterUpstreamPaths(dbWithUpstreamVerdicts(cached), redirect, [h1])).toEqual([]);
+		expect(
+			(await filterUpstreamPaths(dbWithUpstreamVerdicts(cached), redirect, [h1])).missing
+		).toEqual([]);
 		const persist = [upstream({ id: 1, url: 'https://a.example', mode: 'persist' })];
-		expect(await filterUpstreamPaths(dbWithUpstreamVerdicts(cached), persist, [h1])).toEqual([h1]);
+		expect(
+			(await filterUpstreamPaths(dbWithUpstreamVerdicts(cached), persist, [h1])).missing
+		).toEqual([h1]);
 	});
 
 	it('live probe hits cover the path', async () => {
@@ -431,7 +455,21 @@ describe('filterUpstreamPaths', () => {
 			[upstream({ id: 1, url: 'https://a.example' })],
 			[h1, h2]
 		);
-		expect(result).toEqual([h2]);
+		expect(result).toEqual({ missing: [h2], deferred: [] });
+	});
+
+	it('defers paths a transient probe failure left unanswered instead of calling them absent', async () => {
+		stubFetch((url) =>
+			url.includes(h1) ? new Response(null, { status: 503 }) : new Response(null, { status: 404 })
+		);
+		const result = await filterUpstreamPaths(
+			dbWithUpstreamVerdicts({}),
+			[upstream({ id: 1, url: 'https://a.example' })],
+			[h1, h2]
+		);
+		// Both are reported missing for attic clients; only h1 is flagged
+		// uncertain so a nimbus client re-queries it rather than pushing.
+		expect(result).toEqual({ missing: [h1, h2], deferred: [h1] });
 	});
 });
 

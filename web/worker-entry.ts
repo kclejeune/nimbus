@@ -11,6 +11,9 @@
 //   through hooks.server.ts. The adapter emits to .svelte-kit/cloudflare via
 //   wrangler.adapter.jsonc, so this file is never overwritten by builds.
 
+import { processChunkRepair, replayChunkRepairs } from './src/lib/server/cache/repair';
+import { purgeWithJournal, replayPurges } from './src/lib/server/cache/purge';
+import { observeRequest, routeTemplate } from './src/lib/server/cache/latency';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import sveltekit from './.svelte-kit/cloudflare/_worker.js';
 import { runGc } from './src/lib/server/cache/gc';
@@ -18,6 +21,20 @@ import { caughtResponse, handleCacheApi } from './src/lib/server/cache/router';
 import { serveStore } from './src/lib/server/cache/store';
 
 type Env = App.Platform['env'];
+
+type Span = { setAttribute(key: string, value: string): void };
+type Tracing = { enterSpan<T>(name: string, fn: (span: Span) => Promise<T>): Promise<T> };
+
+/** Custom spans need tracing enabled in the Worker's observability config;
+ * a deployment without it (the template allows that) must still serve. */
+function withSpan<T>(ctx: unknown, name: string, fn: () => Promise<T>): Promise<T> {
+	const tracing = (ctx as { tracing?: Partial<Tracing> } | undefined)?.tracing;
+	if (typeof tracing?.enterSpan !== 'function') return fn();
+	return tracing.enterSpan(name, (span) => {
+		span.setAttribute('http.route', name);
+		return fn();
+	});
+}
 
 /**
  * Read path of the binary-cache API behind Workers Caching (see the `cache`
@@ -29,7 +46,11 @@ type Env = App.Platform['env'];
 export class CachedStore extends WorkerEntrypoint {
 	async fetch(request: Request) {
 		try {
-			return await serveStore(request, this.env as Env, this.ctx as App.Platform['ctx']);
+			return await withSpan(this.ctx, `store ${routeTemplate(request)}`, () =>
+				observeRequest(request, this.env as Env, 'store', () =>
+					serveStore(request, this.env as Env, this.ctx as App.Platform['ctx'])
+				)
+			);
 		} catch (e) {
 			// serveNar/serveNarInfo have no internal boundary; an uncaught throw
 			// here (transient D1 error, half-linked NAR) would reject the RPC and
@@ -46,10 +67,35 @@ export class CachedStore extends WorkerEntrypoint {
 	 * a purge from the gateway would target the gateway's (disabled) cache.
 	 */
 	async purgeTags(tags: string[]) {
-		const cache = (this.ctx as { cache?: { purge(opts: { tags: string[] }): Promise<unknown> } })
-			.cache;
+		await purgeWithJournal(this.env as Env, tags, (batch) => this.purge(batch));
+	}
+
+	async processChunkRepair(key: string) {
+		await processChunkRepair(this.env as Env, key, (tags) => this.purge(tags));
+	}
+
+	/** Replay both durable journals: pending cache purges, then chunk repairs. */
+	async replayJournals() {
+		try {
+			await replayPurges(this.env as Env, (tags) => this.purge(tags));
+		} finally {
+			await replayChunkRepairs(this.env as Env, (tags) => this.purge(tags));
+		}
+	}
+
+	private async purge(tags: string[]) {
+		const cache = (
+			this.ctx as {
+				cache?: {
+					purge(opts: {
+						tags: string[];
+					}): Promise<{ success: boolean; errors: { code: number; message: string }[] }>;
+				};
+			}
+		).cache;
 		if (!cache) throw new Error('ctx.cache unavailable');
-		await cache.purge({ tags });
+		const result = await cache.purge({ tags });
+		if (!result.success) throw new Error(`Cache purge rejected: ${JSON.stringify(result.errors)}`);
 	}
 }
 
@@ -65,7 +111,9 @@ function isCacheHost(request: Request, cacheBaseUrl?: string): boolean {
 export default {
 	async fetch(request: Request, env: Env, ctx: unknown) {
 		if (isCacheHost(request, env.CACHE_BASE_URL)) {
-			return handleCacheApi(request, env, ctx as App.Platform['ctx']);
+			return withSpan(ctx, routeTemplate(request), () =>
+				handleCacheApi(request, env, ctx as App.Platform['ctx'])
+			);
 		}
 		return sveltekit.fetch(request, env, ctx);
 	},
@@ -74,6 +122,13 @@ export default {
 		// Upstream re-validation is not cron work: passthrough narinfos carry
 		// the upstream's TTL as edge max-age (the CDN re-invokes the worker on
 		// expiry) and D1 "present" verdicts lazily expire on the same TTL.
+		try {
+			await (
+				ctx as import('./src/lib/server/cache/platform').ExecutionContext
+			).exports?.CachedStore?.replayJournals();
+		} catch (e) {
+			console.warn('journal replay failed', e);
+		}
 		const stats = await runGc(env, { ctx: ctx as App.Platform['ctx'] });
 		console.log(`gc: ${JSON.stringify(stats)}`);
 		// Refresh D1 query-planner statistics after GC changes row counts. Without

@@ -2,7 +2,8 @@
 // worker's d1.rs so both implementations stay drop-in compatible on the same
 // database.
 
-import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types';
+import { countD1, measure } from './latency';
+import type { D1Database, D1PreparedStatement, D1Result } from '@cloudflare/workers-types';
 import { isActiveUser } from '../auth/types';
 import { withRetry } from './platform';
 
@@ -15,9 +16,9 @@ export const STMT_BATCH = 100;
  * D1 serializes writes through a single primary Durable Object; under a burst
  * (a wide `nix push` plus its get-missing-paths reads) that primary's request
  * queue can back up and reject a call with "D1 requests queued for too long" or
- * drop the connection. These are transient — the queue drains — and safe to
- * retry: a rejected batch is atomic (nothing applied) and a rejected single
- * statement never committed. Replica sessions (readSession) add their own
+ * drop the connection. A failed response can follow a committed transaction,
+ * so callers must make writes replay-safe and reconcile ambiguous outcomes.
+ * Replica sessions (readSession) add their own
  * failure mode — "Replica disconnected from primary" — equally transient: the
  * retried query just lands on a healthy replica or the primary. Constraint/
  * logic errors carry different messages, are not matched, and surface
@@ -47,22 +48,57 @@ export const withD1Retry = <T>(op: () => Promise<T>, attempts = 4): Promise<T> =
 		}
 	});
 
-/** Prepared-statement execution wrappers that retry transient D1 errors.
- * Every read-path and upload-path query goes through these; the remaining raw
- * .run()/.first() sites are best-effort touches (callers ignore errors) or
- * rare admin/config statements where a surfaced transient error is fine. */
-export const dbRun = (stmt: D1PreparedStatement) => withD1Retry(() => stmt.run());
+/** Prepared-statement execution wrappers that retry transient D1 errors and
+ * account statements and rows to the request's latency record. Every
+ * read-path, upload-path and touch query goes through these; the remaining
+ * raw .run()/.first() sites are rare admin/config statements where a
+ * surfaced transient error is fine. */
+const instrumented = <T>(
+	statements: number,
+	run: () => Promise<T>,
+	results: (r: T) => D1Result[]
+) =>
+	measure('d1', () =>
+		withD1Retry(async () => {
+			countD1(statements);
+			const result = await run();
+			countD1(0, results(result));
+			return result;
+		})
+	);
+export const dbRun = (stmt: D1PreparedStatement) =>
+	instrumented(
+		1,
+		() => stmt.run(),
+		(r) => [r]
+	);
+export const dbAll = <T = unknown>(stmt: D1PreparedStatement) =>
+	instrumented(
+		1,
+		() => stmt.all<T>(),
+		(r) => [r]
+	);
 export const dbFirst = <T = unknown>(stmt: D1PreparedStatement) =>
-	withD1Retry(() => stmt.first<T>());
-export const dbAll = <T = unknown>(stmt: D1PreparedStatement) => withD1Retry(() => stmt.all<T>());
+	dbAll<T>(stmt).then((r) => r.results[0] ?? null);
 export const dbBatch = <T = unknown>(db: D1Database, stmts: D1PreparedStatement[]) =>
-	withD1Retry(() => db.batch<T>(stmts));
+	instrumented(
+		stmts.length,
+		() => db.batch<T>(stmts),
+		(r) => r
+	);
 
-/** Run statements in batches of STMT_BATCH. Only atomic within each batch. */
-export async function runBatched(db: D1Database, stmts: D1PreparedStatement[]): Promise<void> {
+/** Run statements in batches of STMT_BATCH. Only atomic within each batch.
+ * Returns one result per statement, in order, so callers can inspect
+ * `meta.changes` of a guarded statement. */
+export async function runBatched(
+	db: D1Database,
+	stmts: D1PreparedStatement[]
+): Promise<D1Result[]> {
+	const results: D1Result[] = [];
 	for (let i = 0; i < stmts.length; i += STMT_BATCH) {
-		await dbBatch(db, stmts.slice(i, i + STMT_BATCH));
+		results.push(...(await dbBatch(db, stmts.slice(i, i + STMT_BATCH))));
 	}
+	return results;
 }
 
 /**
@@ -402,16 +438,13 @@ export async function touchObjectsForNarHash(
 		new Date(now - TOUCH_GRANULARITY_MS).toISOString()
 	];
 
-	const stale = await readSession(db)
-		.prepare(TOUCH_PROBE_SQL)
-		.bind(...args)
-		.first();
+	const stale = await dbFirst(
+		readSession(db)
+			.prepare(TOUCH_PROBE_SQL)
+			.bind(...args)
+	);
 	if (!stale) return;
-
-	await db
-		.prepare(TOUCH_UPDATE_SQL)
-		.bind(...args, new Date(now).toISOString())
-		.run();
+	await dbRun(db.prepare(TOUCH_UPDATE_SQL).bind(...args, new Date(now).toISOString()));
 }
 
 /** Pin a store path's closure against garbage collection. */
@@ -569,12 +602,14 @@ export interface NewChunk {
 // klauspost zstd vs. server wasm zstd yield different bytes for the same raw
 // chunk) whose PUT failed, a request killed mid-PUT, or a GC claim whose R2
 // delete failed. Taking it over rewrites the row for our bytes and restarts
-// the reaper's grace period; the R2 key is content-addressed by raw hash, so
-// our PUT simply overwrites. Without the takeover branch such rows blocked
+// the reaper's grace period. Without the takeover branch such rows blocked
 // every re-push of that chunk until the nightly GC (or, for held rows, the
-// stale-hold reset a day later).
-const CHUNK_SHARE =
-	"(chunk.state = 'V' OR (chunk.state = 'P' AND chunk.file_hash IS excluded.file_hash AND chunk.file_size IS excluded.file_size))";
+// stale-hold reset a day later). The displaced key may hold a fully written
+// object (a PUT that succeeded but never published), so the takeover journals
+// it in chunk_repair, in the same transaction, for retirement.
+const chunkShare = (fileHash: string, fileSize: string) =>
+	`(chunk.state = 'V' OR (chunk.state = 'P' AND chunk.file_hash IS ${fileHash} AND chunk.file_size IS ${fileSize}))`;
+const CHUNK_SHARE = chunkShare('excluded.file_hash', 'excluded.file_size');
 const CHUNK_HOLD_AGED =
 	"(chunk.held_at IS NULL OR datetime(chunk.held_at) < datetime('now', '-1 hours'))";
 // A D row always has holders_count 0 (that is what made it claimable), so
@@ -589,7 +624,24 @@ const CHUNK_TAKEOVER =
 export async function stageChunk(db: D1Database, chunk: NewChunk): Promise<ChunkRow | null> {
 	const keep = (col: string) =>
 		`${col} = CASE WHEN ${CHUNK_SHARE} THEN chunk.${col} ELSE excluded.${col} END`;
-	return dbFirst<ChunkRow>(
+	// Same predicates as the upsert below, evaluated in the same transaction:
+	// this row exists exactly when the upsert takes the existing row over.
+	const journal = db
+		.prepare(
+			'INSERT OR IGNORE INTO chunk_repair (new_key, chunk_id, old_key, retire_after) ' +
+				'SELECT ?1, id, remote_file_id, ?2 FROM chunk WHERE chunk_hash = ?3 AND compression = ?4 ' +
+				`AND NOT ${chunkShare('?5', '?6')} AND ${CHUNK_TAKEOVER} AND remote_file_id IS NOT NULL`
+		)
+		.bind(
+			chunk.remote_file_id,
+			Date.now(),
+			chunk.chunk_hash,
+			chunk.compression,
+			chunk.file_hash,
+			chunk.file_size
+		);
+	const [, staged] = await dbBatch<ChunkRow>(db, [
+		journal,
 		db
 			.prepare(
 				'INSERT INTO chunk (state, chunk_hash, chunk_size, file_hash, file_size, compression, remote_file, remote_file_id, holders_count, held_at, created_at) ' +
@@ -619,7 +671,99 @@ export async function stageChunk(db: D1Database, chunk: NewChunk): Promise<Chunk
 				chunk.remote_file_id,
 				nowRfc3339()
 			)
+	]);
+	return staged.results[0] ?? null;
+}
+
+/**
+ * Chunk repair. A valid row's stored object can vanish (GC raced an upload)
+ * or fail verification; the row's `remote_file` is the version token for
+ * both transitions, so they are safe across isolates without any shared
+ * lock: each one applies only if the row still names the object the caller
+ * observed, and a concurrent repair that already moved the row makes the
+ * late caller a no-op.
+ */
+
+/** Completion observed bytes under `remoteFile` that contradict the row.
+ * Clears the file metadata (size unknown, hash unknown) so the chunk PUT's
+ * repair path claims it even though the object is still present. */
+export async function markChunkDamaged(
+	db: D1Database,
+	id: number,
+	remoteFile: string
+): Promise<boolean> {
+	const result = await dbRun(
+		db
+			.prepare(
+				'UPDATE chunk SET file_hash = NULL, file_size = NULL WHERE id = ?1 AND remote_file = ?2'
+			)
+			.bind(id, remoteFile)
 	);
+	return (result.meta?.changes ?? 0) > 0;
+}
+
+/** The pointer and retirement job commit together. The journal also witnesses
+ * a successful CAS whose response was lost, even if a later repair won. */
+export async function repairChunkFile(
+	db: D1Database,
+	id: number,
+	expectedRemoteFile: string,
+	file: { remote_file: string; remote_file_id: string; file_hash: string; file_size: number }
+): Promise<boolean> {
+	const results = await dbBatch(db, [
+		db
+			.prepare(
+				"UPDATE chunk SET remote_file = ?1, remote_file_id = ?2, file_hash = ?3, file_size = ?4 WHERE id = ?5 AND remote_file = ?6 AND state = 'V'"
+			)
+			.bind(
+				file.remote_file,
+				file.remote_file_id,
+				file.file_hash,
+				file.file_size,
+				id,
+				expectedRemoteFile
+			),
+		db
+			.prepare(
+				"INSERT OR IGNORE INTO chunk_repair (new_key, chunk_id, old_key) SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM chunk WHERE id = ?2 AND remote_file = ?4 AND state = 'V')"
+			)
+			.bind(
+				file.remote_file_id,
+				id,
+				chunkKey({ remote_file: expectedRemoteFile }),
+				file.remote_file
+			),
+		db.prepare('SELECT 1 FROM chunk_repair WHERE new_key = ?1').bind(file.remote_file_id)
+	]);
+	return results[2].results.length > 0;
+}
+
+export interface ChunkRepair {
+	new_key: string;
+	chunk_id: number;
+	old_key: string | null;
+	object_cursor: number;
+	retire_after: number | null;
+}
+
+/** Keyset pagination bounds each purge call, never the total fan-out. */
+export async function objectsReferencingChunk(
+	db: D1Database,
+	chunkId: number,
+	after: number,
+	limit: number
+) {
+	return (
+		await dbAll<{ id: number; cache_name: string; store_path_hash: string; nar_hash: string }>(
+			db
+				.prepare(
+					'SELECT DISTINCT o.id, c.name AS cache_name, o.store_path_hash, n.nar_hash FROM chunkref cr ' +
+						'JOIN nar n ON n.id = cr.nar_id JOIN object o ON o.nar_id = n.id ' +
+						'JOIN cache c ON c.id = o.cache_id WHERE cr.chunk_id = ?1 AND o.id > ?2 ORDER BY o.id LIMIT ?3'
+				)
+				.bind(chunkId, after, limit)
+		)
+	).results;
 }
 
 /** Statement form so a NAR's fresh chunks publish inside the link batch —
@@ -734,6 +878,7 @@ export function insertChunkRefStmt(
 }
 
 export interface NewObject {
+	publishTrust?: { upstreamId: number; publicKey: string; url: string };
 	cache_id: number;
 	nar_id: number;
 	store_path_hash: string;
@@ -754,7 +899,10 @@ export function insertObjectStmt(db: D1Database, object: NewObject): D1PreparedS
 		.prepare(
 			'INSERT INTO object (cache_id, nar_id, store_path_hash, store_path, ' +
 				'refs, system, deriver, sigs, ca, created_at, created_by, source) ' +
-				'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) ' +
+				'SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 WHERE ' +
+				(object.publishTrust
+					? "EXISTS (SELECT 1 FROM upstream u JOIN cache c ON c.id = ?1 LEFT JOIN cache_upstream cu ON cu.cache_id = c.id AND cu.upstream_id = u.id WHERE u.id = ?13 AND u.public_key = ?14 AND u.url = ?15 AND c.deleted_at IS NULL AND COALESCE(cu.mode, u.default_mode) = 'persist') "
+					: '1 ') +
 				// Re-pushing revives a detached (removed) path.
 				'ON CONFLICT (cache_id, store_path_hash) DO UPDATE SET nar_id = excluded.nar_id, ' +
 				'detached_at = NULL, source = excluded.source, created_by = excluded.created_by ' +
@@ -772,12 +920,40 @@ export function insertObjectStmt(db: D1Database, object: NewObject): D1PreparedS
 			object.ca,
 			nowRfc3339(),
 			object.created_by,
-			object.source
+			object.source,
+			...(object.publishTrust
+				? [object.publishTrust.upstreamId, object.publishTrust.publicKey, object.publishTrust.url]
+				: [])
 		);
 }
 
-export async function createObject(db: D1Database, object: NewObject): Promise<void> {
-	await dbRun(insertObjectStmt(db, object));
+/** Insert or revive the object row. Returns false only when a publishTrust
+ * guard rejected it. */
+export async function createObject(db: D1Database, object: NewObject): Promise<boolean> {
+	const result = await dbRun(insertObjectStmt(db, object));
+	return objectPublished(db, object, result);
+}
+
+/**
+ * Whether a guarded insert published. Zero changed rows is ambiguous: the
+ * guard's SELECT produced no row (trust rejected), or the ON CONFLICT update
+ * skipped an attachment that already matches (an idempotent re-publish, e.g.
+ * two ingests of one path racing). Only the second leaves the object row
+ * attached to this NAR, so that is what decides. */
+export async function objectPublished(
+	db: D1Database,
+	object: NewObject,
+	result: D1Result
+): Promise<boolean> {
+	if (!object.publishTrust || (result.meta?.changes ?? 0) > 0) return true;
+	const attached = await dbFirst(
+		db
+			.prepare(
+				'SELECT 1 FROM object WHERE cache_id = ?1 AND store_path_hash = ?2 AND nar_id = ?3 AND detached_at IS NULL'
+			)
+			.bind(object.cache_id, object.store_path_hash, object.nar_id)
+	);
+	return attached !== null;
 }
 
 export function updateNarStateStmt(
@@ -792,20 +968,16 @@ export async function updateNarState(db: D1Database, narId: number, state: strin
 	await dbRun(updateNarStateStmt(db, narId, state));
 }
 
-/**
- * Which of the given `sha256:`-prefixed chunk hashes exist as valid chunks
- * under the given compression. Input order not preserved. The IN-list windows
- * ride one db.batch round-trip (findExistingPaths pattern) instead of a
- * sequential await per window — a manifest at the 2000-chunk serving cap is
- * ~21 windows, which cost that many serialized replica round-trips on the CDC
- * query path before.
- */
-export async function findExistingChunkHashes(
+export type ChunkHolder = { name: string; is_public: number };
+
+/** Live caches whose attached, valid NARs disclose each chunk's bytes.
+ * Batch IN-list windows together to avoid a replica round-trip per window. */
+export async function cachesHoldingChunks(
 	db: D1Database,
 	chunkHashes: string[],
 	compression: string
-): Promise<Set<string>> {
-	const existing = new Set<string>();
+): Promise<Map<string, ChunkHolder[]>> {
+	const holders = new Map<string, ChunkHolder[]>();
 	const stmts: D1PreparedStatement[] = [];
 	for (let i = 0; i < chunkHashes.length; i += PARAM_BATCH) {
 		const batch = chunkHashes.slice(i, i + PARAM_BATCH);
@@ -813,21 +985,29 @@ export async function findExistingChunkHashes(
 		stmts.push(
 			db
 				.prepare(
-					`SELECT chunk_hash FROM chunk WHERE compression = ?1 AND state = 'V' ` +
-						`AND chunk_hash IN (${placeholders})`
+					'SELECT DISTINCT ch.chunk_hash, c.name, c.is_public FROM chunk ch ' +
+						'JOIN chunkref cr ON cr.chunk_id = ch.id ' +
+						"JOIN nar n ON n.id = cr.nar_id AND n.state = 'V' " +
+						'JOIN object o ON o.nar_id = n.id AND o.detached_at IS NULL ' +
+						'JOIN cache c ON c.id = o.cache_id AND c.deleted_at IS NULL ' +
+						`WHERE ch.compression = ?1 AND ch.state = 'V' AND ch.chunk_hash IN (${placeholders})`
 				)
 				.bind(compression, ...batch)
 		);
 	}
 	for (let i = 0; i < stmts.length; i += STMT_BATCH) {
-		for (const result of await dbBatch<{ chunk_hash: string }>(
+		for (const result of await dbBatch<ChunkHolder & { chunk_hash: string }>(
 			db,
 			stmts.slice(i, i + STMT_BATCH)
 		)) {
-			for (const row of result.results) existing.add(row.chunk_hash);
+			for (const row of result.results) {
+				const list = holders.get(row.chunk_hash) ?? [];
+				list.push({ name: row.name, is_public: row.is_public });
+				holders.set(row.chunk_hash, list);
+			}
 		}
 	}
-	return existing;
+	return holders;
 }
 
 // Row shape shared by findValidNar's SELECT and tryLockNar's RETURNING — the

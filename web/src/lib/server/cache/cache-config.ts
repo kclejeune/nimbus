@@ -8,8 +8,8 @@ import * as db from './db';
 import { purgeTagsBestEffort } from './gc';
 import { extractPublicKey, generateKeypair } from '../attic/signing';
 import type { ExecutionContext } from './platform';
-import { invalidateProxyCandidates } from './proxy';
-import { cacheTag } from './store';
+import { cacheTag, PUBLIC_NARS_TAG } from './store';
+import { CANDIDATES_TAG } from './metadata';
 import { FULL_CONTROL, insertGrant } from '$lib/server/auth/grants';
 
 type Env = App.Platform['env'];
@@ -76,7 +76,6 @@ export async function createCache(
 	});
 	// Evict any brief negative memo left by a serve that raced ahead of create.
 	invalidateCacheRow(name);
-	invalidateProxyCandidates();
 
 	if (grantFullControlTo) {
 		const user = await env.ATTIC_DB.prepare('SELECT 1 AS x FROM user WHERE id = ?1')
@@ -181,14 +180,21 @@ export async function configureCache(
 	// row — but staleness stays bounded by the memo TTL, here and in other
 	// isolates alike.
 	invalidateCacheRow(name);
+	// Visibility and priority change which cache wins a root-proxy resolution
+	// everywhere, so the shared candidate metadata goes with the local memo;
+	// a public→private flip additionally withdraws already-cached public
+	// bodies. Both purge regardless of whether the keypair changed.
+	const tags: string[] = [];
 	if (options.is_public !== undefined || options.priority !== undefined) {
-		invalidateProxyCandidates();
+		tags.push(CANDIDATES_TAG);
 	}
-
-	if (!keypair) return {};
+	if (options.is_public !== undefined) tags.push(PUBLIC_NARS_TAG);
 	// A rotated keypair re-signs every narinfo; evict the cache's cached
 	// copies so clients don't fail signature verification until they expire.
-	await purgeTagsBestEffort(authz.ctx, [cacheTag(name)]);
+	if (keypair) tags.push(cacheTag(name));
+	if (tags.length > 0) await purgeTagsBestEffort(authz.ctx, tags);
+
+	if (!keypair) return {};
 	return { public_key: extractPublicKey(keypair) };
 }
 
@@ -197,14 +203,13 @@ export async function destroyCache(env: Env, name: string, ctx?: ExecutionContex
 	const deleted = await db.softDeleteCache(env.ATTIC_DB, name);
 	if (!deleted) throw new CacheConfigError(404, `Cache not found: ${name}`);
 	invalidateCacheRow(name);
-	invalidateProxyCandidates();
 	// Admin-table side effect (deliberate boundary exception, like the creator
 	// grant above): exact-name grants die with the cache, so re-creating the
 	// name never inherits the old access list.
 	await env.ATTIC_DB.prepare('DELETE FROM permission_grant WHERE pattern = ?1').bind(name).run();
 	// Deleted caches must stop serving now, not when the narinfo max-age runs
 	// out — the edge would otherwise keep answering for up to 90 days.
-	await purgeTagsBestEffort(ctx, [cacheTag(name)]);
+	await purgeTagsBestEffort(ctx, [cacheTag(name), PUBLIC_NARS_TAG, CANDIDATES_TAG]);
 }
 
 /** Rename, keeping the keypair so existing signatures stay valid. */
@@ -223,7 +228,6 @@ export async function renameCache(env: Env, oldName: string, newName: string): P
 	}
 	invalidateCacheRow(oldName);
 	invalidateCacheRow(newName);
-	invalidateProxyCandidates();
 	// Exact-name grants follow the cache (glob grants are untouched). Minted
 	// tokens are snapshots and do not follow — existing rule.
 	await env.ATTIC_DB.prepare('UPDATE permission_grant SET pattern = ?2 WHERE pattern = ?1')

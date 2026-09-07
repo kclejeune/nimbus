@@ -7,9 +7,18 @@
 // Every sweep is idempotent; passes are ordered so each exposes work for the
 // next (retention deletes objects -> orphans NARs -> orphans chunks -> R2).
 
-import { claimOrphanChunks, chunkKey, dbRun, PARAM_BATCH, runBatched } from './db';
+import {
+	TOUCH_GRANULARITY_MS,
+	claimOrphanChunks,
+	chunkKey,
+	dbRun,
+	PARAM_BATCH,
+	runBatched
+} from './db';
 import { allLiveUpstreams, filterUpstreamPaths, VERDICT_ABSENT } from './missing-paths';
 import { type ExecutionContext } from './platform';
+import { PURGE_TAG_LIMIT } from './purge';
+import { candidateTag } from './metadata';
 import { narinfoTag } from './store';
 
 type Env = App.Platform['env'];
@@ -22,7 +31,6 @@ const ABANDONED_CACHE_GRACE_SECS = 7 * 24 * 60 * 60;
 const UPSTREAM_ABSENT_TTL_SECS = 24 * 60 * 60;
 const UPSTREAM_PRESENT_TTL_SECS = 90 * 24 * 60 * 60;
 const REF_SYNC_BATCH = 500;
-const PURGE_TAG_BATCH = 100;
 const R2_DELETE_BATCH = 1000;
 /**
  * Doomed objects fetched per evaluation of the reachability CTE in the
@@ -248,7 +256,8 @@ async function purgeNarinfoTags(
  * that issues them, so this goes through the CachedStore loopback — a purge
  * from the gateway would target its own (empty) cache. Batches run
  * sequentially on purpose: purge shares the zone purge API's rate limits.
- * On failure stale entries linger until their max-age expires.
+ * CachedStore retries each batch and journals a final failure for bounded
+ * cron replay, so callers pass tags exactly once.
  */
 export async function purgeTagsBestEffort(
 	ctx: ExecutionContext | undefined,
@@ -256,9 +265,10 @@ export async function purgeTagsBestEffort(
 ): Promise<number> {
 	const store = ctx?.exports?.CachedStore;
 	if (!store || tags.length === 0) return 0;
+	tags = [...new Set(tags)];
 	let purged = 0;
-	for (let i = 0; i < tags.length; i += PURGE_TAG_BATCH) {
-		const batch = tags.slice(i, i + PURGE_TAG_BATCH);
+	for (let i = 0; i < tags.length; i += PURGE_TAG_LIMIT) {
+		const batch = tags.slice(i, i + PURGE_TAG_LIMIT);
 		try {
 			await store.purgeTags(batch);
 			purged += batch.length;
@@ -368,6 +378,10 @@ const closureStep = (cte: string): string =>
  * Detached (removed) objects never seed the keep set — they survive only
  * while something live still reaches them.
  */
+/** Column list every doomed-row query selects (objectPurgeTags consumes it). */
+const DOOMED_COLUMNS =
+	'SELECT o.id, o.store_path_hash, (SELECT nar_hash FROM nar WHERE nar.id = o.nar_id) AS nar_hash FROM object o';
+
 const UNREACHABLE_SQL =
 	'WITH RECURSIVE keep(id) AS (' +
 	'  SELECT id FROM object' +
@@ -377,7 +391,7 @@ const UNREACHABLE_SQL =
 	'   )' +
 	closureStep('keep') +
 	') ' +
-	'SELECT o.id, o.store_path_hash FROM object o' +
+	DOOMED_COLUMNS +
 	' WHERE o.cache_id = ?1 AND o.id > ?3 AND o.id NOT IN (SELECT id FROM keep)' +
 	' ORDER BY o.id LIMIT ?4';
 
@@ -396,7 +410,7 @@ const REAP_DETACHED_SQL =
 	'   )' +
 	closureStep('keep') +
 	') ' +
-	'SELECT o.id, o.store_path_hash FROM object o' +
+	DOOMED_COLUMNS +
 	' WHERE o.cache_id = ?1 AND o.detached_at IS NOT NULL' +
 	'   AND o.id NOT IN (SELECT id FROM keep)';
 
@@ -420,7 +434,7 @@ const EXCLUSIVE_CLOSURE_SQL =
 	'   )' +
 	closureStep('keep') +
 	') ' +
-	'SELECT o.id, o.store_path_hash FROM object o' +
+	DOOMED_COLUMNS +
 	' WHERE o.id IN (SELECT id FROM target) AND o.id NOT IN (SELECT id FROM keep)';
 
 /**
@@ -455,6 +469,20 @@ const CACHE_SIZE_SQL =
 interface DoomedRow {
 	id: number;
 	store_path_hash: string;
+	nar_hash: string | null;
+}
+
+/** Edge entries a reaped object invalidates: its narinfo, and the cached
+ * candidate metadata that still names its cache as a holder of the path and
+ * the NAR. Targeted on purpose — a global candidates purge on every sweep
+ * cold-starts every root-proxy resolution. */
+function objectPurgeTags(cacheName: string, row: DoomedRow): string[] {
+	const tags = [
+		narinfoTag(cacheName, row.store_path_hash),
+		candidateTag('path', row.store_path_hash)
+	];
+	if (row.nar_hash) tags.push(candidateTag('nar', row.nar_hash));
+	return tags;
 }
 
 /**
@@ -485,9 +513,10 @@ async function retentionPass(
 
 	for (const cache of caches) {
 		try {
+			// Allow for a cached touch decision plus the gateway memo window.
 			if (cache.retention_period != null) {
 				const cutoff = new Date(
-					Date.now() - cache.retention_period * 24 * 60 * 60 * 1000
+					Date.now() - cache.retention_period * 24 * 60 * 60 * 1000 - 2 * TOUCH_GRANULARITY_MS
 				).toISOString();
 				stats.expired_objects_reaped += await reapUnreachable(
 					db,
@@ -529,7 +558,7 @@ async function reapUnreachable(
 				db,
 				sweep.map((o) => o.id)
 			);
-			purgeTags.push(...sweep.map((o) => narinfoTag(cacheName, o.store_path_hash)));
+			purgeTags.push(...sweep.flatMap((o) => objectPurgeTags(cacheName, o)));
 		}
 		reaped += sweep.length;
 		if (sweep.length < GC_SWEEP) return reaped;
@@ -571,7 +600,7 @@ async function evictCacheToBudget(
 			db,
 			doomed.map((d) => d.id)
 		);
-		purgeTags.push(...doomed.map((d) => narinfoTag(cache.name, d.store_path_hash)));
+		purgeTags.push(...doomed.flatMap((d) => objectPurgeTags(cache.name, d)));
 	}
 	return evicted;
 }
@@ -678,7 +707,7 @@ async function globalSizePass(
 			db,
 			doomed.map((d) => d.id)
 		);
-		purgeTags.push(...doomed.map((d) => narinfoTag(victim.cache_name, d.store_path_hash)));
+		purgeTags.push(...doomed.flatMap((d) => objectPurgeTags(victim.cache_name, d)));
 	}
 	if (over) {
 		console.warn('gc: still over global limit after eviction pass');
@@ -897,7 +926,7 @@ async function reapDetachedForCache(db: D1, cacheId: number, cacheName: string):
 		db,
 		doomed.map((d) => d.id)
 	);
-	return doomed.map((d) => narinfoTag(cacheName, d.store_path_hash));
+	return doomed.flatMap((d) => objectPurgeTags(cacheName, d));
 }
 
 /**
@@ -1008,12 +1037,12 @@ async function probeUncoveredRefs(db: D1, stats: GcStats, cutoff: string): Promi
 	if (results.length === 0) return;
 	const upstreams = await allLiveUpstreams(db);
 	if (upstreams.length === 0) return;
-	await filterUpstreamPaths(
+	const { deferred } = await filterUpstreamPaths(
 		db,
 		upstreams,
 		results.map((r) => r.h)
 	);
-	stats.integrity_refs_probed = results.length;
+	stats.integrity_refs_probed = results.length - deferred.length;
 }
 
 /**

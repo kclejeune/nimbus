@@ -3,6 +3,7 @@
 // is standard Web APIs plus the D1/R2 bindings typed via App.Platform; the
 // remaining CF-specific piece is compression/zstd-setup.ts, whose .wasm
 // import only wrangler's bundler understands.
+import { countR2, countRetry, measure } from './latency';
 import { bodyDeadline, readWithTimeout } from '../request-body';
 
 /**
@@ -15,6 +16,8 @@ export type ExecutionContext = App.Platform['ctx'] & {
 		CachedStore?: {
 			fetch(request: Request): Promise<Response>;
 			purgeTags(tags: string[]): Promise<void>;
+			replayJournals(): Promise<void>;
+			processChunkRepair(key: string): Promise<void>;
 		};
 	};
 };
@@ -50,6 +53,7 @@ export async function withRetry<T>(
 			return await op();
 		} catch (e) {
 			if (attempt >= attempts || !shouldRetry(e)) throw e;
+			countRetry();
 			await sleep(backoff + Math.random() * backoff);
 			backoff *= 2;
 		}
@@ -61,7 +65,13 @@ export async function withRetry<T>(
  * transience signal, and every call site is a get/put of an immutable
  * content-addressed object, so a blanket retry is safe.
  */
-export const withR2Retry = <T>(op: () => Promise<T>): Promise<T> => withRetry(op);
+export const withR2Retry = <T>(op: () => Promise<T>): Promise<T> =>
+	measure('r2', () =>
+		withRetry(() => {
+			countR2();
+			return op();
+		})
+	);
 
 /**
  * Minimal counting semaphore for bounding concurrent memory-heavy work

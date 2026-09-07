@@ -22,7 +22,7 @@
 // only from router.ts, which is bundled by wrangler alone — never by Vite
 // (see worker-entry.ts).
 
-import { parseNarInfo } from '../attic/narinfo';
+import { parseNarInfo, parsedNarInfoSignatureValid } from '../attic/narinfo';
 import { bytesToHex, sha256HexDigest } from '../attic/nix-base32';
 import { initZstd, uploadCompressionFor, wasmMemorySlots, zstdDecompress } from './compression';
 import * as db from './db';
@@ -39,6 +39,7 @@ import { readAll, withSlot, uploadMemory, type ExecutionContext } from './platfo
 import { warmNarinfoAfterUpload } from './store';
 import { TtlMemo } from './ttl-memo';
 import {
+	PublicationRejectedError,
 	finishDeduplicated,
 	handleBufferedUpload,
 	handleStreamingUpload,
@@ -123,10 +124,12 @@ export async function persistUpstreamPath(
 		// the entry was cached is revoked trust — do not ingest from it. Raw
 		// binding on purpose: a lagging replica could still show the removed
 		// upstream, so this revocation check must read the primary.
-		const registered = await env.ATTIC_DB.prepare('SELECT id FROM upstream WHERE url = ?1')
-			.bind(upstreamUrl)
-			.first<{ id: number }>();
-		if (!registered) {
+		const registered = await env.ATTIC_DB.prepare(
+			"SELECT u.id, u.public_key FROM upstream u JOIN cache c ON c.name = ?2 LEFT JOIN cache_upstream cu ON cu.cache_id = c.id AND cu.upstream_id = u.id WHERE u.url = ?1 AND c.deleted_at IS NULL AND COALESCE(cu.mode, u.default_mode) = 'persist'"
+		)
+			.bind(upstreamUrl, cacheName)
+			.first<{ id: number; public_key: string }>();
+		if (!registered || !(await parsedNarInfoSignatureValid(parsed, registered.public_key))) {
 			console.warn(`pullthrough: upstream ${upstreamUrl} no longer registered; skipping ingest`);
 			return;
 		}
@@ -159,6 +162,11 @@ export async function persistUpstreamPath(
 		if (!cache) return;
 
 		const info: UploadNarInfo = {
+			publishTrust: {
+				upstreamId: registered.id,
+				publicKey: registered.public_key,
+				url: upstreamUrl
+			},
 			cache: cacheName,
 			store_path_hash: storePathHash,
 			store_path: parsed.storePath,
@@ -185,9 +193,8 @@ export async function persistUpstreamPath(
 			return;
 		}
 
-		// Speculative work yields to pushes: a short bounded wait, then give
-		// up and let a later marker re-ask (the memo is cleared so it can).
-		holdsSlot = await uploadMemory.acquireBounded(2, 10_000);
+		// Speculative work never queues behind pushes. A later marker can retry.
+		holdsSlot = await uploadMemory.acquireBounded(0, 1);
 		if (!holdsSlot) {
 			recentIngests.delete(memoKey);
 			return;
@@ -261,7 +268,12 @@ export async function persistUpstreamPath(
 			`pullthrough: persisted ${parsed.storePath} (${raw.length} bytes raw) into ${cacheName}`
 		);
 	} catch (e) {
-		console.warn(`pullthrough: ingest into ${cacheName} from ${upstreamUrl} failed: ${e}`);
+		// A rejected publication is an outcome, not a failure: the trust
+		// re-check at publication time found the upstream's key, URL,
+		// subscription or the cache changed since ingest began. Nothing was
+		// published and nothing is warmed; the passthrough keeps serving.
+		if (e instanceof PublicationRejectedError) console.warn(`pullthrough: ${e.message}`);
+		else console.warn(`pullthrough: ingest into ${cacheName} from ${upstreamUrl} failed: ${e}`);
 	} finally {
 		if (holdsSlot) uploadMemory.release();
 	}

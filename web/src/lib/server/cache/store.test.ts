@@ -97,19 +97,31 @@ describe('store hardening', () => {
 			await dbRun(insertChunkRefStmt(db, nar, i, null, String(i), 'zstd'));
 		}
 		const get = vi.fn();
-		const fetch = vi.fn(async (_request: Request) => new Response('chunk'));
+		const fetch = vi.fn(async (request: Request): Promise<Response> =>
+			new URL(request.url).pathname.startsWith('/_manifest/')
+				? serveStore(request, { ATTIC_DB: db } as App.Platform['env'])
+				: new Response('chunk')
+		);
 		const tasks: Promise<unknown>[] = [];
 		const ctx = {
 			exports: { CachedStore: { fetch, purgeTags: async () => {} } },
 			waitUntil: (p: Promise<unknown>) => tasks.push(p)
 		} as unknown as import('./platform').ExecutionContext;
 		const env = { ATTIC_DB: db, CACHE_BUCKET: { get } } as unknown as App.Platform['env'];
-		const response = await serveStore(new Request(`https://cache.test/_nar/${hash}.nar`), env, ctx);
+		const response = await serveStore(
+			new Request(`https://cache.test/_nar_v2/${hash}.nar`),
+			env,
+			ctx
+		);
 		expect(await response.text()).toBe('chunkchunk');
 		await Promise.all(tasks);
-		expect(fetch.mock.calls.map(([r]) => (r as Request).url)).toEqual([
-			'https://chunks.internal/_chunk/chunk%2F0',
-			'https://chunks.internal/_chunk/chunk%2F1'
+		expect(
+			fetch.mock.calls
+				.filter(([r]) => !(r as Request).url.includes('/_manifest/'))
+				.map(([r]) => (r as Request).url)
+		).toEqual([
+			'https://cache.internal/_chunk/chunk%2F0',
+			'https://cache.internal/_chunk/chunk%2F1'
 		]);
 		expect(get).not.toHaveBeenCalled();
 	});

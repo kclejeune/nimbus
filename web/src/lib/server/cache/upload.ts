@@ -9,13 +9,13 @@
 // NARs below NAR_CHUNK_THRESHOLD are stored whole (one chunk, compressed in
 // one shot). Larger simple uploads are FastCDC-chunked: each content-defined
 // chunk dedups against the store or is compressed and stored under its own
-// content-addressed key, and downloads stream the chunks back to back. NARs
+// versioned key, and downloads stream the chunks back to back. NARs
 // above the Workers request-body limit use the same chunk space: the client
 // cuts with a boundary-identical FastCDC, uploads only the chunks the server
 // lacks (pre-compressed, stored verbatim), and a stateless complete call
 // assembles the NAR from chunk references.
 
-import type { D1PreparedStatement } from '@cloudflare/workers-types';
+import type { D1Database, D1PreparedStatement, D1Result } from '@cloudflare/workers-types';
 import { errorResponse, jsonResponse as json } from '../attic/http';
 import { FastCdcChunker, NAR_CHUNK_THRESHOLD, chunkBuffer } from './chunking';
 import {
@@ -30,7 +30,8 @@ import {
 import { findCacheCached } from './cache-lookup';
 import * as db from './db';
 import { recordPush, recordStoreWrite } from './metrics';
-import { bytesToHex } from '../attic/nix-base32';
+import { issueChunkProof, verifyChunkProof } from './chunk-proof';
+import { bytesToHex, stripSha256 } from '../attic/nix-base32';
 import { newDigestStream, readAll, withR2Retry, withSlot, type ExecutionContext } from './platform';
 import { warmNarinfoAfterUpload } from './store';
 import { bodyDeadline, isRecord, readWithTimeout } from '../request-body';
@@ -63,7 +64,31 @@ const STREAM_CONCURRENT_CHUNKS = 1;
 const NAR_INFO_HEADER = 'X-Attic-Nar-Info';
 const NAR_INFO_PREAMBLE_HEADER = 'X-Attic-Nar-Info-Preamble-Size';
 
+/** A publishTrust-guarded object insert changed no row: the upstream's key,
+ * URL, subscription or the cache's liveness changed between the trust check
+ * at ingest start and publication. Nothing was published. */
+/** The object insert is the last statement of a publishing batch; a guarded
+ * insert that changed nothing means this cache refused the attachment. */
+async function publishedOrThrow(
+	d1: D1Database,
+	object: db.NewObject,
+	results: D1Result[],
+	info: UploadNarInfo
+): Promise<void> {
+	if (!(await db.objectPublished(d1, object, results[results.length - 1])))
+		throw new PublicationRejectedError(info);
+}
+
+export class PublicationRejectedError extends Error {
+	constructor(info: { cache: string; store_path_hash: string }) {
+		super(
+			`publication of ${info.store_path_hash} into ${info.cache} rejected: upstream trust changed`
+		);
+	}
+}
+
 export interface UploadNarInfo {
+	publishTrust?: db.NewObject['publishTrust'];
 	cache: string;
 	store_path_hash: string;
 	store_path: string;
@@ -90,17 +115,15 @@ function uploadedResult(fileSize: number | null, fracDeduplicated: number): Resp
 	});
 }
 
-function chunkStorageKey(chunkHashHex: string, kind: CompressionKind): string {
-	return `chunk/${chunkHashHex.slice(0, 2)}/${chunkHashHex}${extensionFor(kind)}`;
-}
-
-function stripSha256(hash: string): string {
-	return hash.startsWith('sha256:') ? hash.slice(7) : hash;
-}
-
-function storageKeyFor(narHash: string, kind: CompressionKind): string {
-	const hex = stripSha256(narHash);
-	return `nar/${hex.slice(0, 2)}/${hex}${extensionFor(kind)}`;
+/** Every stored representation gets a key that can never be minted again;
+ * logical dedup stays by (raw hash, compression) in D1. A key is only ever
+ * deleted by chunk_repair retirement or GC, both of which act on a key no
+ * row points at any more; a reusable (content-addressed) key would let a
+ * concurrent fresh upload land under it between that check and the delete.
+ * The pointer moves (repair, stageChunk takeover) journal the displaced key
+ * so it is retired rather than leaked. */
+function versionedKey(prefix: 'chunk' | 'nar', hex: string, kind: CompressionKind): string {
+	return `${prefix}/${hex.slice(0, 2)}/${hex}.${crypto.randomUUID()}${extensionFor(kind)}`;
 }
 
 function remoteFileJson(key: string): string {
@@ -181,7 +204,11 @@ export async function finishDeduplicated(
 	narId: number
 ): Promise<Response> {
 	try {
-		await db.createObject(env.ATTIC_DB, newObjectFrom(info, cacheId, narId));
+		if (!(await db.createObject(env.ATTIC_DB, newObjectFrom(info, cacheId, narId)))) {
+			// The NAR is shared with whoever else holds it; only this cache's
+			// attachment was refused, so there is nothing to roll back.
+			throw new PublicationRejectedError(info);
+		}
 	} finally {
 		await db.releaseNarLock(env.ATTIC_DB, narId).catch(() => {});
 	}
@@ -201,7 +228,8 @@ function newObjectFrom(info: UploadNarInfo, cacheId: number, narId: number): db.
 		sigs: info.sigs,
 		ca: info.ca,
 		source: info.source ?? 'push',
-		created_by: info.created_by ?? null
+		created_by: info.created_by ?? null,
+		publishTrust: info.publishTrust
 	};
 }
 
@@ -279,9 +307,7 @@ async function processNarChunk(
 	}
 
 	const compressed = await withSlot(wasmMemorySlots, () => compressBuffer(raw, kind));
-	const key = chunkStorageKey(hash, kind);
-	// Content-addressed key: a concurrent upload of the same chunk writes the
-	// same bytes, so racing puts are harmless.
+	const key = versionedKey('chunk', hash, kind);
 	const stored = await storeChunk(
 		env,
 		{
@@ -348,12 +374,14 @@ async function linkChunkedNar(
 			);
 		}
 		stmts.push(db.updateNarStateStmt(d1, narId, 'V'));
-		stmts.push(db.insertObjectStmt(d1, newObjectFrom(info, cacheId, narId)));
-		await db.runBatched(d1, stmts);
+		const object = newObjectFrom(info, cacheId, narId);
+		stmts.push(db.insertObjectStmt(d1, object));
+		// The NAR row is this call's own (created P above); a refused
+		// attachment leaves it unreferenced, so the rollback below applies.
+		await publishedOrThrow(d1, object, await db.runBatched(d1, stmts), info);
 	} catch (e) {
-		// Freshly stored R2 objects are content-addressed and adopted by any
-		// retry, so only the DB rows are rolled back here (the orphan reaper
-		// clears whatever landed before the failure).
+		// Staged chunks may be shared with another upload; GC owns their R2
+		// cleanup, so only this NAR is rolled back here.
 		if (narId !== undefined) await db.updateNarState(d1, narId, 'D').catch(() => {});
 		throw e;
 	} finally {
@@ -410,12 +438,14 @@ async function createUploadRows(
 		num_chunks: 1
 	});
 	try {
-		await db.runBatched(d1, [
+		const object = newObjectFrom(info, cacheId, narId);
+		const results = await db.runBatched(d1, [
 			db.publishChunkStmt(d1, opts.chunkId),
 			db.insertChunkRefStmt(d1, narId, 0, opts.chunkId, info.nar_hash, opts.compression),
 			db.updateNarStateStmt(d1, narId, 'V'),
-			db.insertObjectStmt(d1, newObjectFrom(info, cacheId, narId))
+			db.insertObjectStmt(d1, object)
 		]);
+		await publishedOrThrow(d1, object, results, info);
 	} catch (e) {
 		await db.updateNarState(d1, narId, 'D').catch(() => {});
 		// The staged chunk owns the R2 key; GC handles rollback without a
@@ -513,6 +543,7 @@ export async function handleUploadPath(
 	if (!info) return errorResponse(400, 'Missing NAR info');
 	if (!canPush(info.cache)) return errorResponse(403, 'Permission denied: push');
 	// Provenance is stamped server-side; whatever the client sent is ignored.
+	info.publishTrust = undefined;
 	info.source = 'push';
 	info.created_by = tokenSub;
 
@@ -614,7 +645,7 @@ export async function handleBufferedUpload(
 		);
 	}
 
-	const storageKey = storageKeyFor(info.nar_hash, kind);
+	const storageKey = versionedKey('nar', stripSha256(info.nar_hash), kind);
 	const stored = await storeChunk(
 		env,
 		{
@@ -753,7 +784,7 @@ export interface CdcManifest {
 	nar_info: UploadNarInfo;
 	nar_size: number;
 	/** Raw sha256 hex + uncompressed size per chunk, in NAR order. */
-	chunks: { hash: string; size: number }[];
+	chunks: { hash: string; size: number; proof?: string }[];
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -806,12 +837,20 @@ export function validateManifest(body: CdcManifest): Response | null {
  * POST /_api/v1/upload-path/chunks — which chunks of this NAR the server
  * lacks. Already-attached NARs are read-only no-ops; new attachments are
  * created exclusively by complete. Chunk existence is checked against zstd.
+ *
+ * A stored chunk is reported present, with a receipt for the destination,
+ * only when the pusher is already entitled to its bytes: a cache holding it
+ * is public, is the destination itself, or is one the token may pull from.
+ * Push-only access to a private source is not read access, so a chunk known
+ * only from such a cache still has to be sent (and verified) — that is the
+ * cross-cache disclosure the receipts exist to prevent.
  */
 export async function handleCdcQuery(
 	env: Env,
 	ctx: ExecutionContext | undefined,
 	origin: string,
-	body: CdcManifest
+	body: CdcManifest,
+	canPull: (cacheName: string) => boolean = () => false
 ): Promise<Response> {
 	const denied = validateManifest(body);
 	if (denied) return denied;
@@ -830,12 +869,30 @@ export async function handleCdcQuery(
 		return uploadedResult(null, 1);
 	}
 
-	// Replica read: a stale miss only makes the client upload a chunk the
-	// server already has, and the chunk PUT dedups that on arrival.
-	const unique = [...new Set(body.chunks.map((c) => `sha256:${c.hash}`))];
-	const present = await db.findExistingChunkHashes(db.readSession(env.ATTIC_DB), unique, 'zstd');
-	const missing = unique.filter((h) => !present.has(h)).map((h) => h.slice('sha256:'.length));
-	return json({ kind: 'pending', missing_chunk_hashes: missing });
+	// Chunks without a valid receipt need either bytes or an entitlement.
+	// Replica read: a stale miss only costs the client one chunk upload.
+	const unproven = new Map<string, number>();
+	const verified = await Promise.all(body.chunks.map((c) => verifyChunkProof(env, cache, c)));
+	body.chunks.forEach((chunk, i) => {
+		if (!verified[i]) unproven.set(chunk.hash, chunk.size);
+	});
+	const holders = await db.cachesHoldingChunks(
+		db.readSession(env.ATTIC_DB),
+		[...unproven.keys()].map((h) => `sha256:${h}`),
+		'zstd'
+	);
+	const proofs: Record<string, string> = {};
+	const missing: string[] = [];
+	await Promise.all(
+		[...unproven].map(async ([hash, size]) => {
+			const entitled = (holders.get(`sha256:${hash}`) ?? []).some(
+				(holder) => holder.is_public === 1 || holder.name === cache.name || canPull(holder.name)
+			);
+			if (entitled) proofs[hash] = await issueChunkProof(env, cache, hash, size);
+			else missing.push(hash);
+		})
+	);
+	return json({ kind: 'pending', missing_chunk_hashes: missing, proofs });
 }
 
 /**
@@ -884,26 +941,49 @@ async function verifyChunk(
 export async function handleCdcChunkPut(
 	request: Request,
 	env: Env,
-	hash: string
+	hash: string,
+	cacheName: string,
+	ctx?: ExecutionContext
 ): Promise<Response> {
 	if (!HEX64.test(hash)) return errorResponse(400, `Invalid chunk hash: ${hash}`);
-
-	// Dedup before admission: an already-stored chunk (repeated push, client
-	// re-send) returns without buffering the body or burning a verify slot.
-	// A stale replica miss falls through to the verify path, whose insert
-	// converges on the winning row; if GC reaps the chunk before the complete
-	// call, the 409 retry re-uploads it.
-	const existing = await db.findChunk(db.readSession(env.ATTIC_DB), `sha256:${hash}`, 'zstd');
-	if (existing) {
-		recordStoreWrite(env, { deduplicated: true, fileBytes: existing.file_size ?? 0 });
-		return json({ ok: true, deduplicated: true });
-	}
-
+	const cache = await findCacheCached(env.ATTIC_DB, cacheName);
+	if (!cache) return errorResponse(400, 'Missing or invalid cache');
+	// The dedup lookup depends only on the hash, so its primary round trip
+	// hides behind the body read, decompression and digest. Verification is
+	// awaited first regardless: it holds a wasm slot that must be released
+	// before this request's admission is, even when the lookup failed.
+	const lookup = db.findChunk(env.ATTIC_DB, `sha256:${hash}`, 'zstd');
+	lookup.catch(() => {});
 	const verified = await verifyChunk(request, hash);
 	if (verified instanceof Response) return verified;
+	const existing = await lookup;
 	const { compressed, rawLength } = verified;
+	const proof = await issueChunkProof(env, cache, hash, rawLength);
 
-	const key = chunkStorageKey(hash, 'zstd');
+	// Possession is verified before storage dedup; a hash is not a capability.
+	// A valid row whose object is gone, or which completion marked damaged
+	// (file metadata cleared) after finding bytes that contradict it, is
+	// repaired: the verified bytes go under a new versioned key and the row is
+	// moved to it with a compare-and-set on the key it currently names, so
+	// concurrent repairs across isolates elect exactly one winner and nothing
+	// ever overwrites an object a reader may be streaming. Without a repair
+	// path a 409 from completion would loop forever.
+	if (existing) {
+		const key = db.chunkKey(existing);
+		const present =
+			key && existing.file_hash !== null
+				? await withR2Retry(() => env.CACHE_BUCKET.head(key))
+				: null;
+		if (present) {
+			recordStoreWrite(env, { deduplicated: true, fileBytes: existing.file_size ?? 0 });
+			return json({ ok: true, deduplicated: true, proof });
+		}
+		const repaired = await repairChunk(env, ctx, existing, hash, compressed, proof);
+		if (repaired) return repaired;
+		// The row vanished under the repair (GC claimed it): store afresh.
+	}
+
+	const key = versionedKey('chunk', hash, 'zstd');
 	const stored = await storeChunk(
 		env,
 		{
@@ -920,15 +1000,74 @@ export async function handleCdcChunkPut(
 	);
 	await db.settleChunks(env.ATTIC_DB, [{ id: stored.id, publish: true }]);
 	recordStoreWrite(env, { deduplicated: stored.state === 'V', fileBytes: stored.file_size ?? 0 });
-	return json({ ok: true, deduplicated: stored.state === 'V' });
+	return json({ ok: true, deduplicated: stored.state === 'V', proof });
+}
+
+/** Returns null when no valid row remains to repair (GC claimed it between
+ * the caller's lookup and the compare-and-set); the caller stores afresh. */
+async function repairChunk(
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	existing: db.ChunkRow,
+	hash: string,
+	compressed: Uint8Array,
+	proof: string
+): Promise<Response | null> {
+	const units = Math.ceil(compressed.byteLength / (1024 * 1024));
+	if (!(await takeBudgetUnits(env.STORAGE_WRITE_LIMITER, 'storage-write', units))) {
+		throw new AdmissionError('Storage write budget exhausted');
+	}
+	const key = versionedKey('chunk', hash, 'zstd');
+	await withR2Retry(() => env.CACHE_BUCKET.put(key, compressed as unknown as ArrayBuffer));
+	const won = await db.repairChunkFile(env.ATTIC_DB, existing.id, existing.remote_file, {
+		remote_file: remoteFileJson(key),
+		remote_file_id: key,
+		file_hash: toHex(await crypto.subtle.digest('SHA-256', compressed as BufferSource)),
+		file_size: compressed.length
+	});
+	if (!won) {
+		// A missing/deleted row is not a successful deduplication. Never remove
+		// our object until a primary read confirms it is not the live pointer.
+		const current = await db.findChunk(env.ATTIC_DB, `sha256:${hash}`, 'zstd');
+		if (current && db.chunkKey(current) === key) {
+			throw new Error('Repair pointer has no retirement journal');
+		}
+		await withR2Retry(() => env.CACHE_BUCKET.delete(key));
+		if (!current) return null;
+		const currentKey = db.chunkKey(current);
+		if (
+			current.file_hash === null ||
+			!currentKey ||
+			!(await withR2Retry(() => env.CACHE_BUCKET.head(currentKey)))
+		) {
+			// The winner's row is itself damaged or its object is gone already:
+			// the row moved, so a second compare-and-set against it is a fresh
+			// election, not a retry of the one we lost.
+			if (current.remote_file === existing.remote_file)
+				throw new Error('Chunk repair did not converge');
+			return repairChunk(env, ctx, current, hash, compressed, proof);
+		}
+		recordStoreWrite(env, { deduplicated: true, fileBytes: current.file_size ?? 0 });
+		return json({ ok: true, deduplicated: true, proof });
+	}
+	recordStoreWrite(env, { deduplicated: false, fileBytes: compressed.length });
+	const store = ctx?.exports?.CachedStore;
+	if (ctx && store) {
+		const invalidate = store
+			.processChunkRepair(key)
+			.catch((error) => console.warn('chunk repair invalidation pending', { key, error }));
+		ctx.waitUntil(invalidate);
+	}
+
+	return json({ ok: true, deduplicated: false, repaired: true, proof });
 }
 
 /**
  * POST /_api/v1/upload-path/chunks/complete — assemble the NAR from chunk
  * references. Locks every chunk; if any vanished (e.g. GC raced), responds
  * 409 with the missing hashes so the client re-uploads those and retries.
- * The assembled NAR hash is trusted from the client, like the transport this
- * replaced — verifying would mean re-reading and decompressing everything.
+ * Cache-bound receipts establish possession; the assembled stream is hashed
+ * before any valid NAR or object is published.
  */
 export async function handleCdcComplete(
 	env: Env,
@@ -954,13 +1093,8 @@ export async function handleCdcComplete(
 		return uploadedResult(null, 1);
 	}
 
-	const existingNar = await tryLockNarProbed(env, info.nar_hash);
-	if (existingNar) {
-		const response = await finishDeduplicated(env, info, cache.id, existingNar.id);
-		if (response.ok) recordPush(env, info.cache, { deduplicated: true, narBytes: body.nar_size });
-		warm();
-		return response;
-	}
+	const proven = await Promise.all(body.chunks.map((c) => verifyChunkProof(env, cache, c)));
+	if (proven.includes(false)) return errorResponse(403, 'Chunk possession proof required');
 
 	// Lock chunks in one batch round-trip (deduplicating repeats within the
 	// NAR: one lock per unique row). No replica probe here, unlike
@@ -1011,6 +1145,87 @@ export async function handleCdcComplete(
 	if (missing.length > 0) {
 		await releaseChunkLocks(env, [...lockedByHash.values()]);
 		return json({ missing_chunk_hashes: missing }, 409);
+	}
+
+	// A SHA-256 of the ordered bytes cannot be inferred from chunk hashes.
+	// Each chunk is read back under a WASM slot, one at a time, so peak
+	// memory is one raw chunk plus its compressed form regardless of NAR size.
+	// Storage outcomes map to the client's recovery paths: a chunk that
+	// vanished (GC raced the upload, or the row outlived its object) or whose
+	// stored bytes fail verification is a 409 naming the hash — the row is
+	// marked damaged (compare-and-set on the object it names, so a repair
+	// that already replaced the object is left alone) and the chunk PUT's
+	// repair path re-stores it; a storage error (get, body transfer) is a 503
+	// so the client retries the complete call rather than re-uploading.
+	const digest = newDigestStream();
+	digest.digest.catch(() => {});
+	const writer = digest.getWriter();
+	const vanished: string[] = [];
+	let verified = false;
+	try {
+		for (const chunk of body.chunks) {
+			const row = lockedRows.get(`sha256:${chunk.hash}`)!;
+			const key = db.chunkKey(row);
+			if (!key) {
+				vanished.push(chunk.hash);
+				break;
+			}
+			const ok = await withSlot(wasmMemorySlots, async () => {
+				let compressed: Uint8Array | null;
+				try {
+					const object = await withR2Retry(() => env.CACHE_BUCKET.get(key));
+					if (!object) {
+						vanished.push(chunk.hash);
+						return false;
+					}
+					compressed = await readAll(
+						object.body as unknown as ReadableStream<Uint8Array>,
+						CDC_MAX_CHUNK + 1024 * 1024
+					);
+				} catch {
+					throw new AdmissionError('Chunk storage temporarily unavailable', 5);
+				}
+				let raw: Uint8Array | null = null;
+				if (compressed) {
+					await initZstd();
+					try {
+						raw = zstdDecompress(compressed, chunk.size);
+					} catch {
+						raw = null;
+					}
+				}
+				if (
+					!raw ||
+					raw.length !== chunk.size ||
+					toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource)) !== chunk.hash
+				) {
+					// Oversized, undecodable, or contradicting the row: mark it so
+					// the client's re-upload repairs it instead of dedup'ing
+					// against the bad bytes. Nothing is deleted here — a repair
+					// racing this read may already have moved the row.
+					await db.markChunkDamaged(env.ATTIC_DB, row.id, row.remote_file);
+					vanished.push(chunk.hash);
+					return false;
+				}
+				await writer.write(raw as BufferSource);
+				return true;
+			});
+			if (!ok) break;
+		}
+		if (vanished.length > 0) {
+			return json({ missing_chunk_hashes: vanished }, 409);
+		}
+		await writer.close();
+		if (toHex(await digest.digest) !== stripSha256(info.nar_hash)) {
+			return errorResponse(400, 'Assembled NAR hash mismatch');
+		}
+		verified = true;
+	} finally {
+		if (!verified) {
+			await writer.abort(new Error('verification stopped')).catch(() => {});
+			await releaseChunkLocks(env, [...lockedByHash.values()]);
+		}
+		writer.releaseLock();
 	}
 
 	await linkChunkedNarDeduped(

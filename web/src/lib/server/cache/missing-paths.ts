@@ -13,6 +13,8 @@
 // An upstream may carry a public key; when it does, an entry only counts as
 // present if its narinfo carries a valid signature from that key.
 
+import { measure } from './latency';
+import { AsyncMemo } from './async-memo';
 import { parseNarInfo, parsedNarInfoSignatureValid, type ParsedNarInfo } from '../attic/narinfo';
 import { dbAll, dbBatch, readSession, runBatched } from './db';
 import { recordGuard } from './metrics';
@@ -112,8 +114,19 @@ const PROBE_TIMEOUT_MS = 5_000;
 /** fetch with the probe timeout always attached — probe sites must not
  * reintroduce an unbounded hang by forgetting the signal. */
 const probeFetch = (url: string, init: RequestInit = {}) =>
-	fetch(url, { ...init, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+	measure('upstream', () =>
+		fetch(url, {
+			...init,
+			signal: init.signal
+				? AbortSignal.any([init.signal, AbortSignal.timeout(PROBE_TIMEOUT_MS)])
+				: AbortSignal.timeout(PROBE_TIMEOUT_MS)
+		})
+	);
 const PROBE_CONCURRENCY = 10;
+/** Wall-clock budget for live probes in one preflight. Paths still unknown
+ * when it runs out are deferred (reported missing, flagged for re-query),
+ * never silently treated as absent from every upstream. */
+const PREFLIGHT_PROBE_BUDGET_MS = 10_000;
 const ABSENT_RECHECK_MS = 24 * 60 * 60 * 1000;
 
 export async function findExistingPaths(
@@ -311,6 +324,11 @@ export interface ProbeGuard {
  *  the redirect memo (NARs) with false negatives that would outlive the
  *  refusal. */
 export const PROBE_REFUSED = Symbol('upstream probe budget refused');
+export const UPSTREAM_UNAVAILABLE = Symbol('upstream unavailable');
+/** A probe that yielded no verdict: not a miss, must never be cached as one. */
+export type UpstreamUncertain = typeof PROBE_REFUSED | typeof UPSTREAM_UNAVAILABLE;
+export const isUncertain = (value: unknown): value is UpstreamUncertain =>
+	value === PROBE_REFUSED || value === UPSTREAM_UNAVAILABLE;
 
 /** Charge each outbound fetch against both per-IP and colo-wide budgets. */
 async function takeProbeBudget(guard: ProbeGuard | undefined): Promise<boolean> {
@@ -449,20 +467,25 @@ export async function classifyNarinfo(upstream: Upstream, text: string): Promise
  * persist-mode upstreams need the body (signature / ingestibility); plain
  * redirect probes stay HEADs.
  */
-export async function probeUpstream(upstream: Upstream, hash: string): Promise<Verdict | null> {
+export async function probeUpstream(
+	upstream: Upstream,
+	hash: string,
+	signal?: AbortSignal
+): Promise<Verdict | null> {
 	try {
 		if (hash.startsWith('nar:')) {
 			const res = await probeFetch(`${upstream.url}/${hash.slice('nar:'.length)}`, {
-				method: 'HEAD'
+				method: 'HEAD',
+				signal
 			});
 			return headVerdict(res);
 		}
 		const url = `${upstream.url}/${hash}.narinfo`;
 		if (!upstream.publicKey && upstream.mode !== 'persist') {
-			const res = await probeFetch(url, { method: 'HEAD' });
+			const res = await probeFetch(url, { method: 'HEAD', signal });
 			return headVerdict(res);
 		}
-		const res = await probeFetch(url);
+		const res = await probeFetch(url, { signal });
 		if (res.status !== 200) await res.body?.cancel();
 		if (res.status === 404) return VERDICT_ABSENT;
 		if (res.status !== 200) return null;
@@ -495,10 +518,15 @@ export async function filterUpstreamPaths(
 	db: D1,
 	upstreams: Upstream[],
 	missing: string[],
-	guard?: ProbeGuard
-): Promise<string[]> {
+	guard?: ProbeGuard,
+	ctx?: ExecutionContext
+): Promise<{ missing: string[]; deferred: string[] }> {
+	const signal = AbortSignal.timeout(PREFLIGHT_PROBE_BUDGET_MS);
 	let remaining = missing;
 	let probeBudget = MAX_UPSTREAM_PROBES;
+	// Paths some upstream never answered for (budget, deadline, refusal, or a
+	// transient probe failure): uncertainty, not absence.
+	const deferred = new Set<string>();
 
 	// Prefetch every upstream's cached verdicts concurrently, over the full
 	// missing set, before the sequential filter loop: fetched per upstream
@@ -514,7 +542,7 @@ export async function filterUpstreamPaths(
 	);
 
 	for (const upstream of upstreams) {
-		if (remaining.length === 0) break;
+		if (remaining.length === 0 || signal.aborted) break;
 
 		const cached = verdictsByUpstream.get(upstream.id) ?? new Map<string, Verdict>();
 		const unknown = remaining.filter((h) => !cached.has(h));
@@ -532,19 +560,23 @@ export async function filterUpstreamPaths(
 		let refused = false;
 		const probed = (
 			await mapConcurrent(toProbe, PROBE_CONCURRENCY, async (hash) => {
-				if (refused) return null;
+				if (refused || signal.aborted) return null;
 				if (!(await takeProbeBudget(guard))) {
 					refused = true;
 					return null;
 				}
-				const verdict = await probeUpstream(upstream, hash);
+				const verdict = await probeUpstream(upstream, hash, signal);
 				return verdict === null ? null : { hash, verdict };
 			})
 		).filter((r): r is { hash: string; verdict: Verdict } => r !== null);
+		const answered = new Set(probed.map((p) => p.hash));
+		for (const hash of unknown) if (!answered.has(hash)) deferred.add(hash);
 		if (probed.length > 0) {
-			await recordVerdicts(db, upstream.id, probed, guard?.env).catch((e) =>
+			const write = recordVerdicts(db, upstream.id, probed, guard?.env).catch((e) =>
 				console.warn(`upstream_check record failed: ${e}`)
 			);
+			if (ctx) ctx.waitUntil(write);
+			else await write;
 		}
 
 		const covered = new Set<string>();
@@ -552,8 +584,10 @@ export async function filterUpstreamPaths(
 		for (const p of probed) if (filtersPath(upstream, p.verdict)) covered.add(p.hash);
 		remaining = remaining.filter((h) => !covered.has(h));
 	}
+	// An upstream the loop never reached leaves every remaining path unasked.
+	if (signal.aborted) for (const hash of remaining) deferred.add(hash);
 
-	return remaining;
+	return { missing: remaining, deferred: remaining.filter((h) => deferred.has(h)) };
 }
 
 /**
@@ -579,13 +613,13 @@ export async function fetchUpstreamNarInfo(
 	storePathHash: string,
 	ctx: ExecutionContext | undefined,
 	guard?: ProbeGuard
-): Promise<{ text: string; upstream: Upstream } | null | typeof PROBE_REFUSED> {
+): Promise<{ text: string; upstream: Upstream } | null | UpstreamUncertain> {
 	const cached = await cachedVerdictsAcrossUpstreams(db, upstreams, storePathHash);
 	const candidates = upstreams.filter((u) => cached.get(u.id) !== VERDICT_ABSENT);
 	if (candidates.length === 0) return null;
 	const attempt = async (
 		upstream: Upstream
-	): Promise<{ text: string; upstream: Upstream } | null | typeof PROBE_REFUSED> => {
+	): Promise<{ text: string; upstream: Upstream } | null | UpstreamUncertain> => {
 		if (!(await takeProbeBudget(guard))) return PROBE_REFUSED;
 		try {
 			const res = await probeFetch(`${upstream.url}/${storePathHash}.narinfo`);
@@ -599,6 +633,9 @@ export async function fetchUpstreamNarInfo(
 				// (rechecked daily), so a re-signed upstream entry recovers on its
 				// own. The ABSENT case always differs from the cached verdict —
 				// known-absent upstreams were filtered out of the candidates.
+				const parsed = parseNarInfo(text);
+				if ((parsed?.storePath.split('/').pop() ?? '').slice(0, 32) !== storePathHash)
+					return UPSTREAM_UNAVAILABLE;
 				const fresh = await classifyNarinfo(upstream, text);
 				if (cached.get(upstream.id) !== fresh) {
 					recordVerdictDeferred(db, ctx, upstream.id, storePathHash, fresh, guard?.env);
@@ -610,10 +647,12 @@ export async function fetchUpstreamNarInfo(
 				// Unexpected status (rate limit, block, outage): worth surfacing,
 				// since the caller silently treats it as a miss.
 				console.warn(`upstream ${upstream.url} returned ${res.status} for ${storePathHash}`);
+				return UPSTREAM_UNAVAILABLE;
 			}
 		} catch (e) {
 			// transient upstream trouble: fall through to the next upstream
 			console.warn(`upstream ${upstream.url} fetch failed for ${storePathHash}: ${e}`);
+			return UPSTREAM_UNAVAILABLE;
 		}
 		return null;
 	};
@@ -624,9 +663,14 @@ export async function fetchUpstreamNarInfo(
 	// steady-state upstream traffic matches the old loop (typically one fetch).
 	const firstBelieved = candidates.findIndex((u) => cached.has(u.id));
 	const eager = firstBelieved === -1 ? candidates : candidates.slice(0, firstBelieved + 1);
+	let uncertain: UpstreamUncertain | null = null;
 	const inFlight = eager.map(attempt);
 	for (let i = 0; i < inFlight.length; i++) {
 		const hit = await inFlight[i];
+		if (isUncertain(hit)) {
+			uncertain = hit;
+			continue;
+		}
 		if (hit) {
 			// Losing probes outlive the early return so their verdicts still
 			// record: the fan-out's extra fetches warm the verdict cache once
@@ -637,9 +681,10 @@ export async function fetchUpstreamNarInfo(
 	}
 	for (const upstream of candidates.slice(eager.length)) {
 		const hit = await attempt(upstream);
-		if (hit) return hit;
+		if (isUncertain(hit)) uncertain = hit;
+		else if (hit) return hit;
 	}
-	return null;
+	return uncertain;
 }
 
 /**
@@ -655,7 +700,7 @@ export async function findUpstreamNar(
 	narPath: string,
 	ctx: ExecutionContext | undefined,
 	guard?: ProbeGuard
-): Promise<string | null | typeof PROBE_REFUSED> {
+): Promise<string | null | UpstreamUncertain> {
 	const key = `nar:${narPath}`;
 	const cached = await cachedVerdictsAcrossUpstreams(db, upstreams, key);
 	// A cached non-absent verdict is trusted without a live probe, so only the
@@ -684,17 +729,23 @@ export async function findUpstreamNar(
 		if (probed !== null) {
 			recordVerdictDeferred(db, ctx, upstream.id, key, probed, guard?.env);
 		}
+		if (probed === null) return UPSTREAM_UNAVAILABLE;
 		return probed === VERDICT_PRESENT ? `${upstream.url}/${narPath}` : null;
 	});
+	let uncertain: UpstreamUncertain | null = null;
 	for (let i = 0; i < inFlight.length; i++) {
 		const url = await inFlight[i];
+		if (isUncertain(url)) {
+			uncertain = url;
+			continue;
+		}
 		if (url) {
 			// Losers keep running via waitUntil so their verdicts still record.
 			for (const p of inFlight.slice(i + 1)) ctx?.waitUntil(p);
 			return url;
 		}
 	}
-	return fallback;
+	return fallback ?? uncertain;
 }
 
 // Per-isolate memo of upstream-NAR redirect resolution. The 302 for an
@@ -747,7 +798,7 @@ export async function upstreamNarRedirect(
 	});
 	// A refused budget is not a verdict: skip the memo so organic requests
 	// keep resolving once the window rolls.
-	if (url === PROBE_REFUSED) throw new AdmissionError('Upstream probe budget exhausted');
+	if (isUncertain(url)) throw new AdmissionError('Upstream temporarily unavailable');
 	narRedirectMemo.set(key, url);
 	return url;
 }
@@ -788,10 +839,10 @@ export interface UpstreamConfig {
 // of the responses built from it (edits also purge those; see the admin
 // actions).
 const UPSTREAMS_MEMO_TTL_MS = 60_000;
-let configMemo: { at: number; value: Promise<UpstreamConfig> } | null = null;
+const configMemo = new AsyncMemo<UpstreamConfig>(UPSTREAMS_MEMO_TTL_MS, 1);
 
 export function clearUpstreamsMemo(): void {
-	configMemo = null;
+	configMemo.clear();
 }
 
 /** Uncached registry load; admin surfaces (registryUsage) share it so their
@@ -819,17 +870,7 @@ export async function fetchUpstreamConfig(db: D1): Promise<UpstreamConfig> {
 }
 
 function upstreamConfig(db: D1): Promise<UpstreamConfig> {
-	if (configMemo && Date.now() - configMemo.at < UPSTREAMS_MEMO_TTL_MS) {
-		return configMemo.value;
-	}
-	const value = fetchUpstreamConfig(db);
-	configMemo = { at: Date.now(), value };
-	// A failed load must not be memoized as a rejected promise for the TTL —
-	// but only clear our own entry (a newer memo may have replaced it).
-	value.catch(() => {
-		if (configMemo?.value === value) configMemo = null;
-	});
-	return value;
+	return configMemo.get('config', () => fetchUpstreamConfig(db));
 }
 
 /**

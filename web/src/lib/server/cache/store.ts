@@ -8,8 +8,16 @@
 // the entrypoint, stores the full 200 response, and slices ranges itself — a
 // Worker-returned 206 would never be stored, so no range logic lives here.
 
+import {
+	serveManifest,
+	loadManifest,
+	serveTouch,
+	serveCandidates,
+	candidateTag,
+	internalRequest,
+	chargeBackendRead
+} from './metadata';
 import { errorResponse, withVisibility } from '../attic/http';
-import { CLIENT_IP_HEADER, clientKey, requireBudget } from './admission';
 import { buildNarInfo } from '../attic/narinfo';
 import { extractPublicKey } from '../attic/signing';
 import { findCacheCached } from './cache-lookup';
@@ -17,7 +25,7 @@ import * as db from './db';
 import {
 	allLiveUpstreams,
 	fetchUpstreamNarInfo,
-	PROBE_REFUSED,
+	isUncertain,
 	upstreamsForCache,
 	upstreamTtlSecs,
 	type Upstream
@@ -26,11 +34,19 @@ import { clearAbsent, getProxyKeypair } from './proxy';
 import { RateBudget } from './rate-budget';
 import { TtlMemo } from './ttl-memo';
 import { withR2Retry, type ExecutionContext } from './platform';
+import { stripSha256 } from '../attic/nix-base32';
 
 type Env = App.Platform['env'];
 
-// NAR URLs are content-addressed by nar hash, so a cached body can never go
-// stale — cache for a year. A GC'd NAR served from cache is still valid data.
+// NAR URLs identify raw content. Cache for a year; representation-changing
+// repairs explicitly purge body and metadata tags together.
+export const STORE_POLICY_VERSION = '2';
+/** Every public NAR body; purged when a cache's visibility changes or it is
+ * destroyed, since the unscoped body route cannot tell contributing caches
+ * apart. */
+export const PUBLIC_NARS_TAG = 'public-nars';
+
+export const narBodyTag = (hash: string) => `nar-body:${stripSha256(hash)}`;
 const NAR_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 // narinfo entries are invalidated actively — GC purges the tag of every
 // object it deletes, uploads purge+rewarm on (re-)push, and keypair rotation
@@ -153,6 +169,7 @@ export function keyedNarinfoUrl(
 	keypair: string | null
 ): URL {
 	const url = new URL(`${origin}/${cacheName}/${storePathHash}.narinfo`);
+	url.searchParams.set('policy', STORE_POLICY_VERSION);
 	if (keypair) {
 		try {
 			url.searchParams.set('pk', extractPublicKey(keypair));
@@ -180,8 +197,8 @@ export function keyedNarinfoUrl(
  * public cache (findNarWithChunks). Edge hits skipping the store stay sound
  * because the key already carries the cache the gateway authorized.
  *
- * Scoped by id, not name. NAR responses carry no Cache-Tag and a year-long
- * max-age, so an entry outlives the cache that produced it; names are reusable
+ * Scoped by id, not name. Private NAR responses have a year-long max-age,
+ * so an entry outlives the cache that produced it; names are reusable
  * (purgeDeletedCache), so a name key would let a recreated cache inherit its
  * predecessor's NAR entries — the same inheritance destroyCache already
  * prevents for grants. Ids are AUTOINCREMENT and never reused.
@@ -203,7 +220,7 @@ export function narStoreUrl(
 	// serveNar resolves only the prefix. Extension aliases must share its key.
 	const canonical = `${filename.split('.')[0]}.nar`;
 	url.pathname =
-		cache.is_public === 1 ? `/_nar/${canonical}` : `/_nar_scoped/${cache.id}/${canonical}`;
+		cache.is_public === 1 ? `/_nar_v2/${canonical}` : `/_nar_scoped_v2/${cache.id}/${canonical}`;
 	url.search = '';
 	return url;
 }
@@ -223,9 +240,8 @@ export async function warmNarinfoAfterUpload(
 	narHash: string
 ): Promise<void> {
 	// The root proxy's negative memo is per-isolate; this clears it where the
-	// upload landed, along with both candidate lookups. The TTL bounds the
-	// other isolates.
-	clearAbsent(storePathHash, narHash);
+	// upload landed. The TTL bounds the other isolates.
+	clearAbsent(storePathHash);
 	const store = ctx?.exports?.CachedStore;
 	if (!store) return;
 	try {
@@ -233,7 +249,9 @@ export async function warmNarinfoAfterUpload(
 		// the same path (uploads and pull-through ingestion both land here).
 		await store.purgeTags([
 			narinfoTag(cache.name, storePathHash),
-			narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash)
+			narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash),
+			candidateTag('path', storePathHash),
+			candidateTag('nar', narHash)
 		]);
 	} catch {
 		// stale entry expires via its max-age
@@ -267,13 +285,17 @@ export async function serveStore(
 			}
 		});
 	}
-	// Every invocation here is an edge miss about to touch D1/R2. Charged per
-	// client (the gateway stamps the IP; a limiter key is not a response
-	// variation, so CachedStore stays caller-independent), and not at all
-	// for internal loopbacks — prefetch has its own budget, and a constant
-	// colo-wide key here made one CI fleet's cold closure everyone's 503.
-	const clientIp = request.headers.get(CLIENT_IP_HEADER);
-	if (clientIp) await requireBudget(env.BACKEND_READ_LIMITER, clientKey('backend-read', clientIp));
+	// Internal metadata routes (metadata.ts). Candidates charge admission
+	// themselves (their uncached fallback must pay too); touch and manifest
+	// are loopbacks from within an already charged request.
+	if (segments.length === 3 && segments[0] === '_meta' && ['path', 'nar'].includes(segments[1]))
+		return serveCandidates(request, env, segments[1], decodeURIComponent(segments[2]));
+	if (segments.length === 3 && segments[0] === '_touch' && /^\d+$/.test(segments[1]))
+		return serveTouch(env, Number(segments[1]), decodeURIComponent(segments[2]));
+	if (segments.length === 3 && segments[0] === '_manifest' && /^(public|\d+)$/.test(segments[1]))
+		return serveManifest(env, segments[1], decodeURIComponent(segments[2]));
+
+	await chargeBackendRead(env, request);
 
 	// Root-proxy upstream fallback: the hash resolves to no local cache, so try
 	// the union of every live cache's upstreams. Cached at the edge under this
@@ -305,14 +327,14 @@ export async function serveStore(
 	// the same edge entry, and R2 is read once instead of per cache. The
 	// gateway authorizes against the requested cache and stamps visibility
 	// before forwarding here.
-	if (segments.length === 2 && segments[0] === '_nar') {
+	if (segments.length === 2 && segments[0] === '_nar_v2') {
 		return serveNar(env, ctx, segments[1]);
 	}
 	// Private caches take a cache-scoped route instead (narStoreUrl above).
 	// Digits only: Number() would accept '', ' 3', '1e3' and '0x2', each a
 	// different spelling of one id and so a distinct edge key for the same
 	// bytes.
-	if (segments.length === 3 && segments[0] === '_nar_scoped') {
+	if (segments.length === 3 && segments[0] === '_nar_scoped_v2') {
 		if (!/^\d+$/.test(segments[1])) return errorResponse(400, 'Invalid cache scope');
 		return serveNar(env, ctx, segments[2], Number(segments[1]));
 	}
@@ -378,7 +400,7 @@ async function serveRootUpstreamNarInfo(
 	// A refused probe budget must not become an edge-cached 404 shared by
 	// every client: errorResponse is no-store, so the refusal dies with this
 	// response.
-	if (hit === PROBE_REFUSED)
+	if (isUncertain(hit))
 		return errorResponse(503, 'Upstream probe budget exhausted', undefined, {
 			'Retry-After': '60'
 		});
@@ -582,7 +604,7 @@ async function serveNarInfo(
 		});
 		// Uncacheable by design (errorResponse is no-store): a budget refusal
 		// must never poison the shared edge cache with a false 404.
-		if (hit === PROBE_REFUSED) {
+		if (isUncertain(hit)) {
 			return withVisibility(
 				errorResponse(503, 'Upstream probe budget exhausted', undefined, { 'Retry-After': '60' }),
 				isPublic
@@ -599,7 +621,10 @@ async function serveNarInfo(
 		}
 		const absent = errorResponse(404, 'Not found', 'NoSuchObject');
 		absent.headers.set('Cache-Control', NARINFO_404_CACHE_CONTROL);
-		absent.headers.set('Cache-Tag', narinfoTags(cacheName, storePathHash));
+		absent.headers.set(
+			'Cache-Tag',
+			`${narinfoTags(cacheName, storePathHash)},${upstreamPassthroughTag(cacheName)}`
+		);
 		return withVisibility(absent, isPublic);
 	}
 
@@ -621,11 +646,7 @@ async function serveNar(
 	const narHashRaw = filename.split('.')[0];
 	if (!narHashRaw) return errorResponse(400, 'Invalid NAR path');
 
-	const found = await db.findNarWithChunks(
-		db.readSession(env.ATTIC_DB),
-		[`sha256:${narHashRaw}`, narHashRaw],
-		cacheId
-	);
+	const found = await loadManifest(env, ctx, narHashRaw, cacheId);
 	if (!found) {
 		// The gateway turns this 404 into an upstream redirect when the cache
 		// has upstreams (passthrough narinfo NAR URLs resolve that way).
@@ -647,8 +668,16 @@ async function serveNar(
 
 	const baseHeaders = new Headers({
 		'Content-Type': 'application/x-nix-nar',
+		// Immutable for both scopes: bodies are content-addressed, and before
+		// touching the shared public key the gateway checks — on both the root
+		// and the per-cache route — that a public cache currently holds the NAR
+		// (cached candidate metadata, 30 s). A cached body is therefore only
+		// reachable while that is true, whether or not the withdrawal purge
+		// after a visibility flip or destroy succeeded; the purge is what
+		// evicts the bytes, not a short TTL that every colo would pay for.
 		'Cache-Control': NAR_CACHE_CONTROL,
-		'Accept-Ranges': 'bytes'
+		'Accept-Ranges': 'bytes',
+		'Cache-Tag': `${cacheId === undefined ? PUBLIC_NARS_TAG : `private-nars:${cacheId}`},${narBodyTag(nar.nar_hash)}`
 	});
 
 	if (chunks.length === 1) {
@@ -680,12 +709,7 @@ async function serveNar(
 		const getChunk = async (key: string): Promise<{ body: ReadableStream<Uint8Array> } | null> => {
 			if (chunkStore) {
 				const response = await chunkStore.fetch(
-					new Request(
-						new URL(
-							`/_chunk/${encodeURIComponent(key)}`,
-							env.CACHE_BASE_URL || 'https://chunks.internal'
-						)
-					)
+					internalRequest(env, `/_chunk/${encodeURIComponent(key)}`)
 				);
 				if (response.ok && response.body) return { body: response.body };
 				await response.body?.cancel().catch(() => {});

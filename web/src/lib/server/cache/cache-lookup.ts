@@ -15,7 +15,7 @@
 
 import type { D1Database } from '@cloudflare/workers-types';
 import { findCache, readSession, type CacheRow } from './db';
-import { TtlMemo } from './ttl-memo';
+import { AsyncMemo } from './async-memo';
 
 const CACHE_ROW_TTL_MS = 30_000;
 // A miss (unknown/just-deleted cache) is remembered only briefly so a
@@ -23,13 +23,12 @@ const CACHE_ROW_TTL_MS = 30_000;
 // create (where invalidateCacheRow cannot reach).
 const CACHE_ROW_MISS_TTL_MS = 5_000;
 const CACHE_ROW_MEMO_MAX_ENTRIES = 10_000;
-const cacheRowMemo = new TtlMemo<CacheRow | null>(CACHE_ROW_TTL_MS, CACHE_ROW_MEMO_MAX_ENTRIES);
+const cacheRowMemo = new AsyncMemo<CacheRow | null>(CACHE_ROW_TTL_MS, CACHE_ROW_MEMO_MAX_ENTRIES);
 
 /** Drop memoized cache row(s); called by every cache-config mutation (the sole
  * choke point for cache-row writes). Pass no name to clear all, e.g. in tests. */
 export function invalidateCacheRow(name?: string): void {
-	if (name === undefined) cacheRowMemo.clear();
-	else cacheRowMemo.delete(name);
+	cacheRowMemo.clear(name);
 }
 
 /** findCache with the per-isolate memo, reading a replica session derived
@@ -41,10 +40,12 @@ export async function findCacheCached(
 	name: string,
 	admit?: () => Promise<void>
 ): Promise<CacheRow | null> {
-	const cached = cacheRowMemo.get(name);
-	if (cached !== undefined) return cached;
-	if (admit) await admit();
-	const row = await findCache(readSession(db), name);
-	cacheRowMemo.set(name, row, row ? CACHE_ROW_TTL_MS : CACHE_ROW_MISS_TTL_MS);
-	return row;
+	return cacheRowMemo.get(
+		name,
+		async () => {
+			if (admit) await admit();
+			return findCache(readSession(db), name);
+		},
+		(row) => (row ? CACHE_ROW_TTL_MS : CACHE_ROW_MISS_TTL_MS)
+	);
 }

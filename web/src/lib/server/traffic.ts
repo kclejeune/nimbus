@@ -119,7 +119,7 @@ export async function loadTraffic(env: Env): Promise<TrafficSummary | null> {
 		       SUM(_sample_interval * double1) AS n,
 		       SUM(_sample_interval * double1 * double2) AS bytes
 		FROM ${DATASET}
-		WHERE timestamp > NOW() - INTERVAL '30' DAY
+		WHERE timestamp > NOW() - INTERVAL '30' DAY AND blob1 <> 'latency'
 		GROUP BY day, kind, event, edge
 		ORDER BY day ASC
 		FORMAT JSON`;

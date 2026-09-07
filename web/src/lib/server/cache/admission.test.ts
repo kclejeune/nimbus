@@ -62,7 +62,7 @@ describe('work admission', () => {
 			// Budget already spent: the unprobed path is reported missing, no throw.
 			expect(
 				await filterUpstreamPaths(fixture.db, upstreams, ['c'.repeat(32)], { env, ip: 'test' })
-			).toEqual(['c'.repeat(32)]);
+			).toEqual({ missing: ['c'.repeat(32)], deferred: ['c'.repeat(32)] });
 			expect(fetch).toHaveBeenCalledOnce();
 		} finally {
 			fixture.sqlite.close();

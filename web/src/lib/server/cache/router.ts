@@ -2,6 +2,9 @@
 // worker-entry.ts when a request arrives on the cache hostname. Fully native
 // TypeScript — the legacy Rust worker is no longer involved.
 
+import { observeRequest, measure } from './latency';
+import { AsyncMemo } from './async-memo';
+import { touchViaStore, loadCandidates, viaStore, stampClientIp } from './metadata';
 import {
 	CacheConfigError,
 	cacheInfo,
@@ -14,13 +17,7 @@ import { findCacheCached } from './cache-lookup';
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import { readDeviceCode, readMissingPaths } from './request-input';
 import { RequestBodyError, readJson } from '../request-body';
-import {
-	AdmissionError,
-	CLIENT_IP_HEADER,
-	clientKey,
-	requireBudget,
-	requireBudgetUnits
-} from './admission';
+import { AdmissionError, clientKey, requireBudget, requireBudgetUnits } from './admission';
 import { checkRateLimit } from '../rate-limit';
 import * as db from './db';
 import { listPins, runGc } from './gc';
@@ -39,13 +36,12 @@ import {
 } from './missing-paths';
 import { uploadMemory, type ExecutionContext } from './platform';
 import {
-	candidatesForNar,
-	candidatesForStorePath,
 	getProxyKeypair,
 	isKnownAbsent,
 	pickReadableWinner,
 	recordAbsent,
-	shouldTouch
+	shouldTouch,
+	touchFailed
 } from './proxy';
 import { TtlMemo } from './ttl-memo';
 import { persistUpstreamPath } from './pullthrough';
@@ -59,6 +55,7 @@ import {
 	PERSIST_UPSTREAM_HEADER,
 	PREFETCH_MARKER_HEADER,
 	serveStore,
+	STORE_POLICY_VERSION,
 	UPSTREAM_MARKER_HEADER
 } from './store';
 import {
@@ -80,19 +77,16 @@ import {
 
 type Env = App.Platform['env'];
 
-// Per-isolate memo of the token-revocation verdict, keyed by jti. Every
-// authenticated request (a CI fleet reuses one token for hundreds of
-// pulls/sec) otherwise runs isTokenDisabled against D1; without this memo that
-// query also hit the write primary. The read now goes to a replica AND is
-// cached here for a short TTL, collapsing a burst of same-token requests to
-// one lookup per window. The TTL bounds how long a just-revoked or
-// just-suspended token keeps working (both fail-safe: re-enabling is likewise
-// delayed at most one TTL); these attic JWTs are already short-lived, so the
-// window is small next to their lifetime. Only successful reads are memoized —
-// a thrown D1 error falls through to the caller's fail-open path uncached.
+// Revocation freshness policy. High-volume transfer traffic (reads, uploads,
+// batch queries) takes a per-isolate memo over a replica read: a CI fleet
+// re-presents one token hundreds of times a second, and the memo TTL plus
+// replica lag bounds how long a just-revoked token keeps moving bytes.
+// Privileged operations (token mint/revoke, cache config, destroy, GC, pins)
+// consult the primary on every call. A failed lookup never authenticates;
+// public reads degrade to anonymous (authorizeCacheRead) rather than 503.
 const REVOCATION_TTL_MS = 30_000;
 const REVOCATION_MEMO_MAX_ENTRIES = 10_000;
-const revocationMemo = new TtlMemo<boolean>(REVOCATION_TTL_MS, REVOCATION_MEMO_MAX_ENTRIES);
+const revocationMemo = new AsyncMemo<boolean>(REVOCATION_TTL_MS, REVOCATION_MEMO_MAX_ENTRIES);
 
 // Per-isolate memo of successful signature verifications, keyed by the raw
 // bearer string. A CI fleet re-presents one token for hundreds of pulls/sec,
@@ -107,11 +101,14 @@ const VERIFY_MEMO_MAX_ENTRIES = 2_000;
 const verifiedTokens = new TtlMemo<VerifiedToken>(VERIFY_TTL_MS, VERIFY_MEMO_MAX_ENTRIES);
 
 async function isJtiDisabled(env: Env, jti: string): Promise<boolean> {
-	const cached = revocationMemo.get(jti);
-	if (cached !== undefined) return cached;
-	const disabled = await db.isTokenDisabled(db.readSession(env.ATTIC_DB), jti);
-	revocationMemo.set(jti, disabled);
-	return disabled;
+	return revocationMemo.get(jti, () => db.isTokenDisabled(db.readSession(env.ATTIC_DB), jti));
+}
+
+/** Requests whose authorization must reflect the primary right now. */
+function isPrivileged(request: Request): boolean {
+	if (request.method === 'GET' || request.method === 'HEAD') return false;
+	const path = new URL(request.url).pathname;
+	return !path.startsWith('/_api/v1/upload-path') && path !== '/_api/v1/get-missing-paths';
 }
 
 /** Server-side misconfiguration surfaced during auth — must map to 500, not
@@ -122,11 +119,15 @@ class MisconfigError extends Error {}
  * 401 with the bare message (interpolating the Error object would render a
  * noisy "Authentication failed: Error: ..."). */
 function authFailure(e: unknown): Response {
+	if (e instanceof AdmissionError) return e.response();
 	if (e instanceof MisconfigError) return errorResponse(500, e.message);
 	return errorResponse(401, `Authentication failed: ${e instanceof Error ? e.message : e}`);
 }
 
-async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedToken | null> {
+function verifyRequestToken(request: Request, env: Env): Promise<VerifiedToken | null> {
+	return measure('auth', () => verifyRequestTokenInner(request, env));
+}
+async function verifyRequestTokenInner(request: Request, env: Env): Promise<VerifiedToken | null> {
 	const bearer = parseAuthToken(request.headers.get('Authorization'));
 	if (!bearer) return null;
 	if (!env.JWT_HS256_SECRET_BASE64 && !env.JWT_RS256_PUBKEY_BASE64) {
@@ -155,19 +156,16 @@ async function verifyRequestToken(request: Request, env: Env): Promise<VerifiedT
 		if (ttl > 0) verifiedTokens.set(bearer, token, ttl);
 	}
 
-	// Admin-issued tokens carry a jti and can be revoked, or suspended while
-	// the owner's account is deactivated. A failed lookup is logged and
-	// ignored, matching the Rust worker (fail-open on the revocation check
-	// only — the signature already verified).
 	if (token.jti) {
+		let disabled: boolean;
 		try {
-			if (await isJtiDisabled(env, token.jti)) {
-				throw new Error('Token has been revoked');
-			}
-		} catch (e) {
-			if (e instanceof Error && e.message === 'Token has been revoked') throw e;
-			console.warn(`revocation check failed for jti ${token.jti}: ${e}`);
+			disabled = await (isPrivileged(request)
+				? db.isTokenDisabled(env.ATTIC_DB, token.jti)
+				: isJtiDisabled(env, token.jti));
+		} catch {
+			throw new AdmissionError('Authorization temporarily unavailable', 2);
 		}
+		if (disabled) throw new Error('Token has been revoked');
 	}
 	return token;
 }
@@ -265,30 +263,23 @@ async function forwardToStore(
 	env: Env,
 	ctx: ExecutionContext | undefined
 ): Promise<Response> {
-	const forwarded = new Request(request);
+	const storeUrl = new URL(request.url);
+	if (storeUrl.pathname.endsWith('.narinfo'))
+		storeUrl.searchParams.set('policy', STORE_POLICY_VERSION);
+	const forwarded = new Request(storeUrl, request);
 	forwarded.headers.delete('Authorization');
-	// Overwritten, never passed through: the store charges its D1/R2 work to
-	// this key, and a client must not be able to pick whose budget it spends.
-	const clientIp = request.headers.get('CF-Connecting-IP');
-	if (clientIp) forwarded.headers.set(CLIENT_IP_HEADER, clientIp);
-	else forwarded.headers.delete(CLIENT_IP_HEADER);
+	forwarded.headers.delete('Cookie');
+	stampClientIp(forwarded.headers, request.headers.get('CF-Connecting-IP'));
 	// Internal prefetch-loopback marker (store.ts); client-supplied, it would
 	// falsely mark the request as a prefetch and disable its upstream fallback.
 	forwarded.headers.delete(PREFETCH_MARKER_HEADER);
-	const store = ctx?.exports?.CachedStore;
-	if (!store && !warnedStoreUnavailable) {
+	if (!ctx?.exports?.CachedStore && !warnedStoreUnavailable) {
 		warnedStoreUnavailable = true;
 		console.warn('ctx.exports.CachedStore unavailable; serving read path uncached');
 	}
-	let response = store ? await store.fetch(forwarded) : await serveStore(forwarded, env, ctx);
-	// The Workers Caching pipeline intermittently mints an empty 502 without
-	// invoking CachedStore. Read-path code never emits 502, so the status alone
-	// identifies a caching-layer failure — serve uncached instead of passing it
-	// through. Reusing `forwarded` is safe: GET/HEAD, no body to disturb.
-	if (store && response.status === 502) {
-		console.warn(`store loopback returned 502; serving uncached: ${new URL(request.url).pathname}`);
-		response = await serveStore(forwarded, env, ctx);
-	}
+	const response = await measure('store', () =>
+		viaStore(ctx, forwarded, () => serveStore(forwarded, env, ctx))
+	);
 
 	const cacheName = response.headers.get(PERSIST_CACHE_HEADER);
 	const upstreamUrl = response.headers.get(PERSIST_UPSTREAM_HEADER);
@@ -357,6 +348,53 @@ async function handleNarInfo(
 	return withCachePolicy(stripUpstreamMarker(response), auth.cache.is_public === 1);
 }
 
+/** A NAR this route cannot serve: redirect to the cache's upstreams (the
+ * union of live caches' upstreams for the root) or 404, recording the read
+ * either way. `notFound` lets a store 404 pass through unchanged. */
+async function narMiss(
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	request: Request,
+	cache: Parameters<typeof upstreamNarRedirect>[2],
+	filename: string,
+	label: string,
+	edge: EdgeEvent,
+	notFound?: Response
+): Promise<Response> {
+	const upstreamUrl = await upstreamNarRedirect(
+		env,
+		ctx,
+		cache,
+		filename,
+		request.headers.get('CF-Connecting-IP')
+	);
+	recordRead(env, 'nar', label, {
+		status: upstreamUrl ? 302 : 404,
+		viaUpstream: !!upstreamUrl,
+		edge
+	});
+	if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
+	return notFound ?? errorResponse(404, 'Not found', 'NoSuchObject');
+}
+
+/** Retention is download-driven (like the reference server): touch every
+ * object in the cache backed by the NAR, off the critical path. This must
+ * happen in the gateway — downloads served from the edge cache never reach
+ * the CachedStore entrypoint — and only after the store confirmed the NAR
+ * exists: touching before the read gave nonexistent-hash floods a free
+ * primary write per request, while real NARs stay coalesced by shouldTouch. */
+function scheduleTouch(
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	cacheId: number,
+	narHashRaw: string
+): void {
+	if (!shouldTouch(cacheId, narHashRaw)) return;
+	ctx?.waitUntil(
+		touchViaStore(env, ctx, cacheId, narHashRaw).catch(() => touchFailed(cacheId, narHashRaw))
+	);
+}
+
 async function handleNar(
 	request: Request,
 	env: Env,
@@ -371,6 +409,22 @@ async function handleNar(
 	const auth = await authorizeCacheRead(request, env, cacheName);
 	if ('response' in auth) return auth.response;
 
+	// Public caches share one content-addressed edge key, so the body of a NAR
+	// this cache no longer holds (or never held — a hash learned from a cache
+	// that since went private) may still be cached under it. Reading a public
+	// cache therefore requires the cache to hold the NAR *now*, per the cached
+	// candidate metadata, before the shared key is touched; the year-long body
+	// entry is then only reachable while some public cache currently holds
+	// it, whether or not the withdrawal purge succeeded. Private caches use a
+	// key scoped to their id, which authorizeCacheRead already covers.
+	if (auth.cache.is_public === 1) {
+		const holders = await measure('candidates', () =>
+			loadCandidates(env, ctx, request, 'nar', narHashRaw)
+		);
+		if (!holders.some((c) => c.id === auth.cache.id))
+			return narMiss(env, ctx, request, auth.cache, filename, cacheName, 'none');
+	}
+
 	// narStoreUrl owns the edge key (content-addressed for public caches,
 	// cache-scoped for private). The cache-specific concerns stay here: the
 	// visibility header is stamped per request, and a store miss falls back to
@@ -378,35 +432,19 @@ async function handleNar(
 	const keyed = narStoreUrl(request, auth.cache, filename);
 	const response = await forwardToStore(new Request(keyed, request), env, ctx);
 
-	if (response.status === 404) {
-		const upstreamUrl = await upstreamNarRedirect(
+	if (response.status === 404)
+		return narMiss(
 			env,
 			ctx,
+			request,
 			auth.cache,
 			filename,
-			request.headers.get('CF-Connecting-IP')
+			cacheName,
+			storeEdge(response),
+			response
 		);
-		recordRead(env, 'nar', cacheName, {
-			status: 404,
-			viaUpstream: !!upstreamUrl,
-			edge: storeEdge(response)
-		});
-		if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
-		return response;
-	}
 
-	// Retention is download-driven (like the reference server): touch every
-	// object in this cache backed by the NAR, off the critical path. This must
-	// happen in the gateway — downloads served from the edge cache never reach
-	// the CachedStore entrypoint — and only after the store confirmed the NAR
-	// exists: touching before the read gave nonexistent-hash floods a free
-	// primary write per request, while real NARs stay coalesced by shouldTouch.
-	if (!head && response.ok && shouldTouch(auth.cache.id, narHashRaw)) {
-		const touch = db
-			.touchObjectsForNarHash(env.ATTIC_DB, auth.cache.id, narHashRaw)
-			.catch(() => {});
-		ctx?.waitUntil(touch);
-	}
+	if (!head && response.ok) scheduleTouch(env, ctx, auth.cache.id, narHashRaw);
 	recordRead(env, 'nar', cacheName, { status: response.status, edge: storeEdge(response) });
 	return withCachePolicy(
 		withVisibility(new Response(response.body, response), auth.cache.is_public === 1),
@@ -457,9 +495,7 @@ async function handleProxyNarInfo(
 	// read, cached or not.
 	const [token, candidates] = await Promise.all([
 		proxyToken(request, env),
-		candidatesForStorePath(env.ATTIC_DB, storePathHash, () =>
-			requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request))
-		)
+		measure('candidates', () => loadCandidates(env, ctx, request, 'path', storePathHash))
 	]);
 	const winner = pickReadableWinner(token, candidates);
 	// No local winner (not stored anywhere, or stored only in caches this
@@ -514,52 +550,25 @@ async function handleProxyNar(
 	// Same concurrent shape (and memo rationale) as handleProxyNarInfo above.
 	const [token, narCandidates] = await Promise.all([
 		proxyToken(request, env),
-		candidatesForNar(env.ATTIC_DB, narHashRaw, () =>
-			requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request))
-		)
+		measure('candidates', () => loadCandidates(env, ctx, request, 'nar', narHashRaw))
 	]);
 	const winner = pickReadableWinner(token, narCandidates);
 	// NAR URLs served by root-proxy upstream passthrough narinfos resolve here
 	// with no local winner, so the root needs the same upstream redirect as the
 	// per-cache route — against the union of live caches' upstreams.
-	const upstreamRedirect = async (): Promise<Response | null> => {
-		const url = await upstreamNarRedirect(
-			env,
-			ctx,
-			null,
-			filename,
-			request.headers.get('CF-Connecting-IP')
-		);
-		return url ? Response.redirect(url, 302) : null;
-	};
-	if (!winner) {
-		const redirect = await upstreamRedirect();
-		recordRead(env, 'nar', UNIFIED_LABEL, { status: 404, viaUpstream: !!redirect, edge: 'none' });
-		return redirect ?? errorResponse(404, 'Not found', 'NoSuchObject');
-	}
-
-	// Download-driven retention, attributed to the winning cache (see handleNar).
-	if (!head && shouldTouch(winner.id, narHashRaw)) {
-		const touch = db.touchObjectsForNarHash(env.ATTIC_DB, winner.id, narHashRaw).catch(() => {});
-		ctx?.waitUntil(touch);
-	}
+	if (!winner) return narMiss(env, ctx, request, null, filename, UNIFIED_LABEL, 'none');
 
 	// Same edge entry as the per-cache route. pickReadableWinner already proved
 	// the winner holds this NAR, but the scoped path is what keeps the resulting
 	// edge entry out of reach of a request authorized against another cache.
 	const keyed = narStoreUrl(request, winner, filename);
 	const response = await forwardToStore(new Request(keyed, request), env, ctx);
-	if (response.status === 404) {
-		// Deletion race (GC reaped the NAR between resolution and read): the
-		// upstreams may still have it, same as the per-cache route.
-		const redirect = await upstreamRedirect();
-		recordRead(env, 'nar', UNIFIED_LABEL, {
-			status: 404,
-			viaUpstream: !!redirect,
-			edge: storeEdge(response)
-		});
-		return redirect ?? response;
-	}
+	if (!head && response.ok) scheduleTouch(env, ctx, winner.id, narHashRaw);
+
+	// Deletion race (GC reaped the NAR between resolution and read): the
+	// upstreams may still have it, same as the per-cache route.
+	if (response.status === 404)
+		return narMiss(env, ctx, request, null, filename, UNIFIED_LABEL, storeEdge(response), response);
 	recordRead(env, 'nar', UNIFIED_LABEL, { status: response.status, edge: storeEdge(response) });
 	return withCachePolicy(
 		withVisibility(new Response(response.body, response), winner.is_public === 1),
@@ -573,7 +582,11 @@ async function handleProxyNar(
  * upstreams (e.g. cache.nixos.org) are excluded so clients never push them,
  * unless the request opts out with ignore_upstream_cache_filter.
  */
-async function handleGetMissingPaths(request: Request, env: Env): Promise<Response> {
+async function handleGetMissingPaths(
+	request: Request,
+	env: Env,
+	ctx?: ExecutionContext
+): Promise<Response> {
 	let token: VerifiedToken | null;
 	try {
 		token = await verifyRequestToken(request, env);
@@ -622,18 +635,30 @@ async function handleGetMissingPaths(request: Request, env: Env): Promise<Respon
 	const upstreams = body.ignoreUpstream ? [] : await upstreamsForCache(session, cache);
 	const existing = await existingPromise;
 	const missing = hashes.filter((h) => !existing.has(h));
-	const missingPaths =
+	// deferred_paths: the subset of missing_paths no upstream could be asked
+	// about within this request's probe budget. attic clients ignore the field
+	// and push them; the nimbus client re-queries them first.
+	const filtered =
 		upstreams.length > 0 && missing.length > 0
-			? await filterUpstreamPaths(session, upstreams, missing, {
-					env,
-					ip: request.headers.get('cf-connecting-ip')
-				})
-			: missing;
+			? await filterUpstreamPaths(
+					session,
+					upstreams,
+					missing,
+					{
+						env,
+						ip: request.headers.get('cf-connecting-ip')
+					},
+					ctx
+				)
+			: { missing, deferred: [] };
 
-	return new Response(JSON.stringify({ missing_paths: missingPaths }), {
-		status: 200,
-		headers: { 'Content-Type': 'application/json' }
-	});
+	return new Response(
+		JSON.stringify({ missing_paths: filtered.missing, deferred_paths: filtered.deferred }),
+		{
+			status: 200,
+			headers: { 'Content-Type': 'application/json' }
+		}
+	);
 }
 
 /**
@@ -786,7 +811,7 @@ async function handleV1(
 	}
 
 	if (method === 'POST' && route === 'get-missing-paths' && segments.length === 3) {
-		return handleGetMissingPaths(request, env);
+		return handleGetMissingPaths(request, env, ctx);
 	}
 	if (method === 'POST' && route === 'gc' && segments.length === 3) {
 		return handleGcTrigger(request, env, ctx, url);
@@ -824,6 +849,7 @@ async function handleV1(
 			const invalid = validateManifest(body);
 			if (invalid) return invalid;
 			if (!canPush(body.nar_info.cache)) return errorResponse(403, 'Permission denied: push');
+			body.nar_info.publishTrust = undefined;
 			body.nar_info.source = 'push';
 			body.nar_info.created_by = token.sub ?? null;
 			return body;
@@ -837,12 +863,15 @@ async function handleV1(
 		// budget can be exceeded for up to a day between cron runs.
 		//
 		// Only bodies that get buffered or decompressed take the memory slot:
-		// the CDC query/complete manifests are ≤1 MiB JSON and touch no WASM,
-		// and gating them behind chunk PUTs stalled the client's pipeline.
+		// the CDC manifests are ≤1 MiB JSON; gating them behind chunk PUTs
+		// stalled the client's pipeline.
+		// Completion re-reads chunks one at a time under wasmMemorySlots, so
+		// it takes no upload slot: holding one for a multi-GB verification
+		// would let two completions stall every push on the isolate.
 		const carriesNar =
 			method === 'PUT' &&
 			(segments.length === 3 || (segments[3] === 'chunks' && segments.length === 5));
-		if (carriesNar && !(await uploadMemory.acquireBounded()))
+		if (carriesNar && !(await measure('admission', () => uploadMemory.acquireBounded(32, 5_000))))
 			throw new AdmissionError('Upload memory busy; retry shortly', 5);
 		try {
 			if (method === 'PUT' && segments.length === 3) {
@@ -850,12 +879,18 @@ async function handleV1(
 			} else if (method === 'POST' && segments[3] === 'chunks' && segments.length === 4) {
 				const manifest = await parseManifest();
 				if (manifest instanceof Response) return manifest;
-				return await handleCdcQuery(env, ctx, url.origin, manifest);
+				return await handleCdcQuery(
+					env,
+					ctx,
+					url.origin,
+					manifest,
+					(cacheName) => permissionForCache(token, cacheName).pull
+				);
 			} else if (method === 'PUT' && segments[3] === 'chunks' && segments.length === 5) {
 				const cacheName = url.searchParams.get('cache');
 				if (!cacheName) return errorResponse(400, 'Missing cache parameter');
 				if (!canPush(cacheName)) return errorResponse(403, 'Permission denied: push');
-				return await handleCdcChunkPut(request, env, segments[4]);
+				return await handleCdcChunkPut(request, env, segments[4], cacheName, ctx);
 			} else if (
 				method === 'POST' &&
 				segments[3] === 'chunks' &&
@@ -1028,15 +1063,17 @@ export async function handleCacheApi(
 	env: Env,
 	ctx?: ExecutionContext
 ): Promise<Response> {
-	try {
-		return await handleCacheApiInner(request, env, ctx);
-	} catch (e) {
-		// Without this boundary an unhandled throw (a D1/R2 hiccup mid-upload, a
-		// read-path error crossing the CachedStore RPC) surfaces to Cloudflare as
-		// a raw 1101 with no logged stack. caughtResponse logs the stack and
-		// returns a controlled 500/503 so client retry paths engage.
-		return caughtResponse('cache-api unhandled', request, e);
-	}
+	return observeRequest(request, env, 'gateway', async () => {
+		try {
+			return await handleCacheApiInner(request, env, ctx);
+		} catch (e) {
+			// Without this boundary an unhandled throw (a D1/R2 hiccup mid-upload, a
+			// read-path error crossing the CachedStore RPC) surfaces to Cloudflare as
+			// a raw 1101 with no logged stack. caughtResponse logs the stack and
+			// returns a controlled 500/503 so client retry paths engage.
+			return caughtResponse('cache-api unhandled', request, e);
+		}
+	});
 }
 
 async function handleCacheApiInner(

@@ -27,9 +27,9 @@ function fakeDb(row: CacheRow | null): { db: D1Database; reads: () => number } {
 	const db = {
 		prepare: () => ({
 			bind: () => ({
-				first: async () => {
+				all: async () => {
 					reads++;
-					return row;
+					return { results: row ? [row] : [] };
 				}
 			})
 		})

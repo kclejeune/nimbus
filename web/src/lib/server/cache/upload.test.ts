@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { testDatabase } from './test-db';
+import { stubDigestStream, testDatabase } from './test-db';
 import { invalidateCacheRow } from './cache-lookup';
 import { Semaphore } from './platform';
 import {
@@ -13,25 +13,7 @@ import {
 	type CdcManifest
 } from './upload';
 
-vi.mock('./compression', async () => {
-	const { Semaphore } = await import('./platform');
-	const digest = async (data: Uint8Array) =>
-		Buffer.from(await crypto.subtle.digest('SHA-256', data as BufferSource)).toString('hex');
-	return {
-		wasmMemorySlots: new Semaphore(1),
-		initZstd: async () => {},
-		zstdDecompress: (data: Uint8Array) => data,
-		extensionFor: () => '.zst',
-		uploadCompressionFor: () => 'zstd',
-		compressBuffer: async (data: Uint8Array) => ({
-			data,
-			narHash: await digest(data),
-			narSize: data.length,
-			fileHash: await digest(data),
-			fileSize: data.length
-		})
-	};
-});
+vi.mock('./compression', async () => (await import('./test-db')).fakeCompression());
 
 describe('upload lifecycle', () => {
 	let fixture: ReturnType<typeof testDatabase>;
@@ -118,45 +100,26 @@ describe('upload lifecycle', () => {
 		const before = fixture.totalChanges();
 		expect(
 			await (await handleCdcQuery(env, undefined, 'https://cache.test', manifest)).json()
-		).toEqual({ kind: 'pending', missing_chunk_hashes: [hash] });
+		).toEqual({ kind: 'pending', missing_chunk_hashes: [hash], proofs: {} });
 		expect(fixture.totalChanges()).toBe(before);
 		expect(put).not.toHaveBeenCalled();
 	});
 
 	it('rejects an oversized compressed chunk before reading or storing it', async () => {
 		const cancel = vi.fn();
-		const req = new Request('https://cache.test/chunk', {
+		const req = new Request('https://cache.test/chunk?cache=test', {
 			method: 'PUT',
 			body: new ReadableStream({ cancel }),
 			duplex: 'half',
 			headers: { 'Content-Length': String(18 * 1024 * 1024) }
 		} as RequestInit);
-		expect((await handleCdcChunkPut(req, env, hash)).status).toBe(413);
+		expect((await handleCdcChunkPut(req, env, hash, 'test')).status).toBe(413);
 		expect(cancel).toHaveBeenCalledOnce();
 		expect(put).not.toHaveBeenCalled();
 	});
 
 	it('leaves mismatched streaming bytes tracked and unheld for GC', async () => {
-		class DigestStream extends WritableStream<BufferSource> {
-			digest: Promise<ArrayBuffer>;
-			constructor() {
-				const hash = createHash('sha256');
-				let resolve!: (value: ArrayBuffer) => void;
-				const digest = new Promise<ArrayBuffer>((r) => {
-					resolve = r;
-				});
-				super({
-					write: (value) => {
-						hash.update(new Uint8Array(value as ArrayBuffer));
-					},
-					close: () => {
-						resolve(Uint8Array.from(hash.digest()).buffer);
-					}
-				});
-				this.digest = digest;
-			}
-		}
-		vi.stubGlobal('crypto', { subtle: crypto.subtle, DigestStream });
+		stubDigestStream();
 		const body = new Response(raw).body!;
 		expect(
 			(

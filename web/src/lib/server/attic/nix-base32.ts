@@ -52,6 +52,11 @@ export function hexToBytes(hex: string): Uint8Array {
 const HEX64 = /^[0-9a-f]{64}$/;
 const NIX_BASE32_52 = /^[0-9a-df-np-sv-z]{52}$/;
 
+/** The digest without its `sha256:` prefix (untouched if it has none). */
+export function stripSha256(hash: string): string {
+	return hash.startsWith('sha256:') ? hash.slice('sha256:'.length) : hash;
+}
+
 /**
  * The raw hex digest of a typed sha256 hash ("sha256:<64 hex>" or
  * "sha256:<52 nix-base32>"); null for any other format. The inverse
