@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -85,17 +86,18 @@ func (e *Error) Error() string {
 // do sends the request, retrying transient failures with jittered backoff:
 // 5xx responses (a D1 replica blip, a Workers restart), 429s from the edge
 // rate limits (honoring Retry-After), and transport errors short of context
-// cancellation (a pooled connection reset by the edge — every endpoint is
-// idempotent, so replaying is safe even if the request was partially sent).
+// cancellation. Safe methods replay by default; a POST replays only when its
+// caller marked the context with withReplay, so creation and rename
+// operations (token mint, device auth, cache rename) get exactly one attempt.
 // Only replayable bodies retry: NewRequest sets GetBody for in-memory
 // readers and UploadPath supplies a re-dump factory; a body without GetBody
 // gets a single attempt. Returns the attempt count for error reporting.
 func (c *Client) do(req *http.Request) (*http.Response, int, error) {
-	replayable := req.Body == nil || req.GetBody != nil
+	retry := canReplay(req) && (req.Body == nil || req.GetBody != nil)
 	backoff := 500 * time.Millisecond
 	for attempt := 1; ; attempt++ {
 		res, err := c.hc.Do(req)
-		if !replayable || attempt >= 3 {
+		if !retry || attempt >= 3 {
 			return res, attempt, err
 		}
 		// Terminal outcomes first: cancellation (other transport errors replay
@@ -109,13 +111,21 @@ func (c *Client) do(req *http.Request) (*http.Response, int, error) {
 		}
 		wait := backoff + rand.N(backoff)
 		if err == nil {
-			if ra := retryAfter(res); ra > 0 {
-				wait = ra
+			if ra, tooLong := retryAfter(res); tooLong {
+				return res, attempt, nil
+			} else if ra > 0 {
+				wait = ra + rand.N(backoff)
 			}
 			// Drain (bounded) before closing so the transport sees EOF and can
 			// reuse the connection instead of paying a fresh TLS handshake.
 			_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 256<<10))
 			_ = res.Body.Close()
+		}
+
+		select {
+		case <-req.Context().Done():
+			return nil, attempt, req.Context().Err()
+		case <-time.After(wait):
 		}
 		if req.GetBody != nil {
 			body, err := req.GetBody()
@@ -124,23 +134,49 @@ func (c *Client) do(req *http.Request) (*http.Response, int, error) {
 			}
 			req.Body = body
 		}
-		select {
-		case <-req.Context().Done():
-			return nil, attempt, req.Context().Err()
-		case <-time.After(wait):
-		}
 		backoff *= 2
 	}
 }
 
-// retryAfter parses an integer-seconds Retry-After header, capped so a
-// misbehaving server cannot stall a push.
-func retryAfter(res *http.Response) time.Duration {
-	secs, err := strconv.Atoi(res.Header.Get("Retry-After"))
-	if err != nil || secs <= 0 {
-		return 0
+type replayKey struct{}
+
+// withReplay marks a POST as safe to replay: the operation is idempotent by
+// construction (content-addressed uploads, read-only batch queries).
+func withReplay(ctx context.Context) context.Context {
+	return context.WithValue(ctx, replayKey{}, true)
+}
+
+// canReplay reports whether a request may be sent more than once: idempotent
+// methods always, a POST only when its caller marked the context.
+func canReplay(req *http.Request) bool {
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete:
+		return true
 	}
-	return min(time.Duration(secs)*time.Second, 30*time.Second)
+	v, _ := req.Context().Value(replayKey{}).(bool)
+	return v
+}
+
+// Longest Retry-After honored by a retry; beyond it the response is returned
+// as-is rather than waiting (or, worse, retrying too early).
+const maxRetryAfter = 5 * time.Minute
+
+func retryAfter(res *http.Response) (wait time.Duration, tooLong bool) {
+	value := res.Header.Get("Retry-After")
+	if secs, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if secs <= 0 {
+			return 0, false
+		}
+		if secs > int64(maxRetryAfter/time.Second) {
+			return maxRetryAfter, true
+		}
+		return time.Duration(secs) * time.Second, false
+	}
+	if deadline, err := http.ParseTime(value); err == nil {
+		wait = max(0, time.Until(deadline))
+		return wait, wait > maxRetryAfter
+	}
+	return 0, false
 }
 
 func (c *Client) newRequest(
@@ -236,38 +272,75 @@ func (c *Client) GetCacheInfo(ctx context.Context, cache string) (*CacheInfo, er
 	return info, nil
 }
 
+// Rounds of re-querying paths the server could not probe within its
+// per-request upstream budget before they are pushed as missing.
+const deferredQueryRounds = 3
+
+// GetMissingPaths reports which of the closure's hashes need uploading. The
+// server lists paths it could not probe in time under both missing_paths (so
+// attic clients push them) and deferred_paths; a nimbus client re-asks about
+// the deferred ones, so upstream-available paths are not uploaded merely
+// because one preflight ran out of probe time.
 func (c *Client) GetMissingPaths(
 	ctx context.Context,
 	cache string,
 	hashes []string,
 	ignoreUpstreamFilter bool,
 ) ([]string, error) {
-	// Match the server's per-request cap without limiting closure size.
-	const batchSize = 10_000
 	var missing []string
-	for start := 0; start < len(hashes); start += batchSize {
-		var out struct {
-			MissingPaths []string `json:"missing_paths"`
+	for round := 0; ; round++ {
+		var roundMissing []string
+		var deferred []string
+		for start := 0; start < len(hashes); start += missingPathsBatch {
+			batch := hashes[start:min(start+missingPathsBatch, len(hashes))]
+			m, d, err := c.queryMissingPaths(ctx, cache, batch, ignoreUpstreamFilter)
+			if err != nil {
+				return nil, err
+			}
+			roundMissing = append(roundMissing, m...)
+			deferred = append(deferred, d...)
 		}
-		body := map[string]any{
-			"cache":             cache,
-			"store_path_hashes": hashes[start:min(start+batchSize, len(hashes))],
+		if len(deferred) == 0 || round == deferredQueryRounds {
+			return append(missing, roundMissing...), nil
 		}
-		if ignoreUpstreamFilter {
-			body["ignore_upstream_cache_filter"] = true
+		isDeferred := make(map[string]bool, len(deferred))
+		for _, h := range deferred {
+			isDeferred[h] = true
 		}
-		if err := c.doJSON(
-			ctx,
-			http.MethodPost,
-			"/_api/v1/get-missing-paths",
-			body,
-			&out,
-		); err != nil {
-			return nil, err
-		}
-		missing = append(missing, out.MissingPaths...)
+		missing = append(
+			missing,
+			slices.DeleteFunc(roundMissing, func(h string) bool { return isDeferred[h] })...)
+		hashes = deferred
 	}
-	return missing, nil
+}
+
+// Match the server's per-request cap without limiting closure size.
+const missingPathsBatch = 10_000
+
+func (c *Client) queryMissingPaths(
+	ctx context.Context,
+	cache string,
+	hashes []string,
+	ignoreUpstreamFilter bool,
+) (missing, deferred []string, err error) {
+	var out struct {
+		MissingPaths  []string `json:"missing_paths"`
+		DeferredPaths []string `json:"deferred_paths"`
+	}
+	body := map[string]any{"cache": cache, "store_path_hashes": hashes}
+	if ignoreUpstreamFilter {
+		body["ignore_upstream_cache_filter"] = true
+	}
+	if err := c.doJSON(
+		withReplay(ctx),
+		http.MethodPost,
+		"/_api/v1/get-missing-paths",
+		body,
+		&out,
+	); err != nil {
+		return nil, nil, err
+	}
+	return out.MissingPaths, out.DeferredPaths, nil
 }
 
 // NarInfo describes an upload, matching the server's UploadNarInfo shape.
@@ -330,8 +403,9 @@ func (c *Client) UploadPath(
 
 // ChunkDesc describes one CDC chunk: raw sha256 hex and uncompressed size.
 type ChunkDesc struct {
-	Hash string `json:"hash"`
-	Size int64  `json:"size"`
+	Hash  string `json:"hash"`
+	Size  int64  `json:"size"`
+	Proof string `json:"proof,omitempty"`
 }
 
 type cdcManifest struct {
@@ -345,6 +419,9 @@ type cdcManifest struct {
 type ChunkQueryResult struct {
 	Kind               string   `json:"kind"`
 	MissingChunkHashes []string `json:"missing_chunk_hashes"`
+	// Possession receipts for chunks the server could attribute to a cache
+	// this token may read (or the destination itself), keyed by chunk hash.
+	Proofs map[string]string `json:"proofs"`
 }
 
 // QueryChunks reports which of the NAR's chunks the server is missing,
@@ -357,14 +434,20 @@ func (c *Client) QueryChunks(
 ) (*ChunkQueryResult, error) {
 	out := &ChunkQueryResult{}
 	body := cdcManifest{NarInfo: info, NarSize: narSize, Chunks: chunks}
-	if err := c.doJSON(ctx, http.MethodPost, "/_api/v1/upload-path/chunks", body, out); err != nil {
+	if err := c.doJSON(
+		withReplay(ctx),
+		http.MethodPost,
+		"/_api/v1/upload-path/chunks",
+		body,
+		out,
+	); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
 // UploadChunk stores one zstd-compressed chunk under its raw-content hash.
-func (c *Client) UploadChunk(ctx context.Context, cache, hash string, data []byte) error {
+func (c *Client) UploadChunk(ctx context.Context, cache, hash string, data []byte) (string, error) {
 	req, err := c.newRequest(
 		ctx,
 		http.MethodPut,
@@ -372,14 +455,23 @@ func (c *Client) UploadChunk(ctx context.Context, cache, hash string, data []byt
 		bytes.NewReader(data),
 	)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	res, attempts, err := c.do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return decodeOrError(res, nil, attempts)
+	var out struct {
+		Proof string `json:"proof"`
+	}
+	if err := decodeOrError(res, &out, attempts); err != nil {
+		return "", err
+	}
+	if out.Proof == "" {
+		return "", errors.New("server returned no chunk possession proof")
+	}
+	return out.Proof, nil
 }
 
 // CompleteChunks assembles the NAR from its chunk references. When the server
@@ -396,7 +488,7 @@ func (c *Client) CompleteChunks(
 		return nil, nil, err
 	}
 	req, err := c.newRequest(
-		ctx,
+		withReplay(ctx),
 		http.MethodPost,
 		"/_api/v1/upload-path/chunks/complete",
 		bytes.NewReader(data),

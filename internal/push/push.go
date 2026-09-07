@@ -24,9 +24,25 @@ import (
 // NAR with FastCDC itself and uploads only the chunks the server is missing.
 const chunkedThreshold = 100 * 1024 * 1024
 
-// Concurrent compress+PUT workers per chunked NAR; also bounds how many raw
-// chunks (≤16 MiB each) are buffered at once.
-const chunkUploadJobs = 8
+// Shared compress+PUT budget across every path in a push. Chunker buffers
+// are per path; owned upload chunks (≤16 MiB each) use these four slots.
+const chunkUploadJobs = 4
+
+var uploadSlots = make(chan struct{}, chunkUploadJobs)
+
+// One encoder for the process, with one state per upload slot: EncodeAll is
+// safe for concurrent use, and a per-path encoder would multiply the states
+// (and their memory) by the number of paths in flight. SpeedBetterCompression
+// is close to the server's zstd level at a fraction of SpeedBestCompression's
+// CPU; the client's choice is what gets stored for chunked NARs, so don't
+// drop below this without considering ratio.
+var chunkEncoder = sync.OnceValues(func() (*zstd.Encoder, error) {
+	return zstd.NewWriter(
+		nil,
+		zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
+		zstd.WithEncoderConcurrency(chunkUploadJobs),
+	)
+})
 
 type Pusher struct {
 	Client *api.Client
@@ -334,6 +350,13 @@ func (p *Pusher) uploadChunked(ctx context.Context, info nix.PathInfo) (*api.Upl
 	for _, h := range query.MissingChunkHashes {
 		missing[h] = true
 	}
+	// Receipts for chunks the server already attributes to a cache this token
+	// may read: those chunks are neither uploaded nor re-verified.
+	for i := range descs {
+		if proof, ok := query.Proofs[descs[i].Hash]; ok && !missing[descs[i].Hash] {
+			descs[i].Proof = proof
+		}
+	}
 
 	for attempt := 0; ; attempt++ {
 		if err := p.uploadMissingChunks(ctx, info, descs, missing); err != nil {
@@ -373,14 +396,10 @@ func (p *Pusher) uploadMissingChunks(
 	if len(missing) == 0 {
 		return nil
 	}
-	// SpeedBetterCompression is close to the server's zstd level at a fraction
-	// of SpeedBestCompression's CPU; the client's choice is what gets stored
-	// for chunked NARs, so don't drop below this without considering ratio.
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
+	enc, err := chunkEncoder()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = enc.Close() }()
 
 	// Compression and PUTs fan out across chunks (bounded, so at most
 	// chunkUploadJobs raw chunks are held in memory); the dump/cut/hash pass
@@ -388,7 +407,7 @@ func (p *Pusher) uploadMissingChunks(
 	// complete call is only sent after every upload lands.
 	uctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	sem := make(chan struct{}, chunkUploadJobs)
+	sem := uploadSlots
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var uploadErr error
@@ -403,6 +422,7 @@ func (p *Pusher) uploadMissingChunks(
 
 	idx := 0
 	sent := make(map[string]bool, len(missing))
+	proofs := make(map[string]string, len(missing))
 	err = p.eachChunk(uctx, info.Path, func(chunk []byte) error {
 		if idx >= len(descs) {
 			return errors.New("store path changed between passes")
@@ -418,22 +438,27 @@ func (p *Pusher) uploadMissingChunks(
 		}
 		sent[desc.Hash] = true
 		// The chunker reuses its buffer across cuts; copy before handing off.
-		owned := bytes.Clone(chunk)
 		select {
 		case sem <- struct{}{}:
 		case <-uctx.Done():
 			return context.Cause(uctx)
 		}
+		owned := bytes.Clone(chunk)
 		wg.Go(func() {
 			defer func() { <-sem }()
-			if err := p.Client.UploadChunk(
+			proof, err := p.Client.UploadChunk(
 				uctx,
 				p.Cache,
 				desc.Hash,
 				enc.EncodeAll(owned, nil),
-			); err != nil {
+			)
+			if err != nil {
 				fail(fmt.Errorf("uploading chunk %s: %w", desc.Hash[:12], err))
+				return
 			}
+			mu.Lock()
+			proofs[desc.Hash] = proof
+			mu.Unlock()
 		})
 		return nil
 	})
@@ -448,6 +473,11 @@ func (p *Pusher) uploadMissingChunks(
 	}
 	if idx != len(descs) {
 		return errors.New("store path changed between passes")
+	}
+	for i := range descs {
+		if proof, ok := proofs[descs[i].Hash]; ok {
+			descs[i].Proof = proof
+		}
 	}
 	return nil
 }
