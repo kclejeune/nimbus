@@ -443,6 +443,31 @@ func (c *Client) QueryChunks(
 	); err != nil {
 		return nil, err
 	}
+	if out.Kind == "deduplicated" {
+		return out, nil
+	}
+	if out.Kind != "pending" {
+		return nil, fmt.Errorf("unexpected chunk query response kind %q", out.Kind)
+	}
+	// Older Workers omit proofs entirely; an empty map is valid when every
+	// chunk needs uploading. Stop before spending bandwidth on incompatible PUTs.
+	if out.Proofs == nil {
+		return nil, errors.New(
+			"server does not support chunk possession proofs; upgrade the nimbus Worker to v0.6.1 or later before uploading large NARs",
+		)
+	}
+	missing := make(map[string]bool, len(out.MissingChunkHashes))
+	for _, hash := range out.MissingChunkHashes {
+		missing[hash] = true
+	}
+	for _, chunk := range chunks {
+		if !missing[chunk.Hash] && out.Proofs[chunk.Hash] == "" {
+			return nil, fmt.Errorf(
+				"server returned neither a possession proof nor an upload request for chunk %s",
+				chunk.Hash,
+			)
+		}
+	}
 	return out, nil
 }
 
@@ -469,7 +494,9 @@ func (c *Client) UploadChunk(ctx context.Context, cache, hash string, data []byt
 		return "", err
 	}
 	if out.Proof == "" {
-		return "", errors.New("server returned no chunk possession proof")
+		return "", errors.New(
+			"server returned no chunk possession proof; ensure all serving nimbus Worker versions are v0.6.1 or later",
+		)
 	}
 	return out.Proof, nil
 }

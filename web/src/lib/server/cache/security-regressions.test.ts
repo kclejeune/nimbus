@@ -74,18 +74,24 @@ describe('audit security regressions', () => {
 		);
 		expect(await findNarWithChunks(fixture.db, [manifest.nar_info.nar_hash])).toBeNull();
 	});
-	it('rejects foreign chunks even when the manifest claims a different whole hash', async () => {
-		expect((await handleBufferedUpload(env, manifest.nar_info, 1, 'zstd', raw)).status).toBe(200);
-		const attack = {
-			...manifest,
-			nar_info: { ...manifest.nar_info, cache: 'attacker', nar_hash: `sha256:${'b'.repeat(64)}` }
-		};
-		expect((await handleCdcComplete(env, undefined, 'https://cache.test', attack)).status).toBe(
-			403
-		);
-		const found = await findNarWithChunks(fixture.db, [attack.nar_info.nar_hash]);
-		expect(found).toBeNull();
-	});
+	it.each([undefined, 'invalid-receipt'])(
+		'rejects foreign chunks with an actionable receipt error (proof=%s)',
+		async (proof) => {
+			expect((await handleBufferedUpload(env, manifest.nar_info, 1, 'zstd', raw)).status).toBe(200);
+			const attack = {
+				...manifest,
+				nar_info: { ...manifest.nar_info, cache: 'attacker', nar_hash: `sha256:${'b'.repeat(64)}` },
+				chunks: manifest.chunks.map((chunk) => ({ ...chunk, proof }))
+			};
+			const response = await handleCdcComplete(env, undefined, 'https://cache.test', attack);
+			expect(response.status).toBe(403);
+			expect(await response.text()).toContain(
+				proof ? 'Invalid or expired chunk possession proof' : 'upgrade the nimbus CLI to v0.6.1'
+			);
+			const found = await findNarWithChunks(fixture.db, [attack.nar_info.nar_hash]);
+			expect(found).toBeNull();
+		}
+	);
 	it('upstream outages return uncached 503 instead of poisoning the negative cache', async () => {
 		fixture.sqlite.exec(
 			"INSERT INTO upstream (url,public_key,ttl,default_mode,enforced,position,nix_default,created_at) VALUES ('https://upstream.test','unused',3600,'redirect',0,0,0,datetime('now'))"
@@ -164,6 +170,35 @@ describe('audit security regressions', () => {
 			// An identical guarded re-publish changes no row yet is not a
 			// rejection: the attachment it asked for is in place.
 			if (change === 'valid') expect(await createObject(fixture.db, object)).toBe(true);
+		}
+	);
+	it.each([true, false])(
+		'accounts for every chunk on re-query (valid receipt=%s)',
+		async (valid) => {
+			await handleBufferedUpload(env, manifest.nar_info, 1, 'zstd', raw);
+			const proof = valid ? await issueChunkProof(env, { id: 2, keypair: '' }, hash, 3) : 'forged';
+			const otherHash = 'e'.repeat(64);
+			const query = {
+				...manifest,
+				nar_info: { ...manifest.nar_info, cache: 'attacker' },
+				nar_size: 6,
+				chunks: [
+					{ hash, size: 3, proof },
+					{ hash: otherHash, size: 3 }
+				]
+			};
+			const response = await handleCdcQuery(env, undefined, 'https://cache.test', query);
+			expect(response.status).toBe(200);
+			const result = (await response.json()) as {
+				kind: string;
+				missing_chunk_hashes: string[];
+				proofs: Record<string, string>;
+			};
+			expect(result.kind).toBe('pending');
+			expect(result.proofs).toEqual(valid ? { [hash]: proof } : {});
+			expect(result.missing_chunk_hashes.sort()).toEqual(
+				(valid ? [otherHash] : [hash, otherHash]).sort()
+			);
 		}
 	);
 	it('reuses stored chunks only through read entitlement, never through push access alone', async () => {

@@ -75,6 +75,25 @@ npx wrangler r2 bucket create attic-cache
 Schema migrations are applied automatically by `npm run deploy` (or manually
 with `npm run migrate`).
 
+### Upgrading across v0.6.1
+
+v0.6.1 requires cache-bound possession receipts for chunked uploads. Upgrade
+the Worker and CLI together: an older CLI cannot complete new chunked uploads
+against the new Worker, and the new CLI cannot upload chunks to an older
+Worker. Downloads and ordinary whole-NAR uploads do not use this receipt protocol.
+
+Apply `2026-09-07-chunk-repair.sql` before deploying the new Worker. The normal
+`npm run deploy` path enforces that order. Once the Worker deployment finishes,
+update CLI installations to v0.6.1 or later before resuming large pushes. A
+GitHub release publishes CLI binaries; it does not verify Worker deployment or
+D1 migration state. Avoid a gradual rollout mixing pre-v0.6.1 and newer Workers
+while chunked uploads are running.
+
+Do not disable receipt verification to accommodate old clients: knowing a
+private chunk's hash must not let another cache claim its bytes. Falling back
+to a whole-NAR upload is also unsuitable for the large NARs that require
+chunking to fit the request-body limit.
+
 ## Authentication
 
 Configure at least one sign-in method. The **first user to sign in becomes

@@ -33,7 +33,8 @@ matches that release. Retrying an old workflow run uses its old workflow code;
 use the manual trigger to run the updated code.
 
 Resuming the bump does not publish a missing release or retrigger CI for an
-existing tag. In particular, the failed August 31, 2026 run created `v0.6.0`
-using `GITHUB_TOKEN`, so that tag has no associated release CI run. Publishing
-that historical version needs a separate recovery; do not delete or move its
-tag as part of credential setup.
+existing tag. The failed August 31, 2026 run created `v0.6.0` using
+`GITHUB_TOKEN`, so that tag has no associated release CI run. Its release was
+backfilled on September 7, 2026 using GoReleaser artifacts built and tested
+from the original tagged commit; the tag was preserved and `v0.6.1` remained
+latest. Do not delete or move existing tags as part of credential setup.

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -129,6 +130,85 @@ func TestRetryAfterFloor(t *testing.T) {
 		if got < time.Minute {
 			t.Fatalf("Retry-After %s shortened to %v", value, got)
 		}
+	}
+}
+
+func TestChunkQueryWorkerCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		wantError bool
+	}{
+		{"old worker", `{"kind":"pending","missing_chunk_hashes":["hash"]}`, true},
+		{"old worker with cached chunks", `{"kind":"pending","missing_chunk_hashes":[]}`, true},
+		{"null proofs", `{"kind":"pending","proofs":null}`, true},
+		{"new worker needs bytes", `{"kind":"pending","missing_chunk_hashes":["hash"],"proofs":{}}`, false},
+		{"new worker grants receipt", `{"kind":"pending","missing_chunk_hashes":[],"proofs":{"hash":"receipt"}}`, false},
+		{"already attached", `{"kind":"deduplicated"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := New("https://cache.test", "")
+			c.hc.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodPost || r.URL.Path != "/_api/v1/upload-path/chunks" {
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				return &http.Response{
+					StatusCode: 200,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(tc.body)),
+					Request:    r,
+				}, nil
+			})
+			got, err := c.QueryChunks(
+				t.Context(),
+				&NarInfo{Cache: "test"},
+				3,
+				[]ChunkDesc{{Hash: "hash", Size: 3}},
+			)
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "upgrade the nimbus Worker") ||
+					got != nil {
+					t.Fatalf(
+						"expected actionable compatibility error, got result=%v err=%v",
+						got,
+						err,
+					)
+				}
+			} else if err != nil || got == nil {
+				t.Fatalf("compatible query rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestChunkQueryRejectsIncompleteResponses(t *testing.T) {
+	for _, body := range []string{
+		`{}`,
+		`{"kind":"unknown","proofs":{}}`,
+		`{"kind":"pending","missing_chunk_hashes":[],"proofs":{}}`,
+		`{"kind":"pending","missing_chunk_hashes":[],"proofs":{"hash":""}}`,
+		`{"kind":"pending","missing_chunk_hashes":["other"],"proofs":{}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			c := New("https://cache.test", "")
+			c.hc.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: 200,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Request:    r,
+				}, nil
+			})
+			got, err := c.QueryChunks(
+				t.Context(),
+				&NarInfo{Cache: "test"},
+				3,
+				[]ChunkDesc{{Hash: "hash", Size: 3}},
+			)
+			if err == nil || got != nil {
+				t.Fatalf("accepted incomplete response: result=%v err=%v", got, err)
+			}
+		})
 	}
 }
 

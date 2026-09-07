@@ -872,16 +872,17 @@ export async function handleCdcQuery(
 	// Chunks without a valid receipt need either bytes or an entitlement.
 	// Replica read: a stale miss only costs the client one chunk upload.
 	const unproven = new Map<string, number>();
+	const proofs: Record<string, string> = {};
 	const verified = await Promise.all(body.chunks.map((c) => verifyChunkProof(env, cache, c)));
 	body.chunks.forEach((chunk, i) => {
-		if (!verified[i]) unproven.set(chunk.hash, chunk.size);
+		if (verified[i]) proofs[chunk.hash] = chunk.proof!;
+		else unproven.set(chunk.hash, chunk.size);
 	});
 	const holders = await db.cachesHoldingChunks(
 		db.readSession(env.ATTIC_DB),
 		[...unproven.keys()].map((h) => `sha256:${h}`),
 		'zstd'
 	);
-	const proofs: Record<string, string> = {};
 	const missing: string[] = [];
 	await Promise.all(
 		[...unproven].map(async ([hash, size]) => {
@@ -1094,7 +1095,14 @@ export async function handleCdcComplete(
 	}
 
 	const proven = await Promise.all(body.chunks.map((c) => verifyChunkProof(env, cache, c)));
-	if (proven.includes(false)) return errorResponse(403, 'Chunk possession proof required');
+	if (proven.includes(false)) {
+		return errorResponse(
+			403,
+			body.chunks.some((c) => !c.proof)
+				? 'Chunk possession proof required; upgrade the nimbus CLI to v0.6.1 or later and retry the push'
+				: 'Invalid or expired chunk possession proof; retry the push to obtain fresh proofs'
+		);
+	}
 
 	// Lock chunks in one batch round-trip (deduplicating repeats within the
 	// NAR: one lock per unique row). No replica probe here, unlike
