@@ -12,6 +12,7 @@ import (
 
 	"github.com/kclejeune/nimbus/internal/api"
 	"github.com/kclejeune/nimbus/internal/config"
+	"github.com/kclejeune/nimbus/internal/securefile"
 )
 
 func useCmd() *cobra.Command {
@@ -363,7 +364,7 @@ func removeNetrc(path, host string) (bool, error) {
 	if len(kept) > 0 {
 		content = strings.Join(kept, "\n") + "\n"
 	}
-	return true, os.WriteFile(path, []byte(content), 0o600)
+	return true, securefile.Write(path, []byte(content))
 }
 
 // upsertNetrc replaces or appends the machine entry for host.
@@ -383,5 +384,5 @@ func upsertNetrc(path, host, token string) error {
 		return err
 	}
 	kept = append(kept, fmt.Sprintf("machine %s password %s", host, token))
-	return os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0o600)
+	return securefile.Write(path, []byte(strings.Join(kept, "\n")+"\n"))
 }

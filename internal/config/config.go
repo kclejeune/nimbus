@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kclejeune/nimbus/internal/securefile"
+
 	"github.com/nil-go/konf"
 	"github.com/nil-go/konf/provider/env"
 	toml "github.com/pelletier/go-toml/v2"
@@ -207,7 +209,7 @@ func (c *Config) Save(path string) error {
 		return err
 	}
 	// Tokens live in here; keep it private.
-	return os.WriteFile(path, data, 0o600)
+	return securefile.Write(path, data)
 }
 
 // CacheRef is a resolved "server:cache" or bare "cache" reference.
