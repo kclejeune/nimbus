@@ -119,7 +119,7 @@
 		"tailwindcss": "^4.3.0",
 		"typescript": "^6.0.3",
 		"vite": "^8.2.1",
-		"vitest": "^4.1.10",
+		"vitest": "^5.0.0",
 		"wireit": "^0.14.13",
 		"wrangler": "^4.120.0"
 	},
