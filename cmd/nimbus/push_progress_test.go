@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -20,8 +21,40 @@ func TestPushProgressModelTracksConcurrentPaths(t *testing.T) {
 		totalBytes:     3 * 1024,
 		alreadyPresent: 4,
 	})
-	m = updatePushProgressModel(t, m, pushPathStartedMsg("/nix/store/aaa-first"))
-	m = updatePushProgressModel(t, m, pushPathStartedMsg("/nix/store/bbb-second"))
+	m = updatePushProgressModel(
+		t,
+		m,
+		pushPathStartedMsg{path: "/nix/store/aaa-first", narSize: 1024},
+	)
+	m = updatePushProgressModel(
+		t,
+		m,
+		pushPathStartedMsg{path: "/nix/store/bbb-second", narSize: 2048},
+	)
+	m = updatePushProgressModel(
+		t,
+		m,
+		pushPathProgressedMsg{path: "/nix/store/bbb-second", sent: 512},
+	)
+	m = updatePushProgressModel(
+		t,
+		m,
+		pushPathProgressedMsg{path: "/nix/store/aaa-first", sent: 4096},
+	)
+
+	live := ansi.Strip(m.View().Content)
+	for _, want := range []string{
+		"0/2 paths  1.5 KiB/3.0 KiB",
+		"aaa-first",
+		"100%  1.0 KiB/1.0 KiB",
+		"bbb-second",
+		" 25%  512 B/2.0 KiB",
+	} {
+		if !strings.Contains(live, want) {
+			t.Errorf("live view %q does not contain %q", live, want)
+		}
+	}
+
 	m = updatePushProgressModel(t, m, pushPathFinishedMsg(push.PathProgress{
 		Path:    "/nix/store/aaa-first",
 		NarSize: 1024,
@@ -88,6 +121,54 @@ func TestPushProgressModelStoppedBeforeCompletion(t *testing.T) {
 	view := ansi.Strip(m.View().Content)
 	if !strings.Contains(view, "Stopped after 1/3 paths") {
 		t.Fatalf("final view = %q", view)
+	}
+}
+
+func TestPushProgressModelScrollsFinishedPaths(t *testing.T) {
+	m := newPushProgressModel()
+	m = updatePushProgressModel(t, m, pushReadyMsg{total: 1, totalBytes: 1024})
+	m = updatePushProgressModel(
+		t,
+		m,
+		pushPathStartedMsg{path: "/nix/store/aaa-first", narSize: 1024},
+	)
+	updated, cmd := m.Update(pushPathFinishedMsg(push.PathProgress{
+		Path:    "/nix/store/aaa-first",
+		NarSize: 1024,
+		Elapsed: time.Second,
+	}))
+	m = updated.(pushProgressModel)
+	if cmd == nil {
+		t.Fatal("finishing a path returned no command; expected a scrolled line")
+	}
+	if strings.Contains(ansi.Strip(m.View().Content), "aaa-first") {
+		t.Fatalf("finished path still in live view: %q", m.View().Content)
+	}
+	if got := ansi.Strip(fmt.Sprint(cmd())); !strings.Contains(got, "aaa-first (1.0 KiB/s)") {
+		t.Fatalf("scrolled line = %q, want the finished path", got)
+	}
+}
+
+func TestPushProgressModelFoldsExcessActivePaths(t *testing.T) {
+	m := newPushProgressModel()
+	m = updatePushProgressModel(t, m, pushReadyMsg{total: 20, totalBytes: 20})
+	for i := range maxActiveLines + 3 {
+		m = updatePushProgressModel(t, m, pushPathStartedMsg{
+			path:    fmt.Sprintf("/nix/store/%02d-path", i),
+			narSize: 1,
+		})
+	}
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, "+3 more uploading") {
+		t.Fatalf("live view %q does not fold excess uploads", view)
+	}
+	if strings.Count(view, "-path") != maxActiveLines {
+		t.Fatalf(
+			"live view %q shows %d rows, want %d",
+			view,
+			strings.Count(view, "-path"),
+			maxActiveLines,
+		)
 	}
 }
 

@@ -66,14 +66,17 @@ type Pusher struct {
 	NewProgress func() ProgressReporter
 }
 
-// ProgressReporter receives coarse-grained push events. Upload completion is
-// intentionally path-based: simple uploads stream and chunked uploads make
-// multiple NAR passes, so counting transport bytes would exceed 100% on retry.
+// ProgressReporter receives push events. Every call may come from any upload
+// worker goroutine. PathProgressed carries an absolute byte count for the
+// path's current attempt: a transport retry replays the NAR from zero, so the
+// count can step backwards, and chunked uploads report pre-hashing and
+// already-present chunks as sent, so it never exceeds NarSize.
 type ProgressReporter interface {
 	Start(cache string)
 	Stage(label string)
 	Ready(total int, totalBytes int64, alreadyPresent int)
-	PathStarted(path string)
+	PathStarted(path string, narSize int64)
+	PathProgressed(path string, sent int64)
 	PathFinished(result PathProgress)
 	Stop()
 }
@@ -90,8 +93,12 @@ func (p PathProgress) Suffix() string {
 	if p.Deduplicated {
 		return "(deduplicated)"
 	}
-	speed := float64(p.NarSize) / max(p.Elapsed.Seconds(), 0.001)
-	return fmt.Sprintf("(%s/s)", FormatBytes(int64(speed)))
+	return "(" + FormatRate(p.NarSize, p.Elapsed) + ")"
+}
+
+// FormatRate renders n bytes over elapsed as a throughput, e.g. "4.1 MiB/s".
+func FormatRate(n int64, elapsed time.Duration) string {
+	return FormatBytes(int64(float64(n)/max(elapsed.Seconds(), 0.001))) + "/s"
 }
 
 // textProgress is the line-oriented reporter used when no interactive one is
@@ -102,10 +109,11 @@ type textProgress struct {
 	cache string
 }
 
-func (t *textProgress) Start(cache string) { t.cache = cache }
-func (t *textProgress) Stage(string)       {}
-func (t *textProgress) PathStarted(string) {}
-func (t *textProgress) Stop()              {}
+func (t *textProgress) Start(cache string)           { t.cache = cache }
+func (t *textProgress) Stage(string)                 {}
+func (t *textProgress) PathStarted(string, int64)    {}
+func (t *textProgress) PathProgressed(string, int64) {}
+func (t *textProgress) Stop()                        {}
 
 func (t *textProgress) Ready(total int, _ int64, alreadyPresent int) {
 	_, _ = fmt.Fprintf(t.out, "→ Pushing %d paths to %q (%d already present or upstream)\n",
@@ -202,8 +210,10 @@ func (p *Pusher) Push(ctx context.Context, paths []string) error {
 	for range jobs {
 		wg.Go(func() {
 			for info := range queue {
-				progress.PathStarted(info.Path)
-				result, err := p.uploadOne(ctx, info)
+				progress.PathStarted(info.Path, info.NarSize)
+				result, err := p.uploadOne(ctx, info, func(sent int64) {
+					progress.PathProgressed(info.Path, sent)
+				})
 				// Context cancellation (Ctrl-C) ends the worker; any other
 				// failure is per-path — report it like the success line, keep
 				// draining the queue, and aggregate for the exit status
@@ -257,16 +267,22 @@ func (p *Pusher) pathInfos(ctx context.Context, paths []string) ([]nix.PathInfo,
 	return nix.ClosurePathInfo(ctx, paths)
 }
 
-func (p *Pusher) uploadOne(ctx context.Context, info nix.PathInfo) (PathProgress, error) {
+// uploadOne uploads a single path, reporting absolute NAR bytes sent through
+// sent as the transfer advances.
+func (p *Pusher) uploadOne(
+	ctx context.Context,
+	info nix.PathInfo,
+	sent func(int64),
+) (PathProgress, error) {
 	start := time.Now()
 	pathProgress := PathProgress{Path: info.Path, NarSize: info.NarSize}
 
 	var result *api.UploadResult
 	var err error
 	if info.NarSize >= chunkedThreshold {
-		result, err = p.uploadChunked(ctx, info)
+		result, err = p.uploadChunked(ctx, info, sent)
 	} else {
-		result, err = p.uploadSimple(ctx, info)
+		result, err = p.uploadSimple(ctx, info, sent)
 	}
 	pathProgress.Elapsed = time.Since(start)
 	if err != nil {
@@ -304,14 +320,19 @@ func (p *Pusher) narInfo(info nix.PathInfo) *api.NarInfo {
 // uploadSimple streams the raw NAR; the server compresses. The body factory
 // re-dumps the path per call (store paths are immutable, so every dump yields
 // identical bytes), making the stream replayable for the transport-level 5xx
-// retry in api.Client.
-func (p *Pusher) uploadSimple(ctx context.Context, info nix.PathInfo) (*api.UploadResult, error) {
+// retry in api.Client. Each replay restarts the sent count from zero.
+func (p *Pusher) uploadSimple(
+	ctx context.Context,
+	info nix.PathInfo,
+	sent func(int64),
+) (*api.UploadResult, error) {
 	result, err := p.Client.UploadPath(ctx, p.narInfo(info), func() (io.ReadCloser, error) {
 		pr, pw := io.Pipe()
 		go func() {
 			pw.CloseWithError(nix.DumpPath(ctx, pw, info.Path))
 		}()
-		return pr, nil
+		sent(0)
+		return &countingReader{ReadCloser: pr, sent: sent}, nil
 	}, info.NarSize)
 	if err != nil {
 		return nil, fmt.Errorf("upload: %w", err)
@@ -321,8 +342,14 @@ func (p *Pusher) uploadSimple(ctx context.Context, info nix.PathInfo) (*api.Uplo
 
 // uploadChunked cuts the NAR with the server-compatible FastCDC, uploads only
 // the chunks the server lacks (compressed client-side), then assembles the
-// NAR from chunk references with a stateless complete call.
-func (p *Pusher) uploadChunked(ctx context.Context, info nix.PathInfo) (*api.UploadResult, error) {
+// NAR from chunk references with a stateless complete call. Progress counts
+// a chunk as sent once the server has it, whether it was uploaded here or
+// already present, so a mostly-deduplicated NAR jumps ahead after the query.
+func (p *Pusher) uploadChunked(
+	ctx context.Context,
+	info nix.PathInfo,
+	sent func(int64),
+) (*api.UploadResult, error) {
 	// Pass 1: boundaries and hashes only. Store paths are immutable, so the
 	// second dump below yields identical bytes; the hash check in pass 2
 	// guards the assumption.
@@ -350,6 +377,13 @@ func (p *Pusher) uploadChunked(ctx context.Context, info nix.PathInfo) (*api.Upl
 	for _, h := range query.MissingChunkHashes {
 		missing[h] = true
 	}
+	present := info.NarSize
+	for _, desc := range descs {
+		if missing[desc.Hash] {
+			present -= desc.Size
+		}
+	}
+	sent(present)
 	// Receipts for chunks the server already attributes to a cache this token
 	// may read: those chunks are neither uploaded nor re-verified.
 	for i := range descs {
@@ -359,7 +393,7 @@ func (p *Pusher) uploadChunked(ctx context.Context, info nix.PathInfo) (*api.Upl
 	}
 
 	for attempt := 0; ; attempt++ {
-		if err := p.uploadMissingChunks(ctx, info, descs, missing); err != nil {
+		if err := p.uploadMissingChunks(ctx, info, descs, missing, present, sent); err != nil {
 			return nil, err
 		}
 		result, stillMissing, err := p.Client.CompleteChunks(
@@ -386,12 +420,15 @@ func (p *Pusher) uploadChunked(ctx context.Context, info nix.PathInfo) (*api.Upl
 }
 
 // uploadMissingChunks re-dumps the NAR and uploads each chunk in the missing
-// set, zstd-compressed as a single frame.
+// set, zstd-compressed as a single frame. sent receives base plus the raw
+// bytes of every chunk the server has accepted so far.
 func (p *Pusher) uploadMissingChunks(
 	ctx context.Context,
 	info nix.PathInfo,
 	descs []api.ChunkDesc,
 	missing map[string]bool,
+	base int64,
+	sent func(int64),
 ) error {
 	if len(missing) == 0 {
 		return nil
@@ -421,7 +458,8 @@ func (p *Pusher) uploadMissingChunks(
 	}
 
 	idx := 0
-	sent := make(map[string]bool, len(missing))
+	uploaded := base
+	queued := make(map[string]bool, len(missing))
 	proofs := make(map[string]string, len(missing))
 	err = p.eachChunk(uctx, info.Path, func(chunk []byte) error {
 		if idx >= len(descs) {
@@ -433,10 +471,10 @@ func (p *Pusher) uploadMissingChunks(
 		if hex.EncodeToString(sum[:]) != desc.Hash {
 			return errors.New("store path changed between passes")
 		}
-		if !missing[desc.Hash] || sent[desc.Hash] {
+		if !missing[desc.Hash] || queued[desc.Hash] {
 			return nil
 		}
-		sent[desc.Hash] = true
+		queued[desc.Hash] = true
 		// The chunker reuses its buffer across cuts; copy before handing off.
 		select {
 		case sem <- struct{}{}:
@@ -458,6 +496,8 @@ func (p *Pusher) uploadMissingChunks(
 			}
 			mu.Lock()
 			proofs[desc.Hash] = proof
+			uploaded += desc.Size
+			sent(uploaded)
 			mu.Unlock()
 		})
 		return nil
@@ -480,6 +520,29 @@ func (p *Pusher) uploadMissingChunks(
 		}
 	}
 	return nil
+}
+
+// progressGranularity spaces countingReader reports: the transport reads in
+// 32 KiB pieces and every report is a synchronous hand-off to the renderer,
+// so reporting each read would throttle the upload on render cost.
+const progressGranularity = 1 << 20
+
+// countingReader reports the cumulative bytes the transport has consumed
+// from a NAR stream, once per progressGranularity and at end of stream.
+type countingReader struct {
+	io.ReadCloser
+	n, reported int64
+	sent        func(int64)
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	r.n += int64(n)
+	if r.n-r.reported >= progressGranularity || (err != nil && r.n > r.reported) {
+		r.reported = r.n
+		r.sent(r.n)
+	}
+	return n, err
 }
 
 // eachChunk streams the NAR dump through the FastCDC cutter.

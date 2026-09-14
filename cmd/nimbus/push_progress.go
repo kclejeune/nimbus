@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -70,8 +71,12 @@ func (r *ttyPushProgress) Ready(total int, totalBytes int64, alreadyPresent int)
 	})
 }
 
-func (r *ttyPushProgress) PathStarted(path string) {
-	r.program.Send(pushPathStartedMsg(path))
+func (r *ttyPushProgress) PathStarted(path string, narSize int64) {
+	r.program.Send(pushPathStartedMsg{path: path, narSize: narSize})
+}
+
+func (r *ttyPushProgress) PathProgressed(path string, sent int64) {
+	r.program.Send(pushPathProgressedMsg{path: path, sent: sent})
 }
 
 func (r *ttyPushProgress) PathFinished(result push.PathProgress) {
@@ -86,10 +91,37 @@ func (r *ttyPushProgress) Stop() {
 type (
 	pushStartMsg        struct{ cache string }
 	pushStageMsg        string
-	pushPathStartedMsg  string
 	pushPathFinishedMsg push.PathProgress
 	pushStopMsg         struct{}
 )
+
+type pushPathStartedMsg struct {
+	path    string
+	narSize int64
+}
+
+type pushPathProgressedMsg struct {
+	path string
+	sent int64
+}
+
+// activeUpload is one in-flight path; sent is clamped to size on receipt.
+type activeUpload struct {
+	path string
+	size int64
+	sent int64
+}
+
+func (a *activeUpload) fraction() float64 {
+	if a.size <= 0 {
+		return 0
+	}
+	return float64(a.sent) / float64(a.size)
+}
+
+// maxActiveLines bounds the live region so a large --jobs does not push the
+// summary off a short terminal; the remainder is folded into a count.
+const maxActiveLines = 8
 
 type pushReadyMsg struct {
 	total          int
@@ -100,6 +132,7 @@ type pushReadyMsg struct {
 type pushProgressModel struct {
 	spinner spinner.Model
 	bar     progress.Model
+	pathBar progress.Model
 
 	cache          string
 	stage          string
@@ -110,23 +143,26 @@ type pushProgressModel struct {
 	alreadyPresent int
 	completed      int
 	completedBytes int64
-	active         map[string]struct{}
-	last           string
-	failures       []string
-	started        time.Time
-	finished       time.Time
-	width          int
+	// active is in start order, which is the display order.
+	active   []*activeUpload
+	failures []string
+	started  time.Time
+	finished time.Time
+	width    int
 }
 
 func newPushProgressModel() pushProgressModel {
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(progressAccent))
 	bar := progress.New(progress.WithDefaultBlend(), progress.WithScaled(true))
 	bar.SetWidth(64)
+	pathBar := progress.New(progress.WithDefaultBlend(), progress.WithScaled(true))
+	pathBar.SetWidth(16)
+	pathBar.PercentageStyle = progressMuted
 	return pushProgressModel{
 		spinner: spin,
 		bar:     bar,
+		pathBar: pathBar,
 		stage:   "Preparing push",
-		active:  make(map[string]struct{}),
 		width:   80,
 	}
 }
@@ -149,32 +185,50 @@ func (m pushProgressModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.alreadyPresent = msg.alreadyPresent
 		m.started = time.Now()
 	case pushPathStartedMsg:
-		m.active[string(msg)] = struct{}{}
+		m.active = append(m.active, &activeUpload{path: msg.path, size: msg.narSize})
+	case pushPathProgressedMsg:
+		if a := m.upload(msg.path); a != nil {
+			a.sent = min(msg.sent, a.size)
+		}
 	case pushPathFinishedMsg:
 		result := push.PathProgress(msg)
-		delete(m.active, result.Path)
+		m.active = slices.DeleteFunc(m.active, func(a *activeUpload) bool {
+			return a.path == result.Path
+		})
 		m.completed++
 		name := nix.BaseName(result.Path)
+		var line string
 		if result.Err != nil {
 			failure := fmt.Sprintf("%s: %v", name, result.Err)
 			m.failures = append(m.failures, failure)
-			m.last = progressFailure.Render("✗") + " " + failure
+			line = progressFailure.Render("✗") + " " + failure
 		} else {
 			m.completedBytes += result.NarSize
-			m.last = progressSuccess.Render("✓") + " " + name + " " +
+			line = progressSuccess.Render("✓") + " " + name + " " +
 				progressMuted.Render(result.Suffix())
 		}
+		// Finished paths scroll above the live region so the history of a
+		// push survives the way plain line output does.
+		return m, tea.Println(m.truncate(line))
 	case pushStopMsg:
 		m.done = true
 		m.finished = time.Now()
 		return m, tea.Quit
 	}
 
-	// The bar is rendered statelessly via ViewAs, so only the spinner needs
+	// The bars are rendered statelessly via ViewAs, so only the spinner needs
 	// message-driven updates.
 	var cmd tea.Cmd
 	m.spinner, cmd = m.spinner.Update(msg)
 	return m, cmd
+}
+
+func (m pushProgressModel) upload(path string) *activeUpload {
+	i := slices.IndexFunc(m.active, func(a *activeUpload) bool { return a.path == path })
+	if i < 0 {
+		return nil
+	}
+	return m.active[i]
 }
 
 func (m *pushProgressModel) resizeBar() {
@@ -198,29 +252,37 @@ func (m pushProgressModel) View() tea.View {
 		return tea.NewView(m.finalView())
 	}
 
-	percent := 0.0
-	if m.total > 0 {
-		percent = float64(m.completed) / float64(m.total)
+	// The overall bar advances by bytes rather than paths so one large NAR
+	// among many small ones moves visibly while it uploads.
+	transferred := m.transferredBytes()
+	fraction := 0.0
+	if m.totalBytes > 0 {
+		fraction = float64(transferred) / float64(m.totalBytes)
 	}
 	lines := []string{
 		fmt.Sprintf("%s Pushing to %s", m.spinner.View(), progressAccent.Render(m.cache)),
-		m.bar.ViewAs(percent),
+		m.bar.ViewAs(fraction),
 		fmt.Sprintf(
 			"%d/%d paths  %s/%s%s",
 			m.completed,
 			m.total,
-			push.FormatBytes(m.completedBytes),
+			push.FormatBytes(transferred),
 			push.FormatBytes(m.totalBytes),
 			alreadyPresentLabel(m.alreadyPresent),
 		),
 	}
-	if active := m.activeLabel(); active != "" {
-		lines = append(lines, progressMuted.Render(active))
-	}
-	if m.last != "" {
-		lines = append(lines, m.truncate(m.last))
-	}
+	lines = append(lines, m.activeLines()...)
 	return tea.NewView(strings.Join(lines, "\n"))
+}
+
+// transferredBytes is completed NAR bytes plus the in-flight bytes of every
+// active upload.
+func (m pushProgressModel) transferredBytes() int64 {
+	n := m.completedBytes
+	for _, a := range m.active {
+		n += a.sent
+	}
+	return n
 }
 
 func (m pushProgressModel) finalView() string {
@@ -265,23 +327,32 @@ func (m pushProgressModel) finalView() string {
 	return line
 }
 
-func (m pushProgressModel) activeLabel() string {
-	if len(m.active) == 0 {
-		return ""
+// activeLines renders one row per in-flight upload in start order, so rows
+// keep their position as neighbours finish.
+func (m pushProgressModel) activeLines() []string {
+	shown := min(len(m.active), maxActiveLines)
+	lines := make([]string, 0, shown+1)
+	for _, a := range m.active[:shown] {
+		lines = append(lines, m.activeLine(a))
 	}
-	// Show the alphabetically first active path so the label is stable
-	// across renders without sorting the whole set.
-	var first string
-	for path := range m.active {
-		if name := nix.BaseName(path); first == "" || name < first {
-			first = name
-		}
+	if rest := len(m.active) - shown; rest > 0 {
+		lines = append(lines, progressMuted.Render(fmt.Sprintf("  +%d more uploading", rest)))
 	}
-	label := "Uploading " + first
-	if len(m.active) > 1 {
-		label += fmt.Sprintf(" (+%d more)", len(m.active)-1)
-	}
-	return m.truncate(label)
+	return lines
+}
+
+func (m pushProgressModel) activeLine(a *activeUpload) string {
+	// The name column is truncated so the numbers survive a narrow terminal;
+	// the whole row is truncated once more for the pathological case.
+	nameWidth := max(8, min(40, m.width/3))
+	name := lipgloss.NewStyle().Width(nameWidth).Inline(true).
+		Render(ansi.Truncate(nix.BaseName(a.path), nameWidth, "…"))
+	return m.truncate(fmt.Sprintf(
+		"  %s %s  %s",
+		name,
+		m.pathBar.ViewAs(a.fraction()),
+		progressMuted.Render(push.FormatBytes(a.sent)+"/"+push.FormatBytes(a.size)),
+	))
 }
 
 func (m pushProgressModel) truncate(s string) string {
