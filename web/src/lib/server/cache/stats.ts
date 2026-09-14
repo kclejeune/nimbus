@@ -46,3 +46,16 @@ export async function instanceStats(db: D1): Promise<InstanceStats> {
 		logicalBytes: logical?.n ?? 0
 	};
 }
+
+/**
+ * The totals a dashboard shows: the snapshot GC persisted after its last run
+ * (see GcLastRun.instance), falling back to a live aggregate only on an
+ * instance that has never run GC. `statsAt` is null for a live read.
+ */
+export async function instanceStatsSnapshot(
+	db: D1,
+	gcLastRun: { at: string; instance?: InstanceStats } | null
+): Promise<{ stats: InstanceStats; statsAt: string | null }> {
+	if (gcLastRun?.instance) return { stats: gcLastRun.instance, statsAt: gcLastRun.at };
+	return { stats: await instanceStats(db), statsAt: null };
+}

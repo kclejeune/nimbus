@@ -18,6 +18,7 @@ import {
 import { allLiveUpstreams, filterUpstreamPaths, VERDICT_ABSENT } from './missing-paths';
 import { type ExecutionContext } from './platform';
 import { PURGE_TAG_LIMIT } from './purge';
+import { instanceStats, type InstanceStats } from './stats';
 import { candidateTag } from './metadata';
 import { narinfoTag } from './store';
 
@@ -83,6 +84,10 @@ export interface GcLastRun {
 	stats: GcStats;
 	/** Null when the run skipped the integrity report (size-triggered GC). */
 	integrity: GcIntegritySummary | null;
+	/** Instance-wide storage totals measured after the run — the dashboards
+	 * read these instead of re-aggregating the whole store per page view.
+	 * Absent on records persisted before this field existed. */
+	instance?: InstanceStats;
 }
 
 const GC_LAST_RUN_KEY = 'gc_last_run';
@@ -207,7 +212,13 @@ async function persistLastRun(
 	stats: GcStats,
 	integrity: GcIntegritySummary | null
 ): Promise<void> {
-	const payload: GcLastRun = { at: new Date().toISOString(), stats, integrity };
+	// Measured on the primary right after the sweep, so the dashboards show
+	// the post-GC totals rather than a replica's view of the pre-GC ones.
+	const instance = await instanceStats(db).catch((e) => {
+		console.warn(`gc: instance stats snapshot failed: ${e}`);
+		return undefined;
+	});
+	const payload: GcLastRun = { at: new Date().toISOString(), stats, integrity, instance };
 	await dbRun(
 		db
 			.prepare(
@@ -577,11 +588,13 @@ async function evictCacheToBudget(
 	dryRun: boolean,
 	purgeTags: string[]
 ): Promise<number> {
-	const budget = cache.retention_max_bytes ?? Infinity;
+	const budget = sizeBudget(
+		async () => (await db.prepare(CACHE_SIZE_SQL).bind(cache.id).first<{ n: number }>())?.n ?? 0,
+		cache.retention_max_bytes ?? Infinity
+	);
 	let evicted = 0;
 	for (let round = 0; round < MAX_EVICTION_ROUNDS; round++) {
-		const size = (await db.prepare(CACHE_SIZE_SQL).bind(cache.id).first<{ n: number }>())?.n ?? 0;
-		if (size <= budget) break;
+		if (!(await budget.over())) break;
 		const victim = await db.prepare(OLDEST_TOP_LEVEL_SQL).bind(cache.id).first<DoomedRow>();
 		if (!victim) {
 			console.warn(`gc: cache ${cache.name} over size budget with only protected closures left`);
@@ -596,13 +609,57 @@ async function evictCacheToBudget(
 		if (doomed.length === 0) break;
 		evicted += doomed.length;
 		if (dryRun) break;
-		await deleteObjects(
-			db,
-			doomed.map((d) => d.id)
-		);
+		const ids = doomed.map((d) => d.id);
+		budget.freed(await narBytesOf(db, ids));
+		await deleteObjects(db, ids);
 		purgeTags.push(...doomed.flatMap((d) => objectPurgeTags(cache.name, d)));
 	}
 	return evicted;
+}
+
+/**
+ * Running size for an eviction loop. The exact measure aggregates every
+ * chunkref in scope, so re-running it per round made a deep eviction cost
+ * rounds × the whole store in rows read. Each round subtracts an estimate
+ * of what it freed (an upper bound: chunks shared with surviving NARs stay),
+ * and the loop only re-measures to confirm once the estimate says the limit
+ * is met.
+ */
+function sizeBudget(measure: () => Promise<number>, limit: number) {
+	let size: number | undefined;
+	let estimated = false;
+	return {
+		async over(): Promise<boolean> {
+			if (size === undefined || (estimated && size <= limit)) {
+				size = await measure();
+				estimated = false;
+			}
+			return size > limit;
+		},
+		freed(bytes: number): void {
+			size = (size ?? 0) - bytes;
+			estimated = true;
+		}
+	};
+}
+
+/** Deduplicated bytes of the NARs behind these (still present) objects. */
+async function narBytesOf(db: D1, objectIds: number[]): Promise<number> {
+	let total = 0;
+	for (let i = 0; i < objectIds.length; i += PARAM_BATCH) {
+		const batch = objectIds.slice(i, i + PARAM_BATCH);
+		const placeholders = batch.map((_, j) => `?${j + 1}`).join(', ');
+		const row = await db
+			.prepare(
+				'SELECT COALESCE(SUM(ch.file_size), 0) AS n ' +
+					`FROM (SELECT DISTINCT nar_id FROM object WHERE id IN (${placeholders})) o ` +
+					'JOIN chunkref cr ON cr.nar_id = o.nar_id JOIN chunk ch ON ch.id = cr.chunk_id'
+			)
+			.bind(...batch)
+			.first<{ n: number }>();
+		total += row?.n ?? 0;
+	}
+	return total;
 }
 
 /**
@@ -685,10 +742,13 @@ async function globalSizePass(
 		.first<{ n: number }>();
 	if ((totalRow?.n ?? 0) <= limit) return;
 
+	const budget = sizeBudget(
+		async () => (await db.prepare(REFERENCED_CHUNK_BYTES_SQL).first<{ n: number }>())?.n ?? 0,
+		limit
+	);
 	let over = true;
 	for (let round = 0; round < MAX_GLOBAL_EVICTION_ROUNDS; round++) {
-		const total = (await db.prepare(REFERENCED_CHUNK_BYTES_SQL).first<{ n: number }>())?.n ?? 0;
-		over = total > limit;
+		over = await budget.over();
 		if (!over) break;
 		const victim = await db
 			.prepare(GLOBAL_OLDEST_TOP_LEVEL_SQL)
@@ -703,10 +763,9 @@ async function globalSizePass(
 		if (doomed.length === 0) break;
 		stats.global_evicted_objects += doomed.length;
 		if (dryRun) return;
-		await deleteObjects(
-			db,
-			doomed.map((d) => d.id)
-		);
+		const ids = doomed.map((d) => d.id);
+		budget.freed(await narBytesOf(db, ids));
+		await deleteObjects(db, ids);
 		purgeTags.push(...doomed.flatMap((d) => objectPurgeTags(victim.cache_name, d)));
 	}
 	if (over) {

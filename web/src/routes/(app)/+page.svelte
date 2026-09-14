@@ -81,6 +81,11 @@
 			</Card.Root>
 		{/each}
 	</div>
+	{#if data.statsAt}
+		<p class="-mt-2 text-xs text-muted-foreground">
+			Totals as of the last GC run, {formatRelativeTime(data.statsAt)}.
+		</p>
+	{/if}
 
 	{#if data.proxyPublicKey && data.cacheBaseUrl}
 		<UnifiedEndpointCard

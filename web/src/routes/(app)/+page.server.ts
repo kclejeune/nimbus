@@ -4,7 +4,7 @@ import { allLiveUpstreams } from '$lib/server/cache/missing-paths';
 import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { readSession } from '$lib/server/cache/db';
-import { instanceStats } from '$lib/server/cache/stats';
+import { instanceStatsSnapshot } from '$lib/server/cache/stats';
 import type { PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async ({ platform }) => {
@@ -31,22 +31,21 @@ export const load: PageServerLoad = async ({ platform }) => {
 		)
 		.bind(ingestSince);
 
-	const [stats, globalLimit, gcLastRun, ingest, proxyPublicKey, proxyUpstreams] = await Promise.all(
-		[
-			instanceStats(read),
-			read
-				.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
-				.first<{ value: string }>(),
-			readGcLastRun(read),
-			ingestStmt.all<{ bucket: string; paths: number; bytes: number }>(),
-			platform?.env
-				? getProxyKeypair(platform.env)
-						.then(extractPublicKey)
-						.catch(() => null)
-				: null,
-			allLiveUpstreams(read)
-		]
-	);
+	const [globalLimit, gcLastRun, ingest, proxyPublicKey, proxyUpstreams] = await Promise.all([
+		read
+			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
+			.first<{ value: string }>(),
+		readGcLastRun(read),
+		ingestStmt.all<{ bucket: string; paths: number; bytes: number }>(),
+		platform?.env
+			? getProxyKeypair(platform.env)
+					.then(extractPublicKey)
+					.catch(() => null)
+			: null,
+		allLiveUpstreams(read)
+	]);
+
+	const { stats, statsAt } = await instanceStatsSnapshot(read, gcLastRun);
 
 	// Zero-fill so the chart doesn't interpolate across idle days.
 	const byDay = new Map(ingest.results.map((r) => [r.bucket, r]));
@@ -59,6 +58,7 @@ export const load: PageServerLoad = async ({ platform }) => {
 
 	return {
 		stats,
+		statsAt,
 		globalMaxBytes: globalLimit ? Number(globalLimit.value) : null,
 		gcLastRun,
 		buckets,

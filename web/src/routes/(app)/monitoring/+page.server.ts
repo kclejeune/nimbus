@@ -1,7 +1,8 @@
 import { dev } from '$app/environment';
 import { error } from '@sveltejs/kit';
 import { readSession } from '$lib/server/cache/db';
-import { instanceStats, type InstanceStats } from '$lib/server/cache/stats';
+import { instanceStatsSnapshot, type InstanceStats } from '$lib/server/cache/stats';
+import { readGcLastRun } from '$lib/server/cache/gc';
 import { loadTraffic } from '$lib/server/traffic';
 import type { PageServerLoad } from './$types';
 
@@ -96,6 +97,7 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 			range,
 			traffic: null,
 			stats: sampleStats(),
+			statsAt: null,
 			globalMaxBytes: null
 		};
 	}
@@ -137,15 +139,16 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 				.bind(startDate)
 		: null;
 
-	const [seriesResult, baselineRow, stats, globalLimit] = await Promise.all([
+	const [seriesResult, baselineRow, gcLastRun, globalLimit] = await Promise.all([
 		seriesStmt.all<BucketRow>(),
 		baselineStmt ? baselineStmt.first<{ paths: number; bytes: number }>() : Promise.resolve(null),
-		instanceStats(read),
+		readGcLastRun(read),
 		read
 			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
 			.first<{ value: string }>()
 	]);
 	const globalMaxBytes = globalLimit ? Number(globalLimit.value) : null;
+	const { stats, statsAt } = await instanceStatsSnapshot(read, gcLastRun);
 
 	const rows = seriesResult.results;
 	const basePaths = baselineRow?.paths ?? 0;
@@ -159,6 +162,7 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 			range,
 			traffic: await trafficPromise,
 			stats,
+			statsAt,
 			globalMaxBytes
 		};
 	}
@@ -189,7 +193,15 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 		});
 	}
 
-	return { buckets, granularity, range, traffic: await trafficPromise, stats, globalMaxBytes };
+	return {
+		buckets,
+		granularity,
+		range,
+		traffic: await trafficPromise,
+		stats,
+		statsAt,
+		globalMaxBytes
+	};
 };
 
 function sampleStats(): InstanceStats {

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { formatBytes, formatCount } from '$lib/format';
+	import { formatBytes, formatCount, formatRelativeTime } from '$lib/format';
 	import { goto } from '$app/navigation';
 	import AreaChart from '$lib/components/charts/area-chart.svelte';
 	import * as ToggleGroup from '$lib/components/ui/toggle-group/index.js';
@@ -214,6 +214,11 @@
 					peakBucket.date ? `${peakBucket.date} · paths added` : undefined
 				)}
 			</div>
+			{#if data.statsAt}
+				<p class="mb-4 text-xs text-muted-foreground">
+					Storage totals as of the last GC run, {formatRelativeTime(data.statsAt)}.
+				</p>
+			{/if}
 
 			<div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
 				<div class="rounded-lg border bg-card p-5">
