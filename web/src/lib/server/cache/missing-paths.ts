@@ -837,8 +837,9 @@ export interface UpstreamConfig {
 // changes rarely, so memoize the whole config per isolate. Config edits lag
 // at most the TTL, which is negligible next to the upstream-TTL edge caching
 // of the responses built from it (edits also purge those; see the admin
-// actions).
-const UPSTREAMS_MEMO_TTL_MS = 60_000;
+// actions). Ten minutes: at 60 s the three-statement refill ran ~3k times a
+// day across isolates for a config that changes a few times a month.
+const UPSTREAMS_MEMO_TTL_MS = 10 * 60_000;
 const configMemo = new AsyncMemo<UpstreamConfig>(UPSTREAMS_MEMO_TTL_MS, 1);
 
 export function clearUpstreamsMemo(): void {

@@ -26,7 +26,10 @@ it('cached candidate, manifest and retention responses require no gateway D1 acc
 			'CF-Connecting-IP': '203.0.113.7'
 		}
 	});
-	expect(await loadCandidates(env, ctx, request, 'nar', 'sha256:abc')).toEqual([]);
+	expect(await loadCandidates(env, ctx, request, 'nar', 'sha256:abc')).toEqual({
+		rows: [],
+		listed: false
+	});
 	expect(await loadManifest(env, ctx, 'abc')).toBeNull();
 	await touchViaStore(env, ctx, 1, 'abc');
 	expect(prepare).not.toHaveBeenCalled();

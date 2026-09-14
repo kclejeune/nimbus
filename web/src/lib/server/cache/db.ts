@@ -110,10 +110,18 @@ export async function runBatched(
  * binding when sessions are unavailable (replication not enabled).
  */
 export function readSession(db: D1Database): D1Database {
-	const session = (db as { withSession?: (constraint: string) => unknown }).withSession?.(
-		'first-unconstrained'
-	);
-	return (session ?? db) as D1Database;
+	return session(db, 'first-unconstrained');
+}
+
+/** Session whose first read is answered by the primary: a read that must
+ * see every committed write, at the primary's cost. */
+export function primarySession(db: D1Database): D1Database {
+	return session(db, 'first-primary');
+}
+
+function session(db: D1Database, constraint: string): D1Database {
+	const s = (db as { withSession?: (constraint: string) => unknown }).withSession?.(constraint);
+	return (s ?? db) as D1Database;
 }
 
 export interface CacheRow {

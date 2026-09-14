@@ -21,6 +21,7 @@ import { issueChunkProof, verifyChunkProof } from './chunk-proof';
 import { findNarWithChunks, createObject, type NewObject } from './db';
 import { serveStore } from './store';
 import { clearUpstreamsMemo } from './missing-paths';
+import { clearConfirmedCandidates } from './metadata';
 
 describe('audit security regressions', () => {
 	const fixture = testDatabase();
@@ -53,6 +54,7 @@ describe('audit security regressions', () => {
 	beforeEach(() => {
 		invalidateCacheRow();
 		clearUpstreamsMemo();
+		clearConfirmedCandidates();
 		fixture.sqlite.exec(
 			'DELETE FROM chunk_repair; DELETE FROM object; DELETE FROM chunkref; DELETE FROM nar; DELETE FROM chunk; DELETE FROM cache_upstream; DELETE FROM cache; DELETE FROM upstream_check; DELETE FROM upstream;'
 		);
@@ -470,7 +472,7 @@ describe('audit security regressions', () => {
 			return new Response('cached bytes', { status: 200 });
 		});
 		const ctx = {
-			exports: { CachedStore: { fetch: store } },
+			exports: { CachedStore: { fetch: store, purgeTags: async () => {} } },
 			waitUntil: () => {}
 		} as unknown as import('./platform').ExecutionContext;
 		const request = () =>
@@ -483,6 +485,48 @@ describe('audit security regressions', () => {
 		).toBe(true);
 		holders = [{ id: 2, name: 'attacker', priority: 0, is_public: 1 }];
 		expect((await request()).status).toBe(200);
+	});
+	it('confirms a stale candidate entry naming only deleted caches against the primary', async () => {
+		const { live } = liveEnv();
+		stubDigestStream();
+		// The path lands in public 'attacker' (cache 2) on the primary...
+		expect(
+			(
+				await handleBufferedUpload(
+					live,
+					{ ...manifest.nar_info, cache: 'attacker' },
+					2,
+					'zstd',
+					raw
+				)
+			).status
+		).toBe(200);
+		// ...while the hour-long edge entry still lists only a cache that has
+		// since been deleted: the visibility filter empties it, which must not
+		// read as "nothing anywhere".
+		const store = vi.fn(async (request: Request) => {
+			const path = new URL(request.url).pathname;
+			if (path.startsWith('/_meta/nar/'))
+				return new Response(
+					JSON.stringify([{ id: 99, name: 'ghost', priority: 0, is_public: 1 }]),
+					{
+						headers: { 'Content-Type': 'application/json' }
+					}
+				);
+			return new Response('nar bytes', { status: 200 });
+		});
+		const purgeTags = vi.fn(async () => {});
+		const ctx = {
+			exports: { CachedStore: { fetch: store, purgeTags } },
+			waitUntil: () => {}
+		} as unknown as import('./platform').ExecutionContext;
+		const response = await handleCacheApi(
+			new Request(`https://cache.test/nar/${hash}.nar`),
+			live,
+			ctx
+		);
+		expect(response.status).toBe(200);
+		expect(purgeTags).toHaveBeenCalledWith([`candidate:nar:${hash}`]);
 	});
 	it('does not expose internal metadata and retention endpoints through the gateway', async () => {
 		for (const path of [

@@ -4,7 +4,14 @@
 
 import { observeRequest, measure } from './latency';
 import { AsyncMemo } from './async-memo';
-import { touchViaStore, loadCandidates, viaStore, stampClientIp } from './metadata';
+import {
+	touchViaStore,
+	loadCandidates,
+	confirmCandidates,
+	viaStore,
+	stampClientIp,
+	disposeLoopback
+} from './metadata';
 import {
 	CacheConfigError,
 	cacheInfo,
@@ -373,7 +380,10 @@ async function narMiss(
 		viaUpstream: !!upstreamUrl,
 		edge
 	});
-	if (upstreamUrl) return Response.redirect(upstreamUrl, 302);
+	if (upstreamUrl) {
+		await disposeLoopback(notFound);
+		return Response.redirect(upstreamUrl, 302);
+	}
 	return notFound ?? errorResponse(404, 'Not found', 'NoSuchObject');
 }
 
@@ -418,11 +428,17 @@ async function handleNar(
 	// it, whether or not the withdrawal purge succeeded. Private caches use a
 	// key scoped to their id, which authorizeCacheRead already covers.
 	if (auth.cache.is_public === 1) {
-		const holders = await measure('candidates', () =>
-			loadCandidates(env, ctx, request, 'nar', narHashRaw)
-		);
-		if (!holders.some((c) => c.id === auth.cache.id))
-			return narMiss(env, ctx, request, auth.cache, filename, cacheName, 'none');
+		const holds = (rows: db.LiveCacheRow[]) => rows.some((c) => c.id === auth.cache.id);
+		let holders = (
+			await measure('candidates', () => loadCandidates(env, ctx, request, 'nar', narHashRaw))
+		).rows;
+		// Not listed: either really absent or a stale positive entry from
+		// before this cache received the NAR — confirm before refusing.
+		if (!holds(holders))
+			holders = await measure('candidates', () =>
+				confirmCandidates(env, ctx, request, 'nar', narHashRaw, holders)
+			);
+		if (!holds(holders)) return narMiss(env, ctx, request, auth.cache, filename, cacheName, 'none');
 	}
 
 	// narStoreUrl owns the edge key (content-addressed for public caches,
@@ -493,11 +509,23 @@ async function handleProxyNarInfo(
 	// concurrently. The candidates memo is what keeps edge hits off D1: the
 	// winner determines the edge key, so this resolution runs on every root
 	// read, cached or not.
-	const [token, candidates] = await Promise.all([
+	const [token, cached] = await Promise.all([
 		proxyToken(request, env),
 		measure('candidates', () => loadCandidates(env, ctx, request, 'path', storePathHash))
 	]);
-	const winner = pickReadableWinner(token, candidates);
+	let candidates = cached.rows;
+	let winner = pickReadableWinner(token, candidates);
+	// Caches listed but none readable (or none left after the visibility
+	// filter): the common case is a private-only path, but a stale positive
+	// entry would also look like this after the path landed in a public
+	// cache — confirm before falling back. A genuinely empty entry is
+	// short-lived and needs no confirmation.
+	if (!winner && cached.listed) {
+		candidates = await measure('candidates', () =>
+			confirmCandidates(env, ctx, request, 'path', storePathHash, candidates)
+		);
+		winner = pickReadableWinner(token, candidates);
+	}
 	// No local winner (not stored anywhere, or stored only in caches this
 	// requester can't read): fall back to the union of live caches' upstreams.
 	// Upstream content is public, so serving it regardless of token leaks
@@ -513,6 +541,7 @@ async function handleProxyNarInfo(
 		if (response.status === 404) {
 			if (candidates.length === 0) recordAbsent(storePathHash);
 			recordRead(env, 'narinfo', UNIFIED_LABEL, { status: 404, edge: storeEdge(response) });
+			await disposeLoopback(response);
 			return errorResponse(404, 'Not found', 'NoSuchObject');
 		}
 		// A 200 here is upstream content served through the union fallback.
@@ -524,15 +553,35 @@ async function handleProxyNarInfo(
 		return withCachePolicy(stripUpstreamMarker(response), true);
 	}
 
-	const keyed = new URL(
-		`${new URL(request.url).origin}/_proxy/${winner.name}/${storePathHash}.narinfo`
-	);
+	let pk: string | null = null;
 	try {
-		keyed.searchParams.set('pk', extractPublicKey(await getProxyKeypair(env)));
+		pk = extractPublicKey(await getProxyKeypair(env));
 	} catch {
 		// keypair unavailable: serve unsigned/stored-sig variant unkeyed
 	}
-	const response = await forwardToStore(new Request(keyed, request), env, ctx);
+	const fetchWinner = (from: db.LiveCacheRow) => {
+		const keyed = new URL(
+			`${new URL(request.url).origin}/_proxy/${from.name}/${storePathHash}.narinfo`
+		);
+		if (pk) keyed.searchParams.set('pk', pk);
+		return forwardToStore(new Request(keyed, request), env, ctx);
+	};
+	let response = await fetchWinner(winner);
+	// The winner no longer holds the path (reaped, or a stale positive
+	// entry): confirm and retry once against whoever holds it now.
+	if (response.status === 404) {
+		const next = pickReadableWinner(
+			token,
+			await measure('candidates', () =>
+				confirmCandidates(env, ctx, request, 'path', storePathHash, candidates)
+			)
+		);
+		if (next && next.id !== winner.id) {
+			await disposeLoopback(response);
+			winner = next;
+			response = await fetchWinner(winner);
+		}
+	}
 	recordRead(env, 'narinfo', UNIFIED_LABEL, { status: response.status, edge: storeEdge(response) });
 	return withCachePolicy(response, winner.is_public === 1);
 }
@@ -548,11 +597,19 @@ async function handleProxyNar(
 	if (!narHashRaw) return errorResponse(400, 'Invalid NAR path');
 
 	// Same concurrent shape (and memo rationale) as handleProxyNarInfo above.
-	const [token, narCandidates] = await Promise.all([
+	const [token, cached] = await Promise.all([
 		proxyToken(request, env),
 		measure('candidates', () => loadCandidates(env, ctx, request, 'nar', narHashRaw))
 	]);
-	const winner = pickReadableWinner(token, narCandidates);
+	let narCandidates = cached.rows;
+	let winner = pickReadableWinner(token, narCandidates);
+	// Same stale-positive guard as handleProxyNarInfo.
+	if (!winner && cached.listed) {
+		narCandidates = await measure('candidates', () =>
+			confirmCandidates(env, ctx, request, 'nar', narHashRaw, narCandidates)
+		);
+		winner = pickReadableWinner(token, narCandidates);
+	}
 	// NAR URLs served by root-proxy upstream passthrough narinfos resolve here
 	// with no local winner, so the root needs the same upstream redirect as the
 	// per-cache route — against the union of live caches' upstreams.
@@ -561,12 +618,32 @@ async function handleProxyNar(
 	// Same edge entry as the per-cache route. pickReadableWinner already proved
 	// the winner holds this NAR, but the scoped path is what keeps the resulting
 	// edge entry out of reach of a request authorized against another cache.
-	const keyed = narStoreUrl(request, winner, filename);
-	const response = await forwardToStore(new Request(keyed, request), env, ctx);
+	let response = await forwardToStore(
+		new Request(narStoreUrl(request, winner, filename), request),
+		env,
+		ctx
+	);
+	// The winner no longer holds the NAR (GC reaped it, or the candidate
+	// entry was a stale positive): confirm and retry once against whoever
+	// holds it now before falling back to the upstreams.
+	if (response.status === 404) {
+		const next = pickReadableWinner(
+			token,
+			await measure('candidates', () =>
+				confirmCandidates(env, ctx, request, 'nar', narHashRaw, narCandidates)
+			)
+		);
+		if (next && next.id !== winner.id) {
+			await disposeLoopback(response);
+			winner = next;
+			response = await forwardToStore(
+				new Request(narStoreUrl(request, winner, filename), request),
+				env,
+				ctx
+			);
+		}
+	}
 	if (!head && response.ok) scheduleTouch(env, ctx, winner.id, narHashRaw);
-
-	// Deletion race (GC reaped the NAR between resolution and read): the
-	// upstreams may still have it, same as the per-cache route.
 	if (response.status === 404)
 		return narMiss(env, ctx, request, null, filename, UNIFIED_LABEL, storeEdge(response), response);
 	recordRead(env, 'nar', UNIFIED_LABEL, { status: response.status, edge: storeEdge(response) });
