@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { D1Result } from '@cloudflare/workers-types';
 import { readSampleRate } from './metrics';
 
 type Stage = 'auth' | 'candidates' | 'store' | 'upstream' | 'admission' | 'd1' | 'r2';
@@ -7,6 +8,12 @@ interface Sample {
 	d1: number;
 	rowsRead: number;
 	rowsWritten: number;
+	/** Statements D1 reports as served by the primary (Sessions API meta).
+	 * Reads issued through readSession should land on a replica; a nonzero
+	 * count on a read route is the signal that they did not. */
+	d1Primary: number;
+	/** Region of the last D1 result, for the served-by breakdown. */
+	d1Region: string | null;
 	r2: number;
 	retries: number;
 }
@@ -30,16 +37,15 @@ export function countR2(): void {
 	const s = current.getStore();
 	if (s) s.r2++;
 }
-export function countD1(
-	statements: number,
-	results?: { meta?: { rows_read?: number; rows_written?: number } }[]
-): void {
+export function countD1(statements: number, results?: Pick<D1Result, 'meta'>[]): void {
 	const s = current.getStore();
 	if (!s) return;
 	s.d1 += statements;
 	for (const r of results ?? []) {
 		s.rowsRead += r.meta?.rows_read ?? 0;
 		s.rowsWritten += r.meta?.rows_written ?? 0;
+		if (r.meta?.served_by_primary) s.d1Primary++;
+		if (r.meta?.served_by_region) s.d1Region = r.meta.served_by_region;
 	}
 }
 
@@ -92,7 +98,16 @@ export async function observeRequest(
 ): Promise<Response> {
 	const divisor = readSampleRate(env);
 	if (Math.random() * divisor >= 1) return op();
-	const sample: Sample = { timings: {}, d1: 0, rowsRead: 0, rowsWritten: 0, r2: 0, retries: 0 };
+	const sample: Sample = {
+		timings: {},
+		d1: 0,
+		rowsRead: 0,
+		rowsWritten: 0,
+		d1Primary: 0,
+		d1Region: null,
+		r2: 0,
+		retries: 0
+	};
 	return current.run(sample, async () => {
 		const start = performance.now();
 		const response = await op();
@@ -122,7 +137,8 @@ export async function observeRequest(
 					sample.timings.upstream ?? 0,
 					sample.timings.admission ?? 0,
 					sample.timings.d1 ?? 0,
-					sample.timings.r2 ?? 0
+					sample.timings.r2 ?? 0,
+					sample.d1Primary
 				],
 				indexes: ['_latency']
 			});

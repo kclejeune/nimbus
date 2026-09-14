@@ -45,8 +45,15 @@ function withSpan<T>(ctx: unknown, name: string, fn: () => Promise<T>): Promise<
  */
 export class CachedStore extends WorkerEntrypoint {
 	async fetch(request: Request) {
+		const route = routeTemplate(request);
+		// Logged on entry, not exit: a "Worker hung" cancellation emits no
+		// nimbus.latency line and traces are sampled, so without this the
+		// stuck route is unknowable after the fact.
+		console.log(
+			JSON.stringify({ event: 'nimbus.store', route, path: new URL(request.url).pathname })
+		);
 		try {
-			return await withSpan(this.ctx, `store ${routeTemplate(request)}`, () =>
+			return await withSpan(this.ctx, `store ${route}`, () =>
 				observeRequest(request, this.env as Env, 'store', () =>
 					serveStore(request, this.env as Env, this.ctx as App.Platform['ctx'])
 				)
