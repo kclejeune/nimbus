@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS nar (
 -- nar_hash-prefix lookups (replaces a plain idx_nar_hash). See the
 -- 2026-07-14-nar-hash-state-index migration.
 CREATE INDEX IF NOT EXISTS idx_nar_hash_state ON nar(nar_hash, state);
-CREATE INDEX IF NOT EXISTS idx_nar_state ON nar(state);
+-- No idx_nar_state: see 2026-09-14-drop-state-indexes.
 
 -- Object table (cache-specific view of a NAR)
 CREATE TABLE IF NOT EXISTS object (
@@ -197,7 +197,7 @@ CREATE TABLE IF NOT EXISTS chunk (
 -- Unique: racing uploads of one chunk must converge on a single row, because
 -- rows share the content-addressed R2 object and GC deletes through them.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunk_hash ON chunk(chunk_hash, compression);
-CREATE INDEX IF NOT EXISTS idx_chunk_state ON chunk(state);
+-- No idx_chunk_state: see 2026-09-14-drop-state-indexes.
 
 -- ChunkRef table (NAR to chunk mapping)
 CREATE TABLE IF NOT EXISTS chunkref (

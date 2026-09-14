@@ -64,29 +64,39 @@ export const verification = sqliteTable('verification', {
 // --- admin-owned tables ------------------------------------------------------
 
 /** API tokens minted for users (CI/programmatic access). Only the hash is stored. */
-export const apiToken = sqliteTable('api_token', {
-	id: text('id').primaryKey(),
-	userId: text('user_id')
-		.notNull()
-		.references(() => user.id, { onDelete: 'cascade' }),
-	name: text('name').notNull(),
-	tokenHash: text('token_hash').notNull(),
-	/** JSON: attic cache permission map this token grants. */
-	permissions: text('permissions').notNull(),
-	expiresAt: integer('expires_at', { mode: 'timestamp' }),
-	revokedAt: integer('revoked_at', { mode: 'timestamp' }),
-	createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
-});
+export const apiToken = sqliteTable(
+	'api_token',
+	{
+		id: text('id').primaryKey(),
+		userId: text('user_id')
+			.notNull()
+			.references(() => user.id, { onDelete: 'cascade' }),
+		name: text('name').notNull(),
+		tokenHash: text('token_hash').notNull(),
+		/** JSON: attic cache permission map this token grants. */
+		permissions: text('permissions').notNull(),
+		expiresAt: integer('expires_at', { mode: 'timestamp' }),
+		revokedAt: integer('revoked_at', { mode: 'timestamp' }),
+		createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
+	},
+	// The tokens page lists by owner; without this it scanned the table.
+	(t) => [index('api_token_user_idx').on(t.userId)]
+);
 
 /** Audit trail of privileged admin actions. */
-export const auditLog = sqliteTable('audit_log', {
-	id: text('id').primaryKey(),
-	userId: text('user_id').references(() => user.id),
-	action: text('action').notNull(),
-	target: text('target'),
-	detail: text('detail'),
-	createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
-});
+export const auditLog = sqliteTable(
+	'audit_log',
+	{
+		id: text('id').primaryKey(),
+		userId: text('user_id').references(() => user.id),
+		action: text('action').notNull(),
+		target: text('target'),
+		detail: text('detail'),
+		createdAt: integer('created_at', { mode: 'timestamp' }).notNull()
+	},
+	// Paginated newest-first; the only table here that grows without bound.
+	(t) => [index('audit_log_created_idx').on(t.createdAt)]
+);
 
 // --- fine-grained permissions ------------------------------------------------
 

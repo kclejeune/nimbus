@@ -36,6 +36,13 @@
       "when": 1783894997269,
       "tag": "0004_group-member-user-index",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1789417911101,
+      "tag": "0005_token-audit-indexes",
+      "breakpoints": true
     }
   ]
 }
