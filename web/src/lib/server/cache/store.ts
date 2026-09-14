@@ -31,6 +31,7 @@ import {
 	type Upstream
 } from './missing-paths';
 import { clearAbsent, getProxyKeypair } from './proxy';
+import { purgeCoalesced } from './purge';
 import { RateBudget } from './rate-budget';
 import { TtlMemo } from './ttl-memo';
 import { withR2Retry, type ExecutionContext } from './platform';
@@ -229,8 +230,9 @@ export function narStoreUrl(
  * After an upload lands an object, purge its narinfo tag (covering both a
  * negatively-cached 404 and a stale narinfo from re-pushing an existing
  * path), then re-fetch through the loopback so the edge holds the fresh
- * entry before the next closure walk asks. O(1) per upload, best-effort:
- * on failure the entry corrects itself when the 404 TTL or purge lands.
+ * entry before the next closure walk asks. O(1) per upload and amortized
+ * across a push's uploads (purgeCoalesced), best-effort: on failure the
+ * entry corrects itself when the 404 TTL or purge lands.
  */
 export async function warmNarinfoAfterUpload(
 	ctx: ExecutionContext | undefined,
@@ -247,12 +249,16 @@ export async function warmNarinfoAfterUpload(
 	try {
 		// The root ~upstream tag evicts a lingering root-proxy passthrough of
 		// the same path (uploads and pull-through ingestion both land here).
-		await store.purgeTags([
-			narinfoTag(cache.name, storePathHash),
-			narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash),
-			candidateTag('path', storePathHash),
-			candidateTag('nar', narHash)
-		]);
+		// Coalesced across the isolate: one purge call per window, not per path.
+		await purgeCoalesced(
+			(tags) => store.purgeTags(tags),
+			[
+				narinfoTag(cache.name, storePathHash),
+				narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash),
+				candidateTag('path', storePathHash),
+				candidateTag('nar', narHash)
+			]
+		);
 	} catch {
 		// stale entry expires via its max-age
 	}

@@ -1,4 +1,4 @@
-import { mapConcurrent, withRetry, withR2Retry } from './platform';
+import { mapConcurrent, sleep, withRetry, withR2Retry } from './platform';
 
 type Env = App.Platform['env'];
 type Purge = (tags: string[]) => Promise<void>;
@@ -64,4 +64,83 @@ export async function replayPurges(env: Env, purge: Purge): Promise<void> {
 		}
 		if (retired.length > 0) await env.CACHE_BUCKET.delete(retired);
 	}
+}
+
+// Per-isolate purge coalescing for the upload path. A push lands hundreds of
+// paths on one isolate within seconds and each used to issue its own purge
+// call (four tags), against a purge API that is rate limited on this plan.
+// Callers park their tags, wait out a short window on their own timer, and
+// whichever waiter wakes first with no live leader flushes everything parked
+// in PURGE_TAG_LIMIT batches; the rest poll a flushed watermark. Polling
+// rather than sharing the leader's promise: on Workers a promise settled
+// from another request's I/O context cancels the waiter's continuation (see
+// Semaphore in platform.ts). Leadership is an owned lease, not a flag: a
+// leader whose request context is torn down mid-flush never reaches its
+// finally, so followers take over once the lease lapses, and a superseded
+// leader that later returns must not release its successor's lease. Parked
+// tags carry the generation of their latest enqueue and leave only when that
+// generation was attempted: a tag re-parked while its purge is in flight is
+// a new obligation (the entry may have been repopulated in between), and a
+// dead leader's tags are re-flushed rather than lost.
+const COALESCE_WINDOW_MS = 250;
+const COALESCE_POLL_MS = 25;
+/** Longer than a healthy flush (a batch is ~100 ms; retries add seconds),
+ * shorter than the waitUntil budget so a follower can still take over. */
+const COALESCE_LEASE_MS = 15_000;
+const COALESCE_WAIT_MS = 25_000;
+const parked = new Map<string, number>();
+let parkedSeq = 0;
+let flushedSeq = 0;
+let leaseSeq = 0;
+let leaseOwner = 0;
+let leaseUntil = 0;
+
+/**
+ * Purge `tags` together with whatever else this isolate parks within the
+ * window. Resolves once a flush covering the tags was attempted; a batch
+ * that failed has been journaled by the purge itself (purgeWithJournal), so
+ * followers treat the covered watermark as done and only the leader sees the
+ * error.
+ */
+export async function purgeCoalesced(purge: Purge, tags: string[]): Promise<void> {
+	const mine = ++parkedSeq;
+	for (const tag of tags) parked.set(tag, mine);
+	await sleep(COALESCE_WINDOW_MS);
+	const deadline = Date.now() + COALESCE_WAIT_MS;
+	while (flushedSeq < mine) {
+		if (Date.now() >= leaseUntil) {
+			const lease = ++leaseSeq;
+			leaseOwner = lease;
+			leaseUntil = Date.now() + COALESCE_LEASE_MS;
+			const covered = parkedSeq;
+			try {
+				await flushParked(purge);
+			} finally {
+				flushedSeq = Math.max(flushedSeq, covered);
+				if (leaseOwner === lease) leaseUntil = 0;
+			}
+			return;
+		}
+		if (Date.now() > deadline) throw new Error('purge coalescing: flush wait timed out');
+		await sleep(COALESCE_POLL_MS + Math.random() * COALESCE_POLL_MS);
+	}
+}
+
+/** Every batch is attempted even when an earlier one failed; the first
+ * error is rethrown afterwards. */
+async function flushParked(purge: Purge): Promise<void> {
+	const entries = [...parked];
+	let failure: unknown;
+	for (let i = 0; i < entries.length; i += PURGE_TAG_LIMIT) {
+		const batch = entries.slice(i, i + PURGE_TAG_LIMIT);
+		try {
+			await purge(batch.map(([tag]) => tag));
+		} catch (e) {
+			failure ??= e;
+		}
+		for (const [tag, generation] of batch) {
+			if (parked.get(tag) === generation) parked.delete(tag);
+		}
+	}
+	if (failure !== undefined) throw failure;
 }
