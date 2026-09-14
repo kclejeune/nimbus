@@ -570,17 +570,47 @@ export interface NewNar {
 	num_chunks: number;
 }
 
-export async function createNar(db: D1Database, nar: NewNar): Promise<number> {
-	// holders_count 0: a fresh 'P' row is protected from the orphan reaper by
-	// its 1h grace period until the linking batch lands the object row.
-	const stmt = db
+/**
+ * A NAR row addressed by a statement: its id, or — for the row inserted by
+ * insertNarStmt earlier in the same batch — the newest row for its hash. The
+ * batch is one transaction, so nothing can interleave another row for the
+ * hash between the INSERT and the statements naming it; across batches (a
+ * link that spans several windows) only the id form is safe, and callers
+ * resolve it from the INSERT's RETURNING result.
+ */
+export type NarRef = number | { pendingHash: string };
+
+/** SQL for a NarRef bound at ?param (the id, or the hash of the new row). */
+function narRefSql(ref: NarRef, param: number): string {
+	return typeof ref === 'number'
+		? `?${param}`
+		: `(SELECT id FROM nar WHERE nar_hash = ?${param} ORDER BY id DESC LIMIT 1)`;
+}
+function narRefBind(ref: NarRef): number | string {
+	return typeof ref === 'number' ? ref : ref.pendingHash;
+}
+
+// holders_count 0: a fresh 'P' row is protected from the orphan reaper by its
+// 1h grace period until the linking batch lands the object row.
+export function insertNarStmt(db: D1Database, nar: NewNar): D1PreparedStatement {
+	return db
 		.prepare(
 			'INSERT INTO nar (state, nar_hash, nar_size, compression, num_chunks, ' +
-				'completeness_hint, holders_count, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6)'
+				'completeness_hint, holders_count, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6) ' +
+				'RETURNING id'
 		)
 		.bind(nar.state, nar.nar_hash, nar.nar_size, nar.compression, nar.num_chunks, nowRfc3339());
-	const result = await dbRun(stmt);
-	return requireRowId(result, 'nar');
+}
+
+/** The id an insertNarStmt returned within a batch. */
+export function insertedNarId(result: D1Result): number {
+	const id = (result.results as { id?: number }[] | undefined)?.[0]?.id;
+	if (id == null) throw new Error('No row id returned inserting nar');
+	return id;
+}
+
+export async function createNar(db: D1Database, nar: NewNar): Promise<number> {
+	return insertedNarId(await dbRun(insertNarStmt(db, nar)));
 }
 
 export interface NewChunk {
@@ -862,7 +892,7 @@ export async function hasAttachedNar(
  */
 export function insertChunkRefStmt(
 	db: D1Database,
-	narId: number,
+	nar: NarRef,
 	seq: number,
 	chunkId: number | null,
 	chunkHash: string,
@@ -871,10 +901,10 @@ export function insertChunkRefStmt(
 	return db
 		.prepare(
 			'INSERT INTO chunkref (nar_id, seq, chunk_id, chunk_hash, compression) ' +
-				'VALUES (?1, ?2, COALESCE(?3, ' +
+				`VALUES (${narRefSql(nar, 1)}, ?2, COALESCE(?3, ` +
 				'(SELECT id FROM chunk WHERE chunk_hash = ?4 AND compression = ?5)), ?4, ?5)'
 		)
-		.bind(narId, seq, chunkId, chunkHash, compression);
+		.bind(narRefBind(nar), seq, chunkId, chunkHash, compression);
 }
 
 export interface NewObject {
@@ -894,12 +924,18 @@ export interface NewObject {
 	created_by: string | null;
 }
 
-export function insertObjectStmt(db: D1Database, object: NewObject): D1PreparedStatement {
+/** `nar` overrides object.nar_id so a publishing batch can name the NAR row
+ * it inserts itself (NarRef). */
+export function insertObjectStmt(
+	db: D1Database,
+	object: Omit<NewObject, 'nar_id'> & { nar_id?: number },
+	nar: NarRef = object.nar_id!
+): D1PreparedStatement {
 	return db
 		.prepare(
 			'INSERT INTO object (cache_id, nar_id, store_path_hash, store_path, ' +
 				'refs, system, deriver, sigs, ca, created_at, created_by, source) ' +
-				'SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 WHERE ' +
+				`SELECT ?1, ${narRefSql(nar, 2)}, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 WHERE ` +
 				(object.publishTrust
 					? "EXISTS (SELECT 1 FROM upstream u JOIN cache c ON c.id = ?1 LEFT JOIN cache_upstream cu ON cu.cache_id = c.id AND cu.upstream_id = u.id WHERE u.id = ?13 AND u.public_key = ?14 AND u.url = ?15 AND c.deleted_at IS NULL AND COALESCE(cu.mode, u.default_mode) = 'persist') "
 					: '1 ') +
@@ -910,7 +946,7 @@ export function insertObjectStmt(db: D1Database, object: NewObject): D1PreparedS
 		)
 		.bind(
 			object.cache_id,
-			object.nar_id,
+			narRefBind(nar),
 			object.store_path_hash,
 			object.store_path,
 			JSON.stringify(object.references),
@@ -958,10 +994,12 @@ export async function objectPublished(
 
 export function updateNarStateStmt(
 	db: D1Database,
-	narId: number,
+	nar: NarRef,
 	state: string
 ): D1PreparedStatement {
-	return db.prepare('UPDATE nar SET state = ?1 WHERE id = ?2').bind(state, narId);
+	return db
+		.prepare(`UPDATE nar SET state = ?1 WHERE id = ${narRefSql(nar, 2)}`)
+		.bind(state, narRefBind(nar));
 }
 
 export async function updateNarState(db: D1Database, narId: number, state: string): Promise<void> {
@@ -1330,10 +1368,4 @@ export async function cachesWithNarHash(
 
 function nowRfc3339(): string {
 	return new Date().toISOString();
-}
-
-function requireRowId(result: { meta: { last_row_id?: number } }, what: string): number {
-	const id = result.meta.last_row_id;
-	if (id === undefined || id === null) throw new Error(`No row id returned inserting ${what}`);
-	return id;
 }

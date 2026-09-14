@@ -67,18 +67,6 @@ const NAR_INFO_PREAMBLE_HEADER = 'X-Attic-Nar-Info-Preamble-Size';
 /** A publishTrust-guarded object insert changed no row: the upstream's key,
  * URL, subscription or the cache's liveness changed between the trust check
  * at ingest start and publication. Nothing was published. */
-/** The object insert is the last statement of a publishing batch; a guarded
- * insert that changed nothing means this cache refused the attachment. */
-async function publishedOrThrow(
-	d1: D1Database,
-	object: db.NewObject,
-	results: D1Result[],
-	info: UploadNarInfo
-): Promise<void> {
-	if (!(await db.objectPublished(d1, object, results[results.length - 1])))
-		throw new PublicationRejectedError(info);
-}
-
 export class PublicationRejectedError extends Error {
 	constructor(info: { cache: string; store_path_hash: string }) {
 		super(
@@ -355,37 +343,70 @@ async function linkChunkedNar(
 	narSize: number
 ): Promise<void> {
 	const d1 = env.ATTIC_DB;
-	let narId: number | undefined;
+	const fresh = [...new Set(records.filter((r) => r.fresh).map((r) => r.chunkId))];
 	try {
-		narId = await db.createNar(d1, {
+		await publishNar(d1, info, cacheId, narSize, kind, records.length, (ref) => [
+			...fresh.map((id) => db.publishChunkStmt(d1, id)),
+			...records.map((record, seq) =>
+				db.insertChunkRefStmt(d1, ref, seq, record.chunkId, `sha256:${record.hash}`, kind)
+			)
+		]);
+	} finally {
+		// Staged chunks may be shared with another upload; GC owns their R2
+		// cleanup, so only the NAR (inside publishNar) is rolled back.
+		await releaseChunkLocks(env, records);
+	}
+}
+
+/**
+ * Insert the nar row, run `link` against it, attach the object and mark the
+ * NAR valid — all in one D1 batch (one transaction, one primary round trip)
+ * addressing the new row by hash. A link too large for one batch commits
+ * the first window, reads the id it returned and runs the rest by id, since
+ * across transactions the by-hash form could pick up a concurrent identical
+ * upload's row. A failed first window leaves nothing behind; a failure after
+ * it (later window, refused attachment) marks the NAR 'D' for GC.
+ */
+async function publishNar(
+	d1: D1Database,
+	info: UploadNarInfo,
+	cacheId: number,
+	narSize: number,
+	compression: string,
+	numChunks: number,
+	link: (ref: db.NarRef) => D1PreparedStatement[]
+): Promise<number> {
+	const object = newObjectFrom(info, cacheId, 0);
+	const stmts = (ref: db.NarRef) => [
+		...link(ref),
+		db.updateNarStateStmt(d1, ref, 'V'),
+		db.insertObjectStmt(d1, object, ref)
+	];
+	const byHash = [
+		db.insertNarStmt(d1, {
 			state: 'P',
 			nar_hash: info.nar_hash,
 			nar_size: narSize,
-			compression: kind,
-			num_chunks: records.length
-		});
-		const stmts: D1PreparedStatement[] = [];
-		for (const id of new Set(records.filter((r) => r.fresh).map((r) => r.chunkId))) {
-			stmts.push(db.publishChunkStmt(d1, id));
+			compression,
+			num_chunks: numChunks
+		}),
+		...stmts({ pendingHash: info.nar_hash })
+	];
+	const results = await db.dbBatch(d1, byHash.slice(0, db.STMT_BATCH));
+	const narId = db.insertedNarId(results[0]);
+	try {
+		if (byHash.length > db.STMT_BATCH) {
+			// The first window held the INSERT plus STMT_BATCH - 1 statements.
+			const rest = stmts(narId).slice(db.STMT_BATCH - 1);
+			results.push(...(await db.runBatched(d1, rest)));
 		}
-		for (const [seq, record] of records.entries()) {
-			stmts.push(
-				db.insertChunkRefStmt(d1, narId, seq, record.chunkId, `sha256:${record.hash}`, kind)
-			);
-		}
-		stmts.push(db.updateNarStateStmt(d1, narId, 'V'));
-		const object = newObjectFrom(info, cacheId, narId);
-		stmts.push(db.insertObjectStmt(d1, object));
-		// The NAR row is this call's own (created P above); a refused
-		// attachment leaves it unreferenced, so the rollback below applies.
-		await publishedOrThrow(d1, object, await db.runBatched(d1, stmts), info);
+		const objectResult = results[results.length - 1];
+		if (!(await db.objectPublished(d1, { ...object, nar_id: narId }, objectResult)))
+			throw new PublicationRejectedError(info);
+		return narId;
 	} catch (e) {
-		// Staged chunks may be shared with another upload; GC owns their R2
-		// cleanup, so only this NAR is rolled back here.
-		if (narId !== undefined) await db.updateNarState(d1, narId, 'D').catch(() => {});
+		await db.updateNarState(d1, narId, 'D').catch(() => {});
 		throw e;
-	} finally {
-		await releaseChunkLocks(env, records);
 	}
 }
 
@@ -430,28 +451,12 @@ async function createUploadRows(
 	}
 ): Promise<Response> {
 	const d1 = env.ATTIC_DB;
-	const narId = await db.createNar(d1, {
-		state: 'P',
-		nar_hash: info.nar_hash,
-		nar_size: opts.narSize,
-		compression: opts.compression,
-		num_chunks: 1
-	});
-	try {
-		const object = newObjectFrom(info, cacheId, narId);
-		const results = await db.runBatched(d1, [
-			db.publishChunkStmt(d1, opts.chunkId),
-			db.insertChunkRefStmt(d1, narId, 0, opts.chunkId, info.nar_hash, opts.compression),
-			db.updateNarStateStmt(d1, narId, 'V'),
-			db.insertObjectStmt(d1, object)
-		]);
-		await publishedOrThrow(d1, object, results, info);
-	} catch (e) {
-		await db.updateNarState(d1, narId, 'D').catch(() => {});
-		// The staged chunk owns the R2 key; GC handles rollback without a
-		// check-then-delete race against another upload adopting these bytes.
-		throw e;
-	}
+	// The staged chunk owns the R2 key; on failure GC handles rollback without
+	// a check-then-delete race against another upload adopting these bytes.
+	await publishNar(d1, info, cacheId, opts.narSize, opts.compression, 1, (ref) => [
+		db.publishChunkStmt(d1, opts.chunkId),
+		db.insertChunkRefStmt(d1, ref, 0, opts.chunkId, info.nar_hash, opts.compression)
+	]);
 	return uploadedResult(opts.fileSize, 0);
 }
 
@@ -949,11 +954,14 @@ export async function handleCdcChunkPut(
 	if (!HEX64.test(hash)) return errorResponse(400, `Invalid chunk hash: ${hash}`);
 	const cache = await findCacheCached(env.ATTIC_DB, cacheName);
 	if (!cache) return errorResponse(400, 'Missing or invalid cache');
-	// The dedup lookup depends only on the hash, so its primary round trip
-	// hides behind the body read, decompression and digest. Verification is
-	// awaited first regardless: it holds a wasm slot that must be released
-	// before this request's admission is, even when the lookup failed.
-	const lookup = db.findChunk(env.ATTIC_DB, `sha256:${hash}`, 'zstd');
+	// The dedup lookup depends only on the hash, so its round trip hides
+	// behind the body read, decompression and digest. A replica read: a stale
+	// miss just stages afresh and the unique index converges it, and the
+	// repair path re-reads the primary before acting on a lost compare-and-set.
+	// Verification is awaited first regardless: it holds a wasm slot that must
+	// be released before this request's admission is, even when the lookup
+	// failed.
+	const lookup = db.findChunk(db.readSession(env.ATTIC_DB), `sha256:${hash}`, 'zstd');
 	lookup.catch(() => {});
 	const verified = await verifyChunk(request, hash);
 	if (verified instanceof Response) return verified;
