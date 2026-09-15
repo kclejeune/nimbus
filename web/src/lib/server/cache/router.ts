@@ -294,8 +294,7 @@ async function forwardToStore(
 	// The narinfo body is tiny, so buffering it to hand to the ingest is free.
 	const text = await response.text();
 	if (ctx?.waitUntil) {
-		const origin = new URL(request.url).origin;
-		ctx.waitUntil(persistUpstreamPath(env, ctx, origin, cacheName, upstreamUrl, text));
+		ctx.waitUntil(persistUpstreamPath(env, ctx, cacheName, upstreamUrl, text));
 	}
 	const stripped = new Response(text, response);
 	stripped.headers.delete(PERSIST_CACHE_HEADER);
@@ -959,7 +958,6 @@ async function handleV1(
 				return await handleCdcQuery(
 					env,
 					ctx,
-					url.origin,
 					manifest,
 					(cacheName) => permissionForCache(token, cacheName).pull
 				);
@@ -976,7 +974,7 @@ async function handleV1(
 			) {
 				const manifest = await parseManifest();
 				if (manifest instanceof Response) return manifest;
-				return await handleCdcComplete(env, ctx, url.origin, manifest);
+				return await handleCdcComplete(env, ctx, manifest);
 			}
 			return errorResponse(404, 'Not found');
 		} finally {

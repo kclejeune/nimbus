@@ -71,9 +71,7 @@ describe('audit security regressions', () => {
 			nar_info: { ...manifest.nar_info, cache: 'attacker' },
 			chunks: [{ hash: 'f'.repeat(64), size: 3 }]
 		};
-		expect((await handleCdcComplete(env, undefined, 'https://cache.test', attack)).status).toBe(
-			403
-		);
+		expect((await handleCdcComplete(env, undefined, attack)).status).toBe(403);
 		expect(await findNarWithChunks(fixture.db, [manifest.nar_info.nar_hash])).toBeNull();
 	});
 	it.each([undefined, 'invalid-receipt'])(
@@ -85,7 +83,7 @@ describe('audit security regressions', () => {
 				nar_info: { ...manifest.nar_info, cache: 'attacker', nar_hash: `sha256:${'b'.repeat(64)}` },
 				chunks: manifest.chunks.map((chunk) => ({ ...chunk, proof }))
 			};
-			const response = await handleCdcComplete(env, undefined, 'https://cache.test', attack);
+			const response = await handleCdcComplete(env, undefined, attack);
 			expect(response.status).toBe(403);
 			expect(await response.text()).toContain(
 				proof ? 'Invalid or expired chunk possession proof' : 'upgrade the nimbus CLI to v0.6.1'
@@ -126,7 +124,7 @@ describe('audit security regressions', () => {
 				},
 				chunks: [{ hash, size: 3, proof }]
 			};
-			const response = await handleCdcComplete(env, undefined, 'https://cache.test', own);
+			const response = await handleCdcComplete(env, undefined, own);
 			expect(response.status).toBe(forged ? 400 : 200);
 			const found = await findNarWithChunks(fixture.db, [own.nar_info.nar_hash]);
 			if (forged) expect(found).toBeNull();
@@ -189,7 +187,7 @@ describe('audit security regressions', () => {
 					{ hash: otherHash, size: 3 }
 				]
 			};
-			const response = await handleCdcQuery(env, undefined, 'https://cache.test', query);
+			const response = await handleCdcQuery(env, undefined, query);
 			expect(response.status).toBe(200);
 			const result = (await response.json()) as {
 				kind: string;
@@ -208,7 +206,7 @@ describe('audit security regressions', () => {
 		expect((await handleBufferedUpload(env, manifest.nar_info, 1, 'zstd', raw)).status).toBe(200);
 		const into = (cache: string) => ({ ...manifest, nar_info: { ...manifest.nar_info, cache } });
 		const query = (cache: string, canPull: (name: string) => boolean) =>
-			handleCdcQuery(env, undefined, 'https://cache.test', into(cache), canPull).then(
+			handleCdcQuery(env, undefined, into(cache), canPull).then(
 				(r) =>
 					r.json() as Promise<{ missing_chunk_hashes: string[]; proofs: Record<string, string> }>
 			);
@@ -234,7 +232,7 @@ describe('audit security regressions', () => {
 		).toBe(true);
 		stubDigestStream();
 		const own = { ...into('attacker'), chunks: [{ hash, size: 3, proof: entitled.proofs[hash] }] };
-		expect((await handleCdcComplete(env, undefined, 'https://cache.test', own)).status).toBe(200);
+		expect((await handleCdcComplete(env, undefined, own)).status).toBe(200);
 		expect(await findNarWithChunks(fixture.db, [manifest.nar_info.nar_hash])).not.toBeNull();
 
 		// A destination that already holds the chunk discloses nothing new by
@@ -242,7 +240,6 @@ describe('audit security regressions', () => {
 		const again = await handleCdcQuery(
 			env,
 			undefined,
-			'https://cache.test',
 			{ ...manifest, nar_info: { ...manifest.nar_info, store_path_hash: 'd'.repeat(32) } },
 			() => false
 		).then(
@@ -324,7 +321,7 @@ describe('audit security regressions', () => {
 		const putJson = () =>
 			putChunk(live).then((r) => r.json() as Promise<{ proof: string; repaired?: boolean }>);
 		const complete = (proof: string, storePathHash = manifest.nar_info.store_path_hash) =>
-			handleCdcComplete(live, undefined, 'https://cache.test', {
+			handleCdcComplete(live, undefined, {
 				...manifest,
 				nar_info: { ...manifest.nar_info, cache: 'attacker', store_path_hash: storePathHash },
 				chunks: [{ hash, size: 3, proof }]
@@ -378,7 +375,7 @@ describe('audit security regressions', () => {
 					})
 				}));
 			}
-			const completion = handleCdcComplete(live, undefined, 'https://cache.test', {
+			const completion = handleCdcComplete(live, undefined, {
 				...manifest,
 				nar_info: {
 					...manifest.nar_info,

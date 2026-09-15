@@ -75,7 +75,7 @@ describe('upload lifecycle', () => {
 		const waitUntil = vi.fn();
 		const ctx = { waitUntil } as unknown as App.Platform['ctx'];
 		for (const handler of [handleCdcQuery, handleCdcComplete]) {
-			expect(await (await handler(env, ctx, 'https://cache.test', manifest)).json()).toMatchObject({
+			expect(await (await handler(env, ctx, manifest)).json()).toMatchObject({
 				kind: 'deduplicated'
 			});
 		}
@@ -98,9 +98,11 @@ describe('upload lifecycle', () => {
 
 	it('a fresh CDC query is strictly read-only', async () => {
 		const before = fixture.totalChanges();
-		expect(
-			await (await handleCdcQuery(env, undefined, 'https://cache.test', manifest)).json()
-		).toEqual({ kind: 'pending', missing_chunk_hashes: [hash], proofs: {} });
+		expect(await (await handleCdcQuery(env, undefined, manifest)).json()).toEqual({
+			kind: 'pending',
+			missing_chunk_hashes: [hash],
+			proofs: {}
+		});
 		expect(fixture.totalChanges()).toBe(before);
 		expect(put).not.toHaveBeenCalled();
 	});

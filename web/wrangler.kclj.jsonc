@@ -40,7 +40,7 @@
 			"enabled": true,
 			"destinations": ["traceway-traces"],
 			"persist": true,
-			"head_sampling_rate": 0.1
+			"head_sampling_rate": 0.25
 		}
 	},
 

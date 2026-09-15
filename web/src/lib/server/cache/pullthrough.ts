@@ -36,7 +36,7 @@ import {
 	VERDICT_UNPERSISTABLE
 } from './missing-paths';
 import { readAll, withSlot, uploadMemory, type ExecutionContext } from './platform';
-import { warmNarinfoAfterUpload } from './store';
+import { invalidateAfterUpload } from './store';
 import { TtlMemo } from './ttl-memo';
 import {
 	PublicationRejectedError,
@@ -88,7 +88,6 @@ async function takeIngestBudget(env: Env): Promise<boolean> {
 export async function persistUpstreamPath(
 	env: Env,
 	ctx: ExecutionContext | undefined,
-	origin: string,
 	cacheName: string,
 	upstreamUrl: string,
 	narinfoText: string
@@ -189,7 +188,7 @@ export async function persistUpstreamPath(
 		const existingNar = await tryLockNarProbed(env, info.nar_hash);
 		if (existingNar) {
 			await finishDeduplicated(env, info, cache.id, existingNar.id);
-			await warmNarinfoAfterUpload(ctx, origin, cache, storePathHash, info.nar_hash);
+			await invalidateAfterUpload(ctx, cache, storePathHash, info.nar_hash);
 			return;
 		}
 
@@ -260,10 +259,8 @@ export async function persistUpstreamPath(
 		}
 
 		// Evict the passthrough narinfos (per-cache tag and the root proxy's
-		// upstream namespace — both purged by the warm) and cache the re-signed
-		// local entry, so clients flip to local serving without waiting out the
-		// TTL.
-		await warmNarinfoAfterUpload(ctx, origin, cache, storePathHash, info.nar_hash);
+		// upstream namespace), so the next read populates the local entry.
+		await invalidateAfterUpload(ctx, cache, storePathHash, info.nar_hash);
 		console.log(
 			`pullthrough: persisted ${parsed.storePath} (${raw.length} bytes raw) into ${cacheName}`
 		);
@@ -271,7 +268,7 @@ export async function persistUpstreamPath(
 		// A rejected publication is an outcome, not a failure: the trust
 		// re-check at publication time found the upstream's key, URL,
 		// subscription or the cache changed since ingest began. Nothing was
-		// published and nothing is warmed; the passthrough keeps serving.
+		// published and nothing is invalidated; the passthrough keeps serving.
 		if (e instanceof PublicationRejectedError) console.warn(`pullthrough: ${e.message}`);
 		else console.warn(`pullthrough: ingest into ${cacheName} from ${upstreamUrl} failed: ${e}`);
 	} finally {

@@ -61,7 +61,7 @@ const NARINFO_CACHE_CONTROL =
 // Negative caching: absent paths (mostly upstream-filtered references) are
 // re-queried by every closure walk, so an uncacheable 404 sends each walk to
 // D1 for the whole set. The 404 carries the same narinfo tag a real entry
-// would, and uploads purge it (warmNarinfoAfterUpload), so a landed path
+// would, and uploads purge it (invalidateAfterUpload), so a landed path
 // becomes visible immediately; max-age bounds the invisibility when that
 // purge is missed (worst case: the next CI run rebuilds the path and the
 // re-push dedups server-side).
@@ -227,17 +227,13 @@ export function narStoreUrl(
 }
 
 /**
- * After an upload lands an object, purge its narinfo tag (covering both a
- * negatively-cached 404 and a stale narinfo from re-pushing an existing
- * path), then re-fetch through the loopback so the edge holds the fresh
- * entry before the next closure walk asks. O(1) per upload and amortized
- * across a push's uploads (purgeCoalesced), best-effort: on failure the
- * entry corrects itself when the 404 TTL or purge lands.
+ * Invalidate published paths without warming through the cached loopback.
+ * Post-response warm fetches coincided with CachedStore hung diagnostics;
+ * leave population to the next client read while retaining every purge tag.
  */
-export async function warmNarinfoAfterUpload(
+export async function invalidateAfterUpload(
 	ctx: ExecutionContext | undefined,
-	origin: string,
-	cache: { name: string; keypair: string | null },
+	cache: { name: string },
 	storePathHash: string,
 	narHash: string
 ): Promise<void> {
@@ -259,16 +255,14 @@ export async function warmNarinfoAfterUpload(
 				candidateTag('nar', narHash)
 			]
 		);
-	} catch {
-		// stale entry expires via its max-age
-	}
-	try {
-		const res = await store.fetch(
-			new Request(keyedNarinfoUrl(origin, cache.name, storePathHash, cache.keypair))
+	} catch (error) {
+		console.warn(
+			JSON.stringify({
+				event: 'nimbus.invalidate',
+				phase: 'error',
+				error: error instanceof Error ? error.message : String(error)
+			})
 		);
-		await res.arrayBuffer();
-	} catch {
-		// best-effort: the next client miss populates the entry instead
 	}
 }
 

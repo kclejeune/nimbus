@@ -252,5 +252,5 @@ executes the store and its metadata lookup. Legacy oversized single-object NARs
 still stream directly from R2.
 
 Read and guard metrics are sampled 1-in-100 with weights; traces are sampled at
-10%. Automatic invocation logs are disabled, while application logs remain
+25%. Automatic invocation logs are disabled, while application logs remain
 unsampled. Lower the sampling divisor temporarily when investigating sparse traffic.

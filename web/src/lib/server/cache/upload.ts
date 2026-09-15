@@ -33,7 +33,7 @@ import { recordPush, recordStoreWrite } from './metrics';
 import { issueChunkProof, verifyChunkProof } from './chunk-proof';
 import { bytesToHex, stripSha256 } from '../attic/nix-base32';
 import { newDigestStream, readAll, withR2Retry, withSlot, type ExecutionContext } from './platform';
-import { warmNarinfoAfterUpload } from './store';
+import { invalidateAfterUpload } from './store';
 import { bodyDeadline, isRecord, readWithTimeout } from '../request-body';
 import { AdmissionError, takeBudgetUnits } from './admission';
 
@@ -591,15 +591,7 @@ export async function handleUploadPath(
 		// narLength is the raw NAR stream on the wire; a dedup push still
 		// transfers it (the possession proof), so it holds for both branches.
 		recordPush(env, info.cache, { deduplicated: !!existing, narBytes: narLength ?? 0 });
-		ctx?.waitUntil(
-			warmNarinfoAfterUpload(
-				ctx,
-				new URL(request.url).origin,
-				cache,
-				info.store_path_hash,
-				info.nar_hash
-			)
-		);
+		ctx?.waitUntil(invalidateAfterUpload(ctx, cache, info.store_path_hash, info.nar_hash));
 	}
 	return response;
 }
@@ -853,7 +845,6 @@ export function validateManifest(body: CdcManifest): Response | null {
 export async function handleCdcQuery(
 	env: Env,
 	ctx: ExecutionContext | undefined,
-	origin: string,
 	body: CdcManifest,
 	canPull: (cacheName: string) => boolean = () => false
 ): Promise<Response> {
@@ -1081,7 +1072,6 @@ async function repairChunk(
 export async function handleCdcComplete(
 	env: Env,
 	ctx: ExecutionContext | undefined,
-	origin: string,
 	body: CdcManifest
 ): Promise<Response> {
 	const denied = validateManifest(body);
@@ -1089,8 +1079,8 @@ export async function handleCdcComplete(
 	const info = body.nar_info;
 	const cache = await findCacheCached(env.ATTIC_DB, info.cache);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
-	const warm = () =>
-		ctx?.waitUntil(warmNarinfoAfterUpload(ctx, origin, cache, info.store_path_hash, info.nar_hash));
+	const invalidate = () =>
+		ctx?.waitUntil(invalidateAfterUpload(ctx, cache, info.store_path_hash, info.nar_hash));
 	if (
 		await db.hasAttachedNar(
 			db.readSession(env.ATTIC_DB),
@@ -1253,7 +1243,7 @@ export async function handleCdcComplete(
 		body.nar_size
 	);
 	recordPush(env, info.cache, { deduplicated: false, narBytes: body.nar_size });
-	warm();
+	invalidate();
 	const fileSize = records.every((r) => r.fileSize != null)
 		? records.reduce((sum, r) => sum + (r.fileSize ?? 0), 0)
 		: null;

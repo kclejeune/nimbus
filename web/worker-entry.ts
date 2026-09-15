@@ -74,7 +74,37 @@ export class CachedStore extends WorkerEntrypoint {
 	 * a purge from the gateway would target the gateway's (disabled) cache.
 	 */
 	async purgeTags(tags: string[]) {
-		await purgeWithJournal(this.env as Env, tags, (batch) => this.purge(batch));
+		await this.observePurge('rpc', tags.length, () =>
+			withSpan(this.ctx, 'store purgeTags', () =>
+				purgeWithJournal(this.env as Env, tags, (batch) => this.purge(batch))
+			)
+		);
+	}
+
+	private async observePurge<T>(operation: string, tagCount: number, run: () => Promise<T>) {
+		const operationId = crypto.randomUUID();
+		const started = Date.now();
+		const log = (phase: string) =>
+			console.log(
+				JSON.stringify({
+					event: 'nimbus.purge',
+					operation,
+					operationId,
+					tagCount,
+					phase,
+					ms: Date.now() - started
+				})
+			);
+		// Entry logs survive cancellations that never reach catch/finally.
+		log('start');
+		try {
+			const result = await run();
+			log('ok');
+			return result;
+		} catch (error) {
+			log('error');
+			throw error;
+		}
 	}
 
 	async processChunkRepair(key: string) {
@@ -101,8 +131,11 @@ export class CachedStore extends WorkerEntrypoint {
 			}
 		).cache;
 		if (!cache) throw new Error('ctx.cache unavailable');
-		const result = await cache.purge({ tags });
-		if (!result.success) throw new Error(`Cache purge rejected: ${JSON.stringify(result.errors)}`);
+		await this.observePurge('cache', tags.length, async () => {
+			const result = await cache.purge({ tags });
+			if (!result.success)
+				throw new Error(`Cache purge rejected: ${JSON.stringify(result.errors)}`);
+		});
 	}
 }
 
