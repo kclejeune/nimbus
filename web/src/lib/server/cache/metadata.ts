@@ -1,3 +1,4 @@
+import type { D1Database } from '@cloudflare/workers-types';
 import * as db from './db';
 import { AdmissionError, CLIENT_IP_HEADER, clientKey, requireBudget } from './admission';
 import type { ExecutionContext } from './platform';
@@ -15,8 +16,12 @@ export const candidateTag = (kind: string, hash: string) =>
  * stays caller-independent), and not at all for internal loopbacks that carry
  * no IP — prefetch has its own budget, and a constant colo-wide key here made
  * one CI fleet's cold closure everyone's 503. */
-export async function chargeBackendRead(env: App.Platform['env'], request: Request): Promise<void> {
-	const clientIp = request.headers.get(CLIENT_IP_HEADER);
+export function chargeBackendRead(env: App.Platform['env'], request: Request): Promise<void> {
+	return chargeClientRead(env, request.headers.get(CLIENT_IP_HEADER));
+}
+
+/** Charge one D1 read to a client's backend-read budget; free without an IP. */
+async function chargeClientRead(env: App.Platform['env'], clientIp: string | null): Promise<void> {
 	if (clientIp) await requireBudget(env.BACKEND_READ_LIMITER, clientKey('backend-read', clientIp));
 }
 
@@ -48,10 +53,22 @@ export function internalRequest(
 // store 404s a reaped object; visibility is re-read below), so it can live
 // an hour — at 30 s prod paid a candidate D1 read per unified-endpoint
 // request, half of all D1 reads. An empty list stays short: a lagging refill
-// after an upload would otherwise hide the fresh path for the whole TTL. So
-// does the NAR manifest — a re-upload after GC changes its chunk keys.
+// after an upload would otherwise hide the fresh path for the whole TTL.
+// It is still served stale while it refreshes, since upstream-only paths are
+// re-polled every couple of minutes and a synchronous refill dominated their
+// latency; stale-if-error=0 overrides the platform's indefinite default, and
+// Candidates.stale keeps a stale empty entry from ending in a 404 unconfirmed.
+// The NAR manifest stays must-revalidate — a re-upload after GC changes its
+// chunk keys.
 const LONG_CACHE_CONTROL = 'public, max-age=3600, stale-while-revalidate=86400';
+const EMPTY_MAX_AGE_MS = 30_000;
+const EMPTY_CACHE_CONTROL = `public, max-age=${EMPTY_MAX_AGE_MS / 1000}, stale-while-revalidate=300, stale-if-error=0`;
 const SHORT_CACHE_CONTROL = 'public, max-age=30, must-revalidate';
+
+// When a candidate list was read from D1. The edge keeps it with the entry,
+// so the gateway judges staleness from the fill itself rather than from how
+// the caching layer labels a stale-while-revalidate hit in CF-Cache-Status.
+const FILLED_AT_HEADER = 'X-Nimbus-Filled-At';
 
 /** Internal metadata: edge-cached, evicted by tag on change. */
 function cachedJson(body: unknown, tag: string, cacheControl: string): Response {
@@ -62,6 +79,14 @@ function cachedJson(body: unknown, tag: string, cacheControl: string): Response 
 			'Cache-Tag': `${CANDIDATES_TAG},${tag}`
 		}
 	});
+}
+
+/** Whether an entry is past the empty max-age. A missing or malformed stamp
+ * counts as stale: confirming costs one memoized replica read, while wrongly
+ * trusting it can hide a fresh upload behind a 404. */
+function pastEmptyMaxAge(headers: Headers): boolean {
+	const filledAt = Number(headers.get(FILLED_AT_HEADER));
+	return !(filledAt > 0) || Date.now() - filledAt >= EMPTY_MAX_AGE_MS;
 }
 
 /** Release a loopback RPC result whose body will not be read: an unconsumed
@@ -121,20 +146,18 @@ export function remainingFreshMs(headers: Headers): number {
 export async function serveCandidates(
 	request: Request,
 	env: App.Platform['env'],
-	kind: string,
+	kind: 'nar' | 'path',
 	hash: string
 ): Promise<Response> {
 	await chargeBackendRead(env, request);
-	const session = db.readSession(env.ATTIC_DB);
-	const rows =
-		kind === 'nar'
-			? await db.cachesWithNarHash(session, [`sha256:${hash}`, hash])
-			: await db.cachesWithStorePathHash(session, hash);
-	return cachedJson(
+	const rows = await readCandidateRows(db.readSession(env.ATTIC_DB), kind, hash);
+	const response = cachedJson(
 		rows,
 		candidateTag(kind, hash),
-		rows.length > 0 ? LONG_CACHE_CONTROL : SHORT_CACHE_CONTROL
+		rows.length > 0 ? LONG_CACHE_CONTROL : EMPTY_CACHE_CONTROL
 	);
+	response.headers.set(FILLED_AT_HEADER, String(Date.now()));
+	return response;
 }
 
 export interface Candidates {
@@ -144,18 +167,28 @@ export interface Candidates {
 	 * the long-lived kind whose staleness confirmCandidates guards, even when
 	 * every listed cache has since been deleted and `rows` is empty. */
 	listed: boolean;
+	/** Re-read an empty entry served past its max-age before a miss becomes
+	 * final: it can predate an upload by the stale window, so it must not end
+	 * in a 404 or an absence record unconfirmed. Null when there is nothing
+	 * to confirm (a listed or fresh empty entry). */
+	confirmEmpty(): Promise<db.LiveCacheRow[] | null>;
 }
 
 // Only positive memberships are memoized. Visibility is resolved again on every
 // read, and empty entries retain precisely their existing edge-cache lifetime.
 // A new membership missing from this five-second snapshot still triggers the
 // primary confirmation path; upload/confirmation invalidate this isolate early.
+// `stale` rides with the rows so lease waiters see the leader's staleness.
 const CANDIDATE_MEMO_MS = 5_000;
-const candidateRows = new AsyncMemo<db.LiveCacheRow[]>(CANDIDATE_MEMO_MS, 10_000);
+const candidateRows = new AsyncMemo<{ rows: db.LiveCacheRow[]; stale: boolean }>(
+	CANDIDATE_MEMO_MS,
+	10_000
+);
 export function invalidateCandidates(kind: 'nar' | 'path', hash: string): void {
 	const key = `${kind}:${stripSha256(hash)}`;
 	candidateRows.clear(key);
 	confirmedCandidates.clear(key);
+	refreshedEmpty.clear(key);
 }
 
 export async function loadCandidates(
@@ -166,7 +199,7 @@ export async function loadCandidates(
 	hash: string
 ): Promise<Candidates> {
 	const canonical = stripSha256(hash);
-	if (canonical.length > 256) return { rows: [], listed: false };
+	if (canonical.length > 256) return { rows: [], listed: false, confirmEmpty: async () => null };
 	const internal = internalRequest(
 		env,
 		`/_meta/${kind}/${encodeURIComponent(canonical)}`,
@@ -174,24 +207,27 @@ export async function loadCandidates(
 	);
 	const key = `${kind}:${canonical}`;
 	let source = 'memo';
-	const rows = await candidateRows.get(
+	const { rows, stale } = await candidateRows.get(
 		key,
 		async () => {
 			const response = await measure('candidateLoopback', () =>
 				viaStore(ctx, internal, () => serveCandidates(internal, env, kind, canonical))
 			);
 			source = response.headers.get('CF-Cache-Status') ?? 'NONE';
-			return internalJson<db.LiveCacheRow[]>(
+			const rows = await internalJson<db.LiveCacheRow[]>(
 				response,
 				'Candidate resolution temporarily unavailable'
 			);
+			return { rows, stale: rows.length === 0 && pastEmptyMaxAge(response.headers) };
 		},
-		(rows) => (rows.length ? CANDIDATE_MEMO_MS : 0)
+		({ rows }) => (rows.length ? CANDIDATE_MEMO_MS : 0)
 	);
 	candidateMetadata(source, rows.length > 0);
 	return {
 		rows: await measure('candidateVisibility', () => withCurrentVisibility(env, rows)),
-		listed: rows.length > 0
+		listed: rows.length > 0,
+		confirmEmpty: async () =>
+			stale ? refreshEmptyCandidates(env, ctx, request, kind, canonical) : null
 	};
 }
 
@@ -208,7 +244,43 @@ const confirmedCandidates = new AsyncMemo<db.LiveCacheRow[]>(CONFIRMED_TTL_MS, 1
 
 export function clearCandidateMemos(): void {
 	confirmedCandidates.clear();
+	refreshedEmpty.clear();
 	candidateRows.clear();
+}
+
+function readCandidateRows(
+	session: D1Database,
+	kind: 'nar' | 'path',
+	canonical: string
+): Promise<db.LiveCacheRow[]> {
+	return kind === 'nar'
+		? db.cachesWithNarHash(session, [`sha256:${canonical}`, canonical])
+		: db.cachesWithStorePathHash(session, canonical);
+}
+
+/** Re-read a candidate list, charged to the requesting client, and evict
+ * the edge entry when the membership differs from what it served. */
+async function rereadCandidates(
+	env: App.Platform['env'],
+	ctx: ExecutionContext | undefined,
+	request: Request,
+	session: D1Database,
+	kind: 'nar' | 'path',
+	canonical: string,
+	cached: db.LiveCacheRow[]
+): Promise<db.LiveCacheRow[]> {
+	await chargeClientRead(env, request.headers.get('CF-Connecting-IP'));
+	const rows = await readCandidateRows(session, kind, canonical);
+	const ids = (list: db.LiveCacheRow[]) =>
+		list
+			.map((r) => r.id)
+			.sort()
+			.join(',');
+	const store = ctx?.exports?.CachedStore;
+	if (store && ids(rows) !== ids(cached)) {
+		ctx.waitUntil(store.enqueuePurgeTags([candidateTag(kind, canonical)]).catch(() => {}));
+	}
+	return rows;
 }
 
 export async function confirmCandidates(
@@ -223,26 +295,40 @@ export async function confirmCandidates(
 	const key = `${kind}:${canonical}`;
 	candidateRows.clear(key);
 	const rows = await measure('candidateConfirm', () =>
-		confirmedCandidates.get(key, async () => {
-			const clientIp = request.headers.get('CF-Connecting-IP');
-			if (clientIp)
-				await requireBudget(env.BACKEND_READ_LIMITER, clientKey('backend-read', clientIp));
-			const primary = db.primarySession(env.ATTIC_DB);
-			const rows =
-				kind === 'nar'
-					? await db.cachesWithNarHash(primary, [`sha256:${canonical}`, canonical])
-					: await db.cachesWithStorePathHash(primary, canonical);
-			const ids = (list: db.LiveCacheRow[]) =>
-				list
-					.map((r) => r.id)
-					.sort()
-					.join(',');
-			const store = ctx?.exports?.CachedStore;
-			if (store && ids(rows) !== ids(cached)) {
-				ctx.waitUntil(store.enqueuePurgeTags([candidateTag(kind, canonical)]).catch(() => {}));
-			}
-			return rows;
-		})
+		confirmedCandidates.get(key, () =>
+			rereadCandidates(env, ctx, request, db.primarySession(env.ATTIC_DB), kind, canonical, cached)
+		)
+	);
+	return measure('candidateVisibility', () => withCurrentVisibility(env, rows));
+}
+
+// Stale empty entries re-read on a replica: the same read, budget and
+// consistency the synchronous refill of an expired entry used to have. An
+// upload committed within the replica's lag can still be missed — and the
+// root narinfo route then records the miss as absent for its TTL — exactly
+// as a refill right after the upload's purge can miss it (see the
+// Cache-Control note above). Confirming on the primary instead would close
+// that window only here, at a primary read whenever the upstream lookup
+// misses or fails; upstream hits never reach this. An empty result is
+// memoized for the empty max-age, so upstream-only lookups of one hash cost
+// an isolate at most one read per window, as the refill did; a found one
+// for the candidate memo's window, so requests racing the edge purge it
+// enqueued reuse it instead of re-reading and re-purging.
+const refreshedEmpty = new AsyncMemo<db.LiveCacheRow[]>(EMPTY_MAX_AGE_MS, 10_000);
+
+async function refreshEmptyCandidates(
+	env: App.Platform['env'],
+	ctx: ExecutionContext | undefined,
+	request: Request,
+	kind: 'nar' | 'path',
+	canonical: string
+): Promise<db.LiveCacheRow[]> {
+	const rows = await measure('candidateRefresh', () =>
+		refreshedEmpty.get(
+			`${kind}:${canonical}`,
+			() => rereadCandidates(env, ctx, request, db.readSession(env.ATTIC_DB), kind, canonical, []),
+			(rows) => (rows.length ? CANDIDATE_MEMO_MS : EMPTY_MAX_AGE_MS)
+		)
 	);
 	return measure('candidateVisibility', () => withCurrentVisibility(env, rows));
 }

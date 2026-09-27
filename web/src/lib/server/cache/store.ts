@@ -299,7 +299,12 @@ export async function serveStore(
 	// themselves (their uncached fallback must pay too); touch and manifest
 	// are loopbacks from within an already charged request.
 	if (segments.length === 3 && segments[0] === '_meta' && ['path', 'nar'].includes(segments[1]))
-		return serveCandidates(request, env, segments[1], decodeURIComponent(segments[2]));
+		return serveCandidates(
+			request,
+			env,
+			segments[1] as 'path' | 'nar',
+			decodeURIComponent(segments[2])
+		);
 	if (segments.length === 3 && segments[0] === '_touch' && /^\d+$/.test(segments[1]))
 		return serveTouch(env, Number(segments[1]), decodeURIComponent(segments[2]));
 	if (segments.length === 3 && segments[0] === '_manifest' && /^(public|\d+)$/.test(segments[1]))

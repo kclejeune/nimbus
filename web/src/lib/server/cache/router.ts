@@ -45,7 +45,7 @@ import {
 	upstreamsForCache,
 	type UpstreamNarRedirect
 } from './missing-paths';
-import { uploadMemory, type ExecutionContext } from './platform';
+import type { ExecutionContext } from './platform';
 import {
 	getProxyKeypair,
 	isKnownAbsent,
@@ -82,6 +82,7 @@ import {
 	handleCdcChunkPut,
 	handleCdcComplete,
 	handleCdcQuery,
+	admitUpload,
 	handleUploadPath,
 	validateManifest,
 	type CdcManifest
@@ -372,12 +373,35 @@ async function narMiss(
 	edge: EdgeEvent,
 	notFound?: Response
 ): Promise<Response> {
+	const upstreamUrl = await resolveUpstreamNar(env, ctx, request, cache, filename);
+	return finishNarMiss(env, label, edge, upstreamUrl, notFound);
+}
+
+/** The upstream NAR redirect target, or null for a confirmed upstream miss.
+ * Upstream uncertainty throws (a retryable AdmissionError). Records nothing. */
+function resolveUpstreamNar(
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	request: Request,
+	cache: { id: number; name: string } | null,
+	filename: string
+): Promise<string | null> {
 	const path = upstreamNarPath(cache, filename);
-	const upstreamUrl = await measure('upstreamRedirect', () =>
+	return measure('upstreamRedirect', () =>
 		upstreamNarRedirect(path, () =>
 			loadUpstreamNar(env, ctx, path, request.headers.get('CF-Connecting-IP'))
 		)
 	);
+}
+
+/** Record a resolved NAR miss once and answer it: a redirect or a 404. */
+async function finishNarMiss(
+	env: Env,
+	label: string,
+	edge: EdgeEvent,
+	upstreamUrl: string | null,
+	notFound?: Response
+): Promise<Response> {
 	recordRead(env, 'nar', label, {
 		status: upstreamUrl ? 302 : 404,
 		viaUpstream: !!upstreamUrl,
@@ -512,6 +536,17 @@ async function proxyToken(request: Request, env: Env): Promise<VerifiedToken | n
 	}
 }
 
+/** A settled promise, so a failure can wait on a confirmation before it
+ * decides the answer. */
+type Settled<T> =
+	{ ok: true; value: T; error?: never } | { ok: false; value?: never; error: unknown };
+function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
+	return promise.then(
+		(value) => ({ ok: true as const, value }),
+		(error: unknown) => ({ ok: false as const, error })
+	);
+}
+
 async function handleProxyNarInfo(
 	request: Request,
 	env: Env,
@@ -542,8 +577,8 @@ async function handleProxyNarInfo(
 	// Caches listed but none readable (or none left after the visibility
 	// filter): the common case is a private-only path, but a stale positive
 	// entry would also look like this after the path landed in a public
-	// cache — confirm before falling back. A genuinely empty entry is
-	// short-lived and needs no confirmation.
+	// cache — confirm before falling back. An empty entry is short-lived and
+	// is confirmed only if it was served stale and the upstreams miss too.
 	if (!winner && cached.listed) {
 		candidates = await measure('candidates', () =>
 			confirmCandidates(env, ctx, request, 'path', storePathHash, candidates)
@@ -559,22 +594,41 @@ async function handleProxyNarInfo(
 		const fallback = new URL(
 			`${new URL(request.url).origin}/_proxy_upstream/${storePathHash}.narinfo`
 		);
-		const response = await forwardToStore(new Request(fallback, request), env, ctx);
-		// The absent memo is token-independent, so only an empty candidate set
-		// (nothing local for anyone) plus an upstream miss may record it.
-		if (response.status === 404) {
+		// Upstream content is the fast path; a stale empty entry is confirmed
+		// before a miss or an upstream failure — returned or thrown — becomes
+		// the answer.
+		const upstream = await settle(forwardToStore(new Request(fallback, request), env, ctx));
+		const response = upstream.value;
+		if (!response?.ok) {
+			const confirmed = await measure('candidates', cached.confirmEmpty).catch(async (e) => {
+				await disposeLoopback(response);
+				throw e;
+			});
+			if (confirmed) {
+				candidates = confirmed;
+				winner = pickReadableWinner(token, candidates);
+			}
+		}
+		if (winner) {
+			await disposeLoopback(response);
+		} else if (!response) {
+			throw upstream.error;
+		} else if (response.status === 404) {
+			// The absent memo is token-independent, so only an empty candidate
+			// set (nothing local for anyone) plus an upstream miss may record it.
 			if (candidates.length === 0) recordAbsent(storePathHash);
 			recordRead(env, 'narinfo', UNIFIED_LABEL, { status: 404, edge: storeEdge(response) });
 			await disposeLoopback(response);
 			return errorResponse(404, 'Not found', 'NoSuchObject');
+		} else {
+			// A 200 here is upstream content served through the union fallback.
+			recordRead(env, 'narinfo', UNIFIED_LABEL, {
+				status: response.status,
+				viaUpstream: true,
+				edge: storeEdge(response)
+			});
+			return withCachePolicy(stripUpstreamMarker(response), true);
 		}
-		// A 200 here is upstream content served through the union fallback.
-		recordRead(env, 'narinfo', UNIFIED_LABEL, {
-			status: response.status,
-			viaUpstream: true,
-			edge: storeEdge(response)
-		});
-		return withCachePolicy(stripUpstreamMarker(response), true);
 	}
 
 	let pk: string | null = null;
@@ -636,8 +690,23 @@ async function handleProxyNar(
 	}
 	// NAR URLs served by root-proxy upstream passthrough narinfos resolve here
 	// with no local winner, so the root needs the same upstream redirect as the
-	// per-cache route — against the union of live caches' upstreams.
-	if (!winner) return narMiss(env, ctx, request, null, filename, UNIFIED_LABEL, 'none');
+	// per-cache route — against the union of live caches' upstreams. A stale
+	// empty entry is confirmed only if that misses too: upstream-only NARs are
+	// most of this route and must not each cost a D1 read.
+	if (!winner) {
+		const upstream = await settle(resolveUpstreamNar(env, ctx, request, null, filename));
+		if (!upstream.value) {
+			const confirmed = await measure('candidates', cached.confirmEmpty);
+			if (confirmed) {
+				narCandidates = confirmed;
+				winner = pickReadableWinner(token, narCandidates);
+			}
+		}
+		if (!winner) {
+			if (!upstream.ok) throw upstream.error;
+			return finishNarMiss(env, UNIFIED_LABEL, 'none', upstream.value);
+		}
+	}
 
 	// Same edge entry as the per-cache route. pickReadableWinner already proved
 	// the winner holds this NAR, but the scoped path is what keeps the resulting
@@ -969,11 +1038,15 @@ async function handleV1(
 		// Completion re-reads chunks one at a time under wasmMemorySlots, so
 		// it takes no upload slot: holding one for a multi-GB verification
 		// would let two completions stall every push on the isolate.
-		const carriesNar =
-			method === 'PUT' &&
-			(segments.length === 3 || (segments[3] === 'chunks' && segments.length === 5));
-		if (carriesNar && !(await measure('admission', () => uploadMemory.acquireBounded(32, 5_000))))
-			throw new AdmissionError('Upload memory busy; retry shortly', 5);
+		const narRoute =
+			method !== 'PUT'
+				? null
+				: segments.length === 3
+					? 'path'
+					: segments[3] === 'chunks' && segments.length === 5
+						? 'chunk'
+						: null;
+		const release = narRoute ? await admitUpload(request, narRoute) : null;
 		try {
 			if (method === 'PUT' && segments.length === 3) {
 				return await handleUploadPath(request, env, ctx, canPush, token.sub ?? null);
@@ -1003,7 +1076,7 @@ async function handleV1(
 			}
 			return errorResponse(404, 'Not found');
 		} finally {
-			if (carriesNar) uploadMemory.release();
+			release?.();
 		}
 	}
 

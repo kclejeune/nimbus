@@ -88,36 +88,8 @@ export const withR2Retry = <T>(op: () => Promise<T>): Promise<T> =>
  */
 export class Semaphore {
 	private free: number;
-	private waiters = 0;
 	constructor(slots: number) {
 		this.free = slots;
-	}
-	tryAcquire(): boolean {
-		if (this.free <= 0) return false;
-		this.free--;
-		return true;
-	}
-	/** Queue without buffering request bodies, but cap both queue length and
-	 * wait. Waiters hold no memory, so the queue is sized for a whole client
-	 * fan-out (the Go pusher sends up to 40 concurrent requests over one
-	 * HTTP/2 connection, all landing on this isolate) rather than for the
-	 * slot count; a refusal costs the client one of its three retries. */
-	async acquireBounded(maxWaiters = 64, timeoutMs = 120_000): Promise<boolean> {
-		if (this.tryAcquire()) return true;
-		if (this.waiters >= maxWaiters) return false;
-		this.waiters++;
-		const deadline = Date.now() + timeoutMs;
-		let interval = 5;
-		try {
-			while (Date.now() < deadline) {
-				await sleep(Math.min(interval + Math.random() * interval, deadline - Date.now()));
-				if (this.tryAcquire()) return true;
-				interval = Math.min(interval * 2, 40);
-			}
-			return false;
-		} finally {
-			this.waiters--;
-		}
 	}
 	async acquire(): Promise<void> {
 		// Adaptive interval: a handoff is noticed within ~5-10 ms while
@@ -134,13 +106,77 @@ export class Semaphore {
 	}
 }
 
-// Covers input buffering through R2 persistence, not just the WASM call.
-// Two slots match wasmMemorySlots: each admitted upload holds at most one raw
-// chunk (≤16 MiB) plus its compressed form, and the WASM heap is shared, so
-// two pipelines fit the 128 MiB isolate with the same margin the WASM gate
-// alone had. Body-carrying uploads queue via acquireBounded; speculative
-// ingestion takes a short bounded wait and otherwise yields.
-export const uploadMemory = new Semaphore(2);
+/**
+ * A byte budget with a concurrency cap, polled like Semaphore (same I/O
+ * context constraint). Admission is FIFO among waiters: only the oldest may
+ * take budget, and nobody jumps a non-empty queue, so a full-slot upload
+ * cannot be starved by a stream of light ones that each fit the remainder.
+ */
+export class MemoryBudget {
+	private freeBytes: number;
+	private active = 0;
+	// Waiting callers, oldest first. A waiter removes itself when it gives up,
+	// but a request canceled on client disconnect never resumes to do so —
+	// its finally does not run — so callers also drop an expired head, and a
+	// dead waiter blocks the queue for at most its own timeout.
+	private readonly queue: { deadline: number }[] = [];
+	constructor(
+		totalBytes: number,
+		private readonly maxActive: number
+	) {
+		this.freeBytes = totalBytes;
+	}
+	private fits(weight: number): boolean {
+		return this.active < this.maxActive && weight <= this.freeBytes;
+	}
+	private take(weight: number): void {
+		this.freeBytes -= weight;
+		this.active++;
+	}
+	private dropExpiredHead(): void {
+		const now = Date.now();
+		while (this.queue.length > 0 && this.queue[0].deadline <= now) this.queue.shift();
+	}
+	/** Take budget now or not at all; never ahead of a waiter. */
+	tryAcquire(weight: number): boolean {
+		this.dropExpiredHead();
+		if (this.queue.length > 0 || !this.fits(weight)) return false;
+		this.take(weight);
+		return true;
+	}
+	/** Queue without buffering request bodies, but cap both queue length and
+	 * wait. Waiters hold no memory, so the queue is sized for a whole client
+	 * fan-out (the Go pusher sends up to 40 concurrent requests over one
+	 * HTTP/2 connection, all landing on this isolate) rather than for the
+	 * active count; a refusal costs the client one of its three retries. */
+	async acquireBounded(weight: number, maxWaiters: number, timeoutMs: number): Promise<boolean> {
+		if (this.tryAcquire(weight)) return true;
+		if (this.queue.length >= maxWaiters) return false;
+		const deadline = Date.now() + timeoutMs;
+		const waiter = { deadline };
+		this.queue.push(waiter);
+		let interval = 5;
+		try {
+			while (Date.now() < deadline) {
+				await sleep(Math.min(interval + Math.random() * interval, deadline - Date.now()));
+				this.dropExpiredHead();
+				if (this.queue[0] === waiter && this.fits(weight)) {
+					this.take(weight);
+					return true;
+				}
+				interval = Math.min(interval * 2, 40);
+			}
+			return false;
+		} finally {
+			const index = this.queue.indexOf(waiter);
+			if (index >= 0) this.queue.splice(index, 1);
+		}
+	}
+	release(weight: number): void {
+		this.freeBytes += weight;
+		this.active--;
+	}
+}
 
 /** Run fn while holding one slot of sem. */
 export async function withSlot<T>(sem: Semaphore, fn: () => Promise<T> | T): Promise<T> {

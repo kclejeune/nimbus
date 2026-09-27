@@ -33,7 +33,13 @@ import * as db from './db';
 import { recordPush, recordStoreWrite } from './metrics';
 import { issueChunkProof, verifyChunkProof } from './chunk-proof';
 import { bytesToHex, stripSha256 } from '../attic/nix-base32';
-import { newDigestStream, readAll, withR2Retry, type ExecutionContext } from './platform';
+import {
+	MemoryBudget,
+	newDigestStream,
+	readAll,
+	withR2Retry,
+	type ExecutionContext
+} from './platform';
 import { invalidateAfterUpload } from './store';
 import { bodyDeadline, isRecord, readWithTimeout } from '../request-body';
 import { AdmissionError, takeBudgetUnits } from './admission';
@@ -61,6 +67,38 @@ const MAX_NAR_CHUNKS = 2000;
  * threaded, so compression never interleaves.
  */
 const STREAM_CONCURRENT_CHUNKS = 1;
+
+// Upload admission covers input buffering through R2 persistence. The budget
+// is two full slots — a streamed or unknown-length body holds at most one raw
+// chunk (≤16 MiB) plus its compressed form, and two such pipelines fit the
+// 128 MiB isolate — while a body of declared length is charged its own
+// footprint. The active cap bounds per-isolate D1 write concurrency.
+export const UPLOAD_SLOT_BYTES = 32 * 1024 * 1024;
+export const uploadMemory = new MemoryBudget(2 * UPLOAD_SLOT_BYTES, 8);
+
+/** Resident bytes of an upload body: raw plus compressed output (≤ raw) plus
+ * stream slack for a buffered body of declared length, else a full slot. */
+export function uploadWeight(declared: number | null): number {
+	if (declared === null || declared > MAX_BUFFERED_SIZE) return UPLOAD_SLOT_BYTES;
+	return Math.min(UPLOAD_SLOT_BYTES, 2 * declared + 1024 * 1024);
+}
+
+/** Admit a NAR-carrying request against the isolate's upload memory, or
+ * throw a retryable AdmissionError. Returns the release. A chunk PUT is
+ * charged a full slot: its compressed length does not bound its
+ * decompressed size. */
+export async function admitUpload(request: Request, route: 'path' | 'chunk'): Promise<() => void> {
+	const weight = uploadWeight(route === 'path' ? declaredLength(request) : null);
+	if (!(await measure('admission', () => uploadMemory.acquireBounded(weight, 64, 5_000))))
+		throw new AdmissionError('Upload memory busy; retry shortly', 5);
+	return () => uploadMemory.release(weight);
+}
+
+/** The request's Content-Length, or null when absent (chunked encoding). */
+function declaredLength(request: Request): number | null {
+	const raw = request.headers.get('content-length');
+	return raw != null && /^\d+$/.test(raw) ? Number(raw) : null;
+}
 
 const NAR_INFO_HEADER = 'X-Attic-Nar-Info';
 const NAR_INFO_PREAMBLE_HEADER = 'X-Attic-Nar-Info-Preamble-Size';
@@ -517,11 +555,7 @@ export async function handleUploadPath(
 	let narBody: ReadableStream<Uint8Array> | null = request.body;
 	// Bytes of NAR expected, when the client declared a length; null means
 	// unknown (chunked transfer encoding) and forces the streaming path.
-	let narLength: number | null = null;
-	const contentLengthRaw = request.headers.get('content-length');
-	if (contentLengthRaw != null && /^\d+$/.test(contentLengthRaw)) {
-		narLength = Number(contentLengthRaw);
-	}
+	let narLength = declaredLength(request);
 
 	const headerRaw = request.headers.get(NAR_INFO_HEADER);
 	if (headerRaw) {
@@ -583,7 +617,8 @@ export async function handleUploadPath(
 		if (!narBody) return errorResponse(400, 'Missing request body');
 
 		if (narLength != null && narLength <= MAX_BUFFERED_SIZE) {
-			const body = await readAll(narBody, MAX_BUFFERED_SIZE);
+			// Capped at the declared length: admission charged for exactly that.
+			const body = await readAll(narBody, narLength);
 			if (!body) return errorResponse(400, 'Body exceeds declared Content-Length');
 			response = await handleBufferedUpload(env, info, cache.id, kind, body);
 		} else {

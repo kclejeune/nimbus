@@ -2,13 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { stubDigestStream, testDatabase } from './test-db';
 import { invalidateCacheRow } from './cache-lookup';
-import { Semaphore } from './platform';
+import { MemoryBudget } from './platform';
 import {
 	handleBufferedUpload,
 	handleCdcQuery,
 	handleCdcComplete,
 	handleCdcChunkPut,
 	handleStreamingUpload,
+	handleUploadPath,
+	UPLOAD_SLOT_BYTES,
+	uploadWeight,
 	validateManifest,
 	type CdcManifest
 } from './upload';
@@ -120,6 +123,21 @@ describe('upload lifecycle', () => {
 		expect(put).not.toHaveBeenCalled();
 	});
 
+	it('buffers no more than the declared length that admission charged for', async () => {
+		const req = new Request('https://cache.test/_api/v1/upload-path', {
+			method: 'PUT',
+			body: new Uint8Array(4096),
+			headers: {
+				'Content-Length': '3',
+				'X-Attic-Nar-Info': JSON.stringify(manifest.nar_info)
+			}
+		});
+		const response = await handleUploadPath(req, env, undefined, () => true);
+		expect(response.status).toBe(400);
+		expect(await response.text()).toContain('declared Content-Length');
+		expect(put).not.toHaveBeenCalled();
+	});
+
 	it('leaves mismatched streaming bytes tracked and unheld for GC', async () => {
 		stubDigestStream();
 		const body = new Response(raw).body!;
@@ -149,26 +167,84 @@ describe('upload lifecycle', () => {
 		}
 	);
 
-	it('does not queue memory-heavy work inside the isolate', () => {
-		const memory = new Semaphore(1);
-		expect(memory.tryAcquire()).toBe(true);
-		expect(memory.tryAcquire()).toBe(false);
-		memory.release();
-		expect(memory.tryAcquire()).toBe(true);
-	});
 	it('bounds foreground waiters without sharing their I/O promises', async () => {
 		vi.useFakeTimers();
 		try {
-			const memory = new Semaphore(1);
-			expect(memory.tryAcquire()).toBe(true);
-			const queued = memory.acquireBounded(1, 50);
-			expect(await memory.acquireBounded(1, 50)).toBe(false);
-			memory.release();
+			const memory = new MemoryBudget(1, 1);
+			expect(memory.tryAcquire(1)).toBe(true);
+			const queued = memory.acquireBounded(1, 1, 50);
+			expect(await memory.acquireBounded(1, 1, 50)).toBe(false);
+			memory.release(1);
 			await vi.advanceTimersByTimeAsync(50);
 			expect(await queued).toBe(true);
-			const expired = memory.acquireBounded(1, 50);
+			const expired = memory.acquireBounded(1, 1, 50);
 			await vi.advanceTimersByTimeAsync(51);
 			expect(await expired).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe('MemoryBudget', () => {
+	it('admits many small bodies where two full slots used to serialize them', () => {
+		const budget = new MemoryBudget(2 * UPLOAD_SLOT_BYTES, 8);
+		for (let i = 0; i < 8; i++) expect(budget.tryAcquire(uploadWeight(64 * 1024))).toBe(true);
+		// The concurrency cap binds before the byte budget does.
+		expect(budget.tryAcquire(uploadWeight(64 * 1024))).toBe(false);
+	});
+
+	it('keeps the two-pipeline bound for streamed and unknown-length bodies', () => {
+		const budget = new MemoryBudget(2 * UPLOAD_SLOT_BYTES, 8);
+		expect(uploadWeight(16 * 1024 * 1024)).toBe(UPLOAD_SLOT_BYTES);
+		expect(uploadWeight(15 * 1024 * 1024)).toBe(31 * 1024 * 1024);
+		expect(budget.tryAcquire(uploadWeight(null))).toBe(true);
+		expect(budget.tryAcquire(uploadWeight(null))).toBe(true);
+		expect(budget.tryAcquire(uploadWeight(1))).toBe(false);
+		budget.release(uploadWeight(null));
+		expect(budget.tryAcquire(uploadWeight(1))).toBe(true);
+	});
+
+	it('does not let light uploads starve a queued full slot', async () => {
+		vi.useFakeTimers();
+		try {
+			const budget = new MemoryBudget(2 * UPLOAD_SLOT_BYTES, 8);
+			const small = uploadWeight(64 * 1024);
+			expect(budget.tryAcquire(UPLOAD_SLOT_BYTES)).toBe(true);
+			expect(budget.tryAcquire(small)).toBe(true);
+			// The remainder fits small bodies but not a second full slot.
+			const heavy = budget.acquireBounded(UPLOAD_SLOT_BYTES, 64, 5_000);
+			// Later light arrivals queue behind it instead of taking the room.
+			expect(budget.tryAcquire(small)).toBe(false);
+			const light = budget.acquireBounded(small, 64, 5_000);
+			budget.release(small);
+			await vi.advanceTimersByTimeAsync(100);
+			expect(await heavy).toBe(true);
+			// The budget is now exhausted; the light waiter follows once it frees.
+			budget.release(UPLOAD_SLOT_BYTES);
+			await vi.advanceTimersByTimeAsync(100);
+			expect(await light).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('does not let a canceled waiter block the queue past its timeout', async () => {
+		vi.useFakeTimers();
+		try {
+			const budget = new MemoryBudget(1, 1);
+			expect(budget.tryAcquire(1)).toBe(true);
+			void budget.acquireBounded(1, 64, 100);
+			// A request canceled on disconnect never resumes: its timer is gone and
+			// its finally never runs, so its ticket is left at the head.
+			vi.clearAllTimers();
+			budget.release(1);
+			expect(budget.tryAcquire(1)).toBe(false);
+			await vi.advanceTimersByTimeAsync(100);
+			expect(budget.tryAcquire(1)).toBe(true);
+			budget.release(1);
+			const next = budget.acquireBounded(1, 64, 100);
+			expect(await next).toBe(true);
 		} finally {
 			vi.useRealTimers();
 		}

@@ -35,7 +35,7 @@ import {
 	recordVerdicts,
 	VERDICT_UNPERSISTABLE
 } from './missing-paths';
-import { readAll, uploadMemory, type ExecutionContext } from './platform';
+import { readAll, type ExecutionContext } from './platform';
 import { invalidateAfterUpload } from './store';
 import { TtlMemo } from './ttl-memo';
 import {
@@ -44,6 +44,8 @@ import {
 	handleBufferedUpload,
 	handleStreamingUpload,
 	MAX_BUFFERED_SIZE,
+	UPLOAD_SLOT_BYTES,
+	uploadMemory,
 	tryLockNarProbed,
 	type UploadNarInfo
 } from './upload';
@@ -193,7 +195,7 @@ export async function persistUpstreamPath(
 		}
 
 		// Speculative work never queues behind pushes. A later marker can retry.
-		holdsSlot = await uploadMemory.acquireBounded(0, 1);
+		holdsSlot = uploadMemory.tryAcquire(UPLOAD_SLOT_BYTES);
 		if (!holdsSlot) {
 			recentIngests.delete(memoKey);
 			return;
@@ -272,6 +274,6 @@ export async function persistUpstreamPath(
 		if (e instanceof PublicationRejectedError) console.warn(`pullthrough: ${e.message}`);
 		else console.warn(`pullthrough: ingest into ${cacheName} from ${upstreamUrl} failed: ${e}`);
 	} finally {
-		if (holdsSlot) uploadMemory.release();
+		if (holdsSlot) uploadMemory.release(UPLOAD_SLOT_BYTES);
 	}
 }

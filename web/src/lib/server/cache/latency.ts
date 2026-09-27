@@ -14,6 +14,7 @@ type Stage =
 	| 'candidateLoopback'
 	| 'candidateVisibility'
 	| 'candidateConfirm'
+	| 'candidateRefresh'
 	| 'proxyKeypair'
 	| 'upstreamRedirect'
 	| 'wasmWait'

@@ -11,7 +11,8 @@ it('cached candidate, manifest and retention responses require no gateway D1 acc
 	const fetch = vi.fn(async (r: Request) => {
 		requests.push(r);
 		return new Response(
-			r.url.includes('/_touch/') ? 'ok' : r.url.includes('/_meta/') ? '[]' : 'null'
+			r.url.includes('/_touch/') ? 'ok' : r.url.includes('/_meta/') ? '[]' : 'null',
+			{ headers: { 'X-Nimbus-Filled-At': String(Date.now()) } }
 		);
 	});
 	const ctx = { exports: { CachedStore: { fetch } } } as unknown as ExecutionContext;
@@ -26,10 +27,10 @@ it('cached candidate, manifest and retention responses require no gateway D1 acc
 			'CF-Connecting-IP': '203.0.113.7'
 		}
 	});
-	expect(await loadCandidates(env, ctx, request, 'nar', 'sha256:abc')).toEqual({
-		rows: [],
-		listed: false
-	});
+	const candidates = await loadCandidates(env, ctx, request, 'nar', 'sha256:abc');
+	expect(candidates).toMatchObject({ rows: [], listed: false });
+	// A fresh empty entry has nothing to confirm.
+	expect(await candidates.confirmEmpty()).toBeNull();
 	expect(await loadManifest(env, ctx, 'abc')).toBeNull();
 	await touchViaStore(env, ctx, 1, 'abc');
 	expect(prepare).not.toHaveBeenCalled();
