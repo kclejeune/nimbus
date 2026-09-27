@@ -158,23 +158,7 @@ func webLogin(ctx context.Context, endpoint string) (string, error) {
 	authorizeURL := authCfg.AuthorizeURL + "?" + query.Encode()
 
 	tokens := make(chan string, 1)
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/callback" || r.URL.Query().Get("state") != state {
-			http.Error(w, "unexpected callback", http.StatusBadRequest)
-			return
-		}
-		token := r.URL.Query().Get("token")
-		if token == "" {
-			http.Error(w, "missing token", http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = fmt.Fprint(
-			w,
-			"<html><body><p>✅ nimbus is authorized — you can close this tab.</p></body></html>",
-		)
-		tokens <- token
-	})}
+	server := &http.Server{Handler: callbackHandler(state, tokens)}
 	go func() { _ = server.Serve(listener) }()
 	defer func() { _ = server.Close() }()
 
@@ -194,6 +178,31 @@ func webLogin(ctx context.Context, endpoint string) (string, error) {
 	case <-time.After(10 * time.Minute):
 		return "", errors.New("browser authorization timed out")
 	}
+}
+
+// callbackHandler receives the browser redirect carrying the minted token and
+// hands it to tokens. The page declares UTF-8 in both the header and a meta
+// tag: without either, browsers decode it as Windows-1252 and the ✅ and em
+// dash render as mojibake.
+func callbackHandler(state string, tokens chan<- string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/callback" || r.URL.Query().Get("state") != state {
+			http.Error(w, "unexpected callback", http.StatusBadRequest)
+			return
+		}
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			http.Error(w, "missing token", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = fmt.Fprint(
+			w,
+			`<!doctype html><html><head><meta charset="utf-8"></head>`+
+				"<body><p>✅ nimbus is authorized — you can close this tab.</p></body></html>",
+		)
+		tokens <- token
+	})
 }
 
 // openBrowser honors $BROWSER before the platform default opener.
