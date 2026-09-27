@@ -4,6 +4,7 @@ import type { ExecutionContext } from './platform';
 import { stripSha256 } from '../attic/nix-base32';
 import { findCacheCached } from './cache-lookup';
 import { AsyncMemo } from './async-memo';
+import { countLoopbackFallback, measure, candidateMetadata } from './latency';
 
 export const CANDIDATES_TAG = 'candidates';
 export const candidateTag = (kind: string, hash: string) =>
@@ -86,19 +87,32 @@ export async function viaStore(
 	if (!store) return direct();
 	const response = await store.fetch(request);
 	if (response.status !== 502) return response;
+	countLoopbackFallback();
 	console.warn(`store loopback returned 502; serving uncached: ${new URL(request.url).pathname}`);
 	await disposeLoopback(response);
 	return direct();
 }
 
-/** The JSON body of an internal metadata response, or the transient error
- * clients see when the metadata route itself failed. */
-async function internalJson<T>(response: Response, unavailable: string): Promise<T> {
+/** The JSON body of an internal loopback response. Any non-2xx is a transient
+ * refusal, retried no sooner than the store asked (a budget refusal's minute). */
+export async function internalJson<T>(response: Response, unavailable: string): Promise<T> {
 	if (!response.ok) {
 		await response.body?.cancel();
-		throw new AdmissionError(unavailable, 2);
+		const retryAfter = Number(response.headers.get('Retry-After'));
+		throw new AdmissionError(unavailable, retryAfter > 0 ? retryAfter : 2);
 	}
 	return response.json();
+}
+
+/** How much longer a loopback response is fresh: its max-age less the Age an
+ * edge hit carries. Zero for no-store, a missing max-age, or a stale entry
+ * served under stale-while-revalidate / stale-if-error. */
+export function remainingFreshMs(headers: Headers): number {
+	const cacheControl = headers.get('Cache-Control') ?? '';
+	const maxAge = /(?:^|[\s,])max-age=(\d+)/.exec(cacheControl);
+	if (!maxAge || /no-store/.test(cacheControl)) return 0;
+	const age = Number(headers.get('Age')) || 0;
+	return Math.max(0, Number(maxAge[1]) - age) * 1000;
 }
 
 /** Never exposed by the gateway: candidate rows contain private cache names.
@@ -132,6 +146,18 @@ export interface Candidates {
 	listed: boolean;
 }
 
+// Only positive memberships are memoized. Visibility is resolved again on every
+// read, and empty entries retain precisely their existing edge-cache lifetime.
+// A new membership missing from this five-second snapshot still triggers the
+// primary confirmation path; upload/confirmation invalidate this isolate early.
+const CANDIDATE_MEMO_MS = 5_000;
+const candidateRows = new AsyncMemo<db.LiveCacheRow[]>(CANDIDATE_MEMO_MS, 10_000);
+export function invalidateCandidates(kind: 'nar' | 'path', hash: string): void {
+	const key = `${kind}:${stripSha256(hash)}`;
+	candidateRows.clear(key);
+	confirmedCandidates.clear(key);
+}
+
 export async function loadCandidates(
 	env: App.Platform['env'],
 	ctx: ExecutionContext | undefined,
@@ -146,11 +172,27 @@ export async function loadCandidates(
 		`/_meta/${kind}/${encodeURIComponent(canonical)}`,
 		request.headers.get('CF-Connecting-IP')
 	);
-	const rows = await internalJson<db.LiveCacheRow[]>(
-		await viaStore(ctx, internal, () => serveCandidates(internal, env, kind, canonical)),
-		'Candidate resolution temporarily unavailable'
+	const key = `${kind}:${canonical}`;
+	let source = 'memo';
+	const rows = await candidateRows.get(
+		key,
+		async () => {
+			const response = await measure('candidateLoopback', () =>
+				viaStore(ctx, internal, () => serveCandidates(internal, env, kind, canonical))
+			);
+			source = response.headers.get('CF-Cache-Status') ?? 'NONE';
+			return internalJson<db.LiveCacheRow[]>(
+				response,
+				'Candidate resolution temporarily unavailable'
+			);
+		},
+		(rows) => (rows.length ? CANDIDATE_MEMO_MS : 0)
 	);
-	return { rows: await withCurrentVisibility(env, rows), listed: rows.length > 0 };
+	candidateMetadata(source, rows.length > 0);
+	return {
+		rows: await measure('candidateVisibility', () => withCurrentVisibility(env, rows)),
+		listed: rows.length > 0
+	};
 }
 
 // Candidate lists confirmed against the primary. A positive edge entry can
@@ -164,8 +206,9 @@ export async function loadCandidates(
 const CONFIRMED_TTL_MS = 60_000;
 const confirmedCandidates = new AsyncMemo<db.LiveCacheRow[]>(CONFIRMED_TTL_MS, 10_000);
 
-export function clearConfirmedCandidates(): void {
+export function clearCandidateMemos(): void {
 	confirmedCandidates.clear();
+	candidateRows.clear();
 }
 
 export async function confirmCandidates(
@@ -177,27 +220,31 @@ export async function confirmCandidates(
 	cached: db.LiveCacheRow[]
 ): Promise<db.LiveCacheRow[]> {
 	const canonical = stripSha256(hash);
-	const rows = await confirmedCandidates.get(`${kind}:${canonical}`, async () => {
-		const clientIp = request.headers.get('CF-Connecting-IP');
-		if (clientIp)
-			await requireBudget(env.BACKEND_READ_LIMITER, clientKey('backend-read', clientIp));
-		const primary = db.primarySession(env.ATTIC_DB);
-		const rows =
-			kind === 'nar'
-				? await db.cachesWithNarHash(primary, [`sha256:${canonical}`, canonical])
-				: await db.cachesWithStorePathHash(primary, canonical);
-		const ids = (list: db.LiveCacheRow[]) =>
-			list
-				.map((r) => r.id)
-				.sort()
-				.join(',');
-		const store = ctx?.exports?.CachedStore;
-		if (store && ids(rows) !== ids(cached)) {
-			ctx.waitUntil(store.purgeTags([candidateTag(kind, canonical)]).catch(() => {}));
-		}
-		return rows;
-	});
-	return withCurrentVisibility(env, rows);
+	const key = `${kind}:${canonical}`;
+	candidateRows.clear(key);
+	const rows = await measure('candidateConfirm', () =>
+		confirmedCandidates.get(key, async () => {
+			const clientIp = request.headers.get('CF-Connecting-IP');
+			if (clientIp)
+				await requireBudget(env.BACKEND_READ_LIMITER, clientKey('backend-read', clientIp));
+			const primary = db.primarySession(env.ATTIC_DB);
+			const rows =
+				kind === 'nar'
+					? await db.cachesWithNarHash(primary, [`sha256:${canonical}`, canonical])
+					: await db.cachesWithStorePathHash(primary, canonical);
+			const ids = (list: db.LiveCacheRow[]) =>
+				list
+					.map((r) => r.id)
+					.sort()
+					.join(',');
+			const store = ctx?.exports?.CachedStore;
+			if (store && ids(rows) !== ids(cached)) {
+				ctx.waitUntil(store.enqueuePurgeTags([candidateTag(kind, canonical)]).catch(() => {}));
+			}
+			return rows;
+		})
+	);
+	return measure('candidateVisibility', () => withCurrentVisibility(env, rows));
 }
 
 /**

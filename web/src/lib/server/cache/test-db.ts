@@ -123,11 +123,13 @@ export function memoryBucket(objects = new Map<string, Uint8Array>()) {
 /** The compression module without wasm: identity zstd, sha256 hashes, one
  * memory slot. `vi.mock('./compression', fakeCompression)`. */
 export async function fakeCompression() {
-	const { Semaphore } = await import('./platform');
+	const { Semaphore, withSlot } = await import('./platform');
+	const wasmMemorySlots = new Semaphore(1);
 	const digest = async (data: Uint8Array) =>
 		Buffer.from(await crypto.subtle.digest('SHA-256', data as BufferSource)).toString('hex');
 	return {
-		wasmMemorySlots: new Semaphore(1),
+		wasmMemorySlots,
+		withWasmSlot: <T>(fn: () => Promise<T> | T) => withSlot(wasmMemorySlots, fn),
 		initZstd: async () => {},
 		zstdDecompress: (data: Uint8Array) => data,
 		extensionFor: () => '.zst',

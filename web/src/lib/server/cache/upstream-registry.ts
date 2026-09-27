@@ -14,7 +14,7 @@ import {
 	type UpstreamMode
 } from './missing-paths';
 import type { ExecutionContext } from './platform';
-import { cacheTag, ROOT_UPSTREAM_TAG_NS, upstreamPassthroughTag } from './store';
+import { ROOT_UPSTREAM_TAG, upstreamPassthroughTag } from './store';
 
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];
@@ -54,10 +54,7 @@ export interface UpstreamInput {
 async function purgeUpstreamEdge(db: D1, ctx: ExecutionContext | undefined): Promise<void> {
 	if (!ctx) return;
 	const names = await listCacheNames(db);
-	await purgeTagsBestEffort(ctx, [
-		cacheTag(ROOT_UPSTREAM_TAG_NS),
-		...names.map(upstreamPassthroughTag)
-	]);
+	await purgeTagsBestEffort(ctx, [ROOT_UPSTREAM_TAG, ...names.map(upstreamPassthroughTag)]);
 }
 
 export async function listRegistry(db: D1): Promise<RegistryUpstream[]> {
@@ -235,10 +232,13 @@ export async function setCacheUpstreamModes(
 	await db.batch(stmts);
 	clearUpstreamsMemo();
 	// The cache's edge-cached passthroughs advertise upstreams it may no
-	// longer use (their NAR routes recompute live and would 404).
-	if (opts.cacheName) {
-		await purgeTagsBestEffort(opts.ctx, [upstreamPassthroughTag(opts.cacheName)]);
-	}
+	// longer use (their NAR routes recompute live and would 404). The root
+	// proxy resolves against every cache's subscriptions, so one cache's edit
+	// can change what it may serve too.
+	await purgeTagsBestEffort(opts.ctx, [
+		ROOT_UPSTREAM_TAG,
+		...(opts.cacheName ? [upstreamPassthroughTag(opts.cacheName)] : [])
+	]);
 }
 
 /** How many live caches use each registry entry, by effective mode — the

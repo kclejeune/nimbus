@@ -19,6 +19,13 @@
 		"CachedStore": { "type": "worker", "cache": { "enabled": true } }
 	},
 
+	// Singleton durable queue enforces the Workers Caching purge budget across
+	// isolates. The actual eviction still executes in CachedStore via loopback.
+	"durable_objects": {
+		"bindings": [{ "name": "PURGE_COORDINATOR", "class_name": "PurgeCoordinator" }]
+	},
+	"migrations": [{ "tag": "v1-purge-coordinator", "new_sqlite_classes": ["PurgeCoordinator"] }],
+
 	// Custom entry wrapping the adapter-cloudflare output (_worker.js in
 	// .svelte-kit/cloudflare) to add the scheduled GC handler.
 	"main": "worker-entry.ts",

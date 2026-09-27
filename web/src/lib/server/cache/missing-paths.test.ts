@@ -18,6 +18,8 @@ import {
 import { buildNarInfo } from '../attic/narinfo';
 import { extractPublicKey, generateKeypair } from '../attic/signing';
 
+beforeEach(clearUpstreamsMemo);
+
 /** An Upstream with defaults, for terse expectations. */
 function upstream(partial: Partial<Upstream> & { url: string }): Upstream {
 	return {
@@ -270,6 +272,30 @@ describe('concurrent upstream probing', () => {
 		upstream({ id: 1, url: 'https://a.example' }),
 		upstream({ id: 2, url: 'https://b.example' })
 	];
+
+	it('cooldown skips failing upstreams without converting uncertainty to absence', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const spy = stubFetch(() => new Response(null, { status: 503 }));
+			for (let i = 0; i < 4; i++) {
+				expect(await fetchUpstreamNarInfo(dbWithVerdicts(), [ups[0]], freshHash(), undefined)).toBe(
+					UPSTREAM_UNAVAILABLE
+				);
+			}
+			expect(spy).toHaveBeenCalledTimes(3);
+			spy.mockImplementation(() => new Response(null, { status: 200 }));
+			const path = `nar/${freshHash()}.nar.xz`;
+			expect(await findUpstreamNar(dbWithVerdicts(), ups, path, undefined)).toBe(
+				`https://b.example/${path}`
+			);
+			expect(spy).toHaveBeenCalledTimes(4);
+			clearUpstreamsMemo();
+			expect(await probeUpstream(ups[0], freshHash())).toBe(VERDICT_PRESENT);
+			expect(spy).toHaveBeenCalledTimes(5);
+		} finally {
+			warn.mockRestore();
+		}
+	});
 
 	it.each([404, 503])('cancels unsuccessful passthrough bodies on %s', async (status) => {
 		const cancel = vi.fn();

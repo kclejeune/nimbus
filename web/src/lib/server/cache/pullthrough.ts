@@ -24,7 +24,7 @@
 
 import { parseNarInfo, parsedNarInfoSignatureValid } from '../attic/narinfo';
 import { bytesToHex, sha256HexDigest } from '../attic/nix-base32';
-import { initZstd, uploadCompressionFor, wasmMemorySlots, zstdDecompress } from './compression';
+import { initZstd, uploadCompressionFor, withWasmSlot, zstdDecompress } from './compression';
 import * as db from './db';
 import { recordGuard } from './metrics';
 import {
@@ -35,7 +35,7 @@ import {
 	recordVerdicts,
 	VERDICT_UNPERSISTABLE
 } from './missing-paths';
-import { readAll, withSlot, uploadMemory, type ExecutionContext } from './platform';
+import { readAll, uploadMemory, type ExecutionContext } from './platform';
 import { invalidateAfterUpload } from './store';
 import { TtlMemo } from './ttl-memo';
 import {
@@ -233,7 +233,7 @@ export async function persistUpstreamPath(
 			// instead of the global cap; larger-than-declared content fails the
 			// decompress, which is a correct rejection of bytes that contradict
 			// the signed narinfo.
-			raw = await withSlot(wasmMemorySlots, () => zstdDecompress(raw, parsed.narSize));
+			raw = await withWasmSlot(() => zstdDecompress(raw, parsed.narSize));
 		}
 		// Drop the compressed buffer before the pipeline stages allocate.
 		downloaded = null;

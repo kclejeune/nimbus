@@ -113,7 +113,7 @@ it('preserves purge progress and covers more than 100 referrers before delayed r
 	expect(
 		f.sqlite.prepare('SELECT object_cursor,retire_after FROM chunk_repair').get()
 	).toMatchObject({ object_cursor: 275, retire_after: null });
-	await replayChunkRepairs(f.env, success);
+	await replayChunkRepairs(f.env, (key) => processChunkRepair(f.env, key, success));
 	for (let i = 1; i <= 301; i++)
 		expect(tags).toContain(`narinfo:test:${String(i).padStart(32, '0')}`);
 	for (const [batch] of [...purge.mock.calls, ...success.mock.calls])
@@ -123,7 +123,7 @@ it('preserves purge progress and covers more than 100 referrers before delayed r
 	expect(f.objects.has('old')).toBe(true);
 	vi.useFakeTimers();
 	vi.setSystemTime(Date.now() + REPAIR_RETIRE_GRACE_MS + 1);
-	await replayChunkRepairs(f.env, success);
+	await replayChunkRepairs(f.env, (key) => processChunkRepair(f.env, key, success));
 	expect(f.objects.has('old')).toBe(false);
 	expect(f.objects.has('new')).toBe(true);
 	expect(f.sqlite.prepare('SELECT count(*) AS n FROM chunk_repair').get()!.n).toBe(0);
@@ -226,7 +226,7 @@ it('journals and retires the key a takeover displaces, and only then', async () 
 		chunk_id: 1,
 		old_key: 'old'
 	});
-	await replayChunkRepairs(f.env, async () => {});
+	await replayChunkRepairs(f.env, (key) => processChunkRepair(f.env, key, async () => {}));
 	expect(f.objects.has('old')).toBe(false);
 	expect(f.objects.has('new')).toBe(true);
 	expect(f.sqlite.prepare('SELECT count(*) AS n FROM chunk_repair').get()!.n).toBe(0);
@@ -253,4 +253,99 @@ it('rolls back the pointer if its retirement journal cannot be committed', async
 	);
 	await expect(f.repair()).rejects.toThrow('journal unavailable');
 	expect(f.sqlite.prepare('SELECT remote_file_id FROM chunk').get()!.remote_file_id).toBe('old');
+});
+
+it('continues a wide repair through durable alarms and retires only after the grace period', async () => {
+	const { testPurgeQueue } = await import('./test-purge-queue');
+	vi.useFakeTimers();
+	vi.setSystemTime(100_000);
+	const f = setup(51);
+	await f.repair();
+	const q = testPurgeQueue(undefined, (key) =>
+		processChunkRepair(f.env, key, (tags, receipt) => q.queue.repairPurge(key, receipt, tags))
+	);
+	try {
+		await q.queue.scheduleRepair('new');
+		await q.queue.alarm();
+		expect(f.sqlite.prepare('SELECT object_cursor FROM chunk_repair').get()!.object_cursor).toBe(0);
+		for (const cursor of [25, 50, 51]) {
+			vi.advanceTimersByTime(12_000);
+			await q.queue.alarm();
+			expect(f.sqlite.prepare('SELECT object_cursor FROM chunk_repair').get()!.object_cursor).toBe(
+				cursor
+			);
+			expect(f.objects.has('old')).toBe(true);
+		}
+		expect(q.purge).toHaveBeenCalledTimes(3);
+		vi.advanceTimersByTime(REPAIR_RETIRE_GRACE_MS - 1);
+		await q.queue.alarm();
+		expect(f.objects.has('old')).toBe(true);
+		vi.advanceTimersByTime(1);
+		await q.queue.alarm();
+		expect(f.objects.has('old')).toBe(false);
+		expect(q.sqlite.prepare('SELECT COUNT(*) AS n FROM repair_receipt').get()!.n).toBe(0);
+		expect(q.alarm()).toBeNull();
+	} finally {
+		q.sqlite.close();
+	}
+});
+
+it('reuses a completed receipt after a failed D1 cursor write without another purge', async () => {
+	const { testPurgeQueue } = await import('./test-purge-queue');
+	const { PurgeQueue } = await import('./purge-queue');
+	vi.useFakeTimers();
+	vi.setSystemTime(100_000);
+	const f = setup();
+	await f.repair();
+	const q = testPurgeQueue();
+	try {
+		const faulty = {
+			...f.env,
+			ATTIC_DB: {
+				...f.db,
+				prepare(sql: string) {
+					if (sql.startsWith('UPDATE chunk_repair SET object_cursor'))
+						throw new Error('D1 unavailable');
+					return f.db.prepare(sql);
+				}
+			}
+		} as typeof f.env;
+		const purge = (tags: string[], receipt: string) => q.queue.repairPurge('new', receipt, tags);
+		await processChunkRepair(faulty, 'new', purge);
+		await q.queue.alarm();
+		await expect(processChunkRepair(faulty, 'new', purge)).rejects.toThrow('D1 unavailable');
+		const restarted = new PurgeQueue(q.storage, q.purge);
+		await processChunkRepair(f.env, 'new', (tags, receipt) =>
+			restarted.repairPurge('new', receipt, tags)
+		);
+		expect(f.sqlite.prepare('SELECT object_cursor FROM chunk_repair').get()!.object_cursor).toBe(1);
+		expect(q.purge).toHaveBeenCalledOnce();
+		expect(q.depth()).toBe(0);
+	} finally {
+		q.sqlite.close();
+	}
+});
+
+it('does not reuse a receipt when a repair page changes before cursor advancement', async () => {
+	const { testPurgeQueue } = await import('./test-purge-queue');
+	vi.useFakeTimers();
+	vi.setSystemTime(100_000);
+	const f = setup();
+	await f.repair();
+	const q = testPurgeQueue();
+	try {
+		const purge = (tags: string[], receipt: string) => q.queue.repairPurge('new', receipt, tags);
+		await processChunkRepair(f.env, 'new', purge);
+		await q.queue.alarm();
+		f.sqlite.prepare('UPDATE object SET store_path_hash = ? WHERE id = 1').run('a'.repeat(32));
+		await processChunkRepair(f.env, 'new', purge);
+		expect(f.sqlite.prepare('SELECT object_cursor FROM chunk_repair').get()!.object_cursor).toBe(0);
+		vi.advanceTimersByTime(12_000);
+		await q.queue.alarm();
+		await processChunkRepair(f.env, 'new', purge);
+		expect(f.sqlite.prepare('SELECT object_cursor FROM chunk_repair').get()!.object_cursor).toBe(1);
+		expect(q.purge).toHaveBeenCalledTimes(2);
+	} finally {
+		q.sqlite.close();
+	}
 });

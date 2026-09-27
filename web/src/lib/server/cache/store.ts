@@ -15,17 +15,20 @@ import {
 	serveCandidates,
 	candidateTag,
 	internalRequest,
-	chargeBackendRead
+	chargeBackendRead,
+	invalidateCandidates
 } from './metadata';
 import { errorResponse, withVisibility } from '../attic/http';
 import { buildNarInfo } from '../attic/narinfo';
 import { extractPublicKey } from '../attic/signing';
 import { findCacheCached } from './cache-lookup';
+import { CLIENT_IP_HEADER } from './admission';
 import * as db from './db';
 import {
 	allLiveUpstreams,
 	fetchUpstreamNarInfo,
 	isUncertain,
+	resolveUpstreamNar,
 	upstreamsForCache,
 	upstreamTtlSecs,
 	type Upstream
@@ -35,6 +38,7 @@ import { purgeCoalesced } from './purge';
 import { RateBudget } from './rate-budget';
 import { TtlMemo } from './ttl-memo';
 import { withR2Retry, type ExecutionContext } from './platform';
+import { measure, countLoopbackFallback, streamObservation } from './latency';
 import { stripSha256 } from '../attic/nix-base32';
 
 type Env = App.Platform['env'];
@@ -136,6 +140,8 @@ export function narinfoTag(cacheName: string, storePathHash: string): string {
  * upstream revalidator purges these when an upstream GCs an entry.
  */
 export const ROOT_UPSTREAM_TAG_NS = '~upstream';
+/** Cache-wide tag on every root passthrough (narinfos and NAR redirects). */
+export const ROOT_UPSTREAM_TAG = `cache:${ROOT_UPSTREAM_TAG_NS}`;
 
 /** Cache-wide tag on narinfo responses, for one-call purges when a config
  * change invalidates all of them at once (keypair rotation re-signs every
@@ -240,6 +246,8 @@ export async function invalidateAfterUpload(
 	// The root proxy's negative memo is per-isolate; this clears it where the
 	// upload landed. The TTL bounds the other isolates.
 	clearAbsent(storePathHash);
+	invalidateCandidates('path', storePathHash);
+	invalidateCandidates('nar', narHash);
 	const store = ctx?.exports?.CachedStore;
 	if (!store) return;
 	try {
@@ -247,7 +255,9 @@ export async function invalidateAfterUpload(
 		// the same path (uploads and pull-through ingestion both land here).
 		// Coalesced across the isolate: one purge call per window, not per path.
 		await purgeCoalesced(
-			(tags) => store.purgeTags(tags),
+			async (tags) => {
+				await store.enqueuePurgeTags(tags);
+			},
 			[
 				narinfoTag(cache.name, storePathHash),
 				narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash),
@@ -294,6 +304,21 @@ export async function serveStore(
 		return serveTouch(env, Number(segments[1]), decodeURIComponent(segments[2]));
 	if (segments.length === 3 && segments[0] === '_manifest' && /^(public|\d+)$/.test(segments[1]))
 		return serveManifest(env, segments[1], decodeURIComponent(segments[2]));
+	// Charges its own budget, and only when there are upstreams to probe.
+	if (segments[0] === UPSTREAM_NAR_PREFIX) {
+		// Root: /_upstream_nar/~/<file>; per cache: /_upstream_nar/<name>/<id>/<file>.
+		if (segments.length === 3 && segments[1] === ROOT_UPSTREAM_SCOPE)
+			return serveUpstreamNar(request, env, ctx, null, decodeURIComponent(segments[2]));
+		if (segments.length === 4 && /^\d+$/.test(segments[2]))
+			return serveUpstreamNar(
+				request,
+				env,
+				ctx,
+				{ name: decodeURIComponent(segments[1]), id: Number(segments[2]) },
+				decodeURIComponent(segments[3])
+			);
+		return errorResponse(404, 'Not found');
+	}
 
 	await chargeBackendRead(env, request);
 
@@ -388,7 +413,7 @@ async function serveRootUpstreamNarInfo(
 	const upstreams = await allLiveUpstreams(session);
 	// The cache-wide ~upstream tag lets registry changes purge every root
 	// passthrough in one call, like cacheTag() does for a real cache.
-	const tag = `${narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash)},${cacheTag(ROOT_UPSTREAM_TAG_NS)}`;
+	const tag = `${narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash)},${ROOT_UPSTREAM_TAG}`;
 
 	const hit =
 		upstreams.length > 0
@@ -409,6 +434,62 @@ async function serveRootUpstreamNarInfo(
 	absent.headers.set('Cache-Control', NARINFO_404_CACHE_CONTROL);
 	absent.headers.set('Cache-Tag', tag);
 	return withVisibility(absent, true);
+}
+
+// Upstream NAR redirects, resolved behind the edge so repeat requests for
+// upstream-only NARs (most root NAR traffic) cost neither a verdict read nor a
+// probe. Per-cache entries are keyed by id as well as name, so a cache
+// recreated under an old name never inherits its predecessor's redirects;
+// subscription, registry and cache-lifecycle edits purge the scope tags, and
+// fills read the upstream configuration fresh (resolveUpstreamNar) so a purge
+// is not undone by another isolate's stale memo.
+//
+// Both policies bound stale-on-error explicitly: Cloudflare's default serves a
+// stale entry indefinitely when the refresh fails. A stale hit keeps integrity
+// (clients verify NarHash) but not availability: the upstream may have
+// dropped the NAR or be unreachable, and the client then falls back to
+// building. That is the trade for riding out an upstream incident, so it is
+// capped at an hour. A stale miss would turn upstream uncertainty into a
+// cached absence, so a failed refresh must reach the gateway as its 503.
+const UPSTREAM_NAR_PREFIX = '_upstream_nar';
+const ROOT_UPSTREAM_SCOPE = '~';
+const UPSTREAM_NAR_HIT_CACHE_CONTROL =
+	'public, max-age=3600, stale-while-revalidate=300, stale-if-error=3600';
+const UPSTREAM_NAR_MISS_CACHE_CONTROL = 'public, max-age=300, stale-if-error=0';
+
+/** The store path serveUpstreamNar answers for `cache` (null: the root proxy). */
+export function upstreamNarPath(cache: { id: number; name: string } | null, filename: string) {
+	const scope = cache ? `${encodeURIComponent(cache.name)}/${cache.id}` : ROOT_UPSTREAM_SCOPE;
+	return `/${UPSTREAM_NAR_PREFIX}/${scope}/${encodeURIComponent(filename)}`;
+}
+
+/** The redirect target as JSON (a URL or null), not a 302: the gateway's
+ * loopback fetch would follow a redirect and pull the NAR through the worker. */
+async function serveUpstreamNar(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	scope: { id: number; name: string } | null,
+	filename: string
+): Promise<Response> {
+	// A refused budget or upstream uncertainty throws AdmissionError, which
+	// both callers turn into a no-store 503 (caughtResponse, the gateway).
+	const url = await resolveUpstreamNar(
+		env,
+		ctx,
+		scope,
+		filename,
+		request.headers.get(CLIENT_IP_HEADER)
+	);
+	// Deleted, or recreated under this name since the gateway resolved it:
+	// nothing to redirect to on this key, and nothing worth caching.
+	if (url === undefined) return Response.json(null, { headers: { 'Cache-Control': 'no-store' } });
+	return Response.json(url, {
+		headers: {
+			'Cache-Control': url ? UPSTREAM_NAR_HIT_CACHE_CONTROL : UPSTREAM_NAR_MISS_CACHE_CONTROL,
+			'Cache-Tag': scope ? upstreamPassthroughTag(scope.name) : ROOT_UPSTREAM_TAG
+		}
+	});
 }
 
 /** The shared success response for a served narinfo (per-cache and root proxy). */
@@ -646,7 +727,9 @@ async function serveNar(
 	const narHashRaw = filename.split('.')[0];
 	if (!narHashRaw) return errorResponse(400, 'Invalid NAR path');
 
-	const found = await loadManifest(env, ctx, narHashRaw, cacheId);
+	// Measured separately: the manifest is a nested loopback (a second
+	// CachedStore hop, D1 on a miss) whose share of the NAR tail is unknown.
+	const found = await measure('manifest', () => loadManifest(env, ctx, narHashRaw, cacheId));
 	if (!found) {
 		// The gateway turns this 404 into an upstream redirect when the cache
 		// has upstreams (passthrough narinfo NAR URLs resolve that way).
@@ -703,6 +786,7 @@ async function serveNar(
 	const chunkStore =
 		totalSize === null || totalSize > 512 * 1024 * 1024 ? ctx?.exports?.CachedStore : undefined;
 	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+	const finished = streamObservation();
 	const pump = async () => {
 		// Queue of gets for chunks not yet piped, in key order; fill() tops it
 		// up to the lookahead window.
@@ -714,6 +798,7 @@ async function serveNar(
 				if (response.ok && response.body) return { body: response.body };
 				await response.body?.cancel().catch(() => {});
 				if (response.status !== 502) throw new Error(`Chunk cache returned ${response.status}`);
+				countLoopbackFallback();
 			}
 			const object = await withR2Retry(() => env.CACHE_BUCKET.get(key));
 			return object ? { body: object.body as unknown as ReadableStream<Uint8Array> } : null;
@@ -752,7 +837,12 @@ async function serveNar(
 			throw e;
 		}
 	};
-	const pumping = pump().catch((e) => writable.abort(e).catch(() => {}));
+	const pumping = pump()
+		.then(() => finished('ok', keys.length))
+		.catch((e) => {
+			finished('error', keys.length);
+			return writable.abort(e).catch(() => {});
+		});
 	ctx?.waitUntil(pumping);
 
 	if (totalSize != null) baseHeaders.set('Content-Length', String(totalSize));

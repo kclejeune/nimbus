@@ -1,5 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { PURGE_TAG_LIMIT, purgeCoalesced, purgeWithJournal, replayPurges } from './purge';
+import {
+	PURGE_TAG_LIMIT,
+	PurgeRateLimitedError,
+	purgeCoalesced,
+	purgeWithJournal,
+	replayPurges
+} from './purge';
 import { purgeTagsBestEffort } from './gc';
 import type { ExecutionContext } from './platform';
 import { memoryBucket } from './test-db';
@@ -187,4 +193,66 @@ it("does not let a superseded slow leader release its successor's lease", async 
 	await Promise.all([slow, successor, third]);
 	expect(purge).toHaveBeenCalledTimes(3);
 	expect(purge.mock.calls[2][0]).toEqual(['third']);
+});
+
+it('journals explicit purge rate limits without spending immediate retries', async () => {
+	const { env, put } = bucket({});
+	const purge = vi.fn(async () => {
+		throw new PurgeRateLimitedError('Cache purge rejected: [{"code":1134}]');
+	});
+	await expect(purgeWithJournal(env, ['tag'], purge)).rejects.toThrow('1134');
+	expect(purge).toHaveBeenCalledOnce();
+	expect(put).toHaveBeenCalledOnce();
+});
+
+it('routine GC queues all batches without urgent flushes or failure warnings', async () => {
+	const { enqueueTagsBestEffort } = await import('./gc');
+	const { testPurgeQueue } = await import('./test-purge-queue');
+	const q = testPurgeQueue();
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	const urgent = vi.fn();
+	const ctx = {
+		exports: {
+			CachedStore: {
+				purgeTags: urgent,
+				enqueuePurgeTags: (tags: string[]) => q.queue.enqueue(tags)
+			}
+		}
+	} as unknown as ExecutionContext;
+	try {
+		expect(
+			await enqueueTagsBestEffort(
+				ctx,
+				Array.from({ length: 250 }, (_, i) => `tag-${i}`)
+			)
+		).toEqual({ confirmed: 0, queued: 250, failed: 0 });
+		expect(q.depth()).toBe(250);
+		expect(q.purge).not.toHaveBeenCalled();
+		expect(urgent).not.toHaveBeenCalled();
+		expect(warn).not.toHaveBeenCalled();
+	} finally {
+		warn.mockRestore();
+		q.sqlite.close();
+	}
+});
+
+it('GC distinguishes confirmed fallback purges from enqueue failures', async () => {
+	const { enqueueTagsBestEffort } = await import('./gc');
+	const enqueuePurgeTags = vi
+		.fn()
+		.mockResolvedValueOnce({ confirmed: true })
+		.mockRejectedValueOnce(new Error('transport failed'));
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	try {
+		const ctx = { exports: { CachedStore: { enqueuePurgeTags } } } as unknown as ExecutionContext;
+		expect(
+			await enqueueTagsBestEffort(
+				ctx,
+				Array.from({ length: 150 }, (_, i) => `tag-${i}`)
+			)
+		).toEqual({ confirmed: 100, queued: 0, failed: 50 });
+		expect(warn).toHaveBeenCalledOnce();
+	} finally {
+		warn.mockRestore();
+	}
 });

@@ -3,6 +3,7 @@
 // is standard Web APIs plus the D1/R2 bindings typed via App.Platform; the
 // remaining CF-specific piece is compression/zstd-setup.ts, whose .wasm
 // import only wrangler's bundler understands.
+import type { PurgeResult } from './purge-queue';
 import { countR2, countRetry, measure } from './latency';
 import { bodyDeadline, readWithTimeout } from '../request-body';
 
@@ -16,6 +17,9 @@ export type ExecutionContext = App.Platform['ctx'] & {
 		CachedStore?: {
 			fetch(request: Request): Promise<Response>;
 			purgeTags(tags: string[]): Promise<void>;
+			enqueuePurgeTags(tags: string[]): Promise<{ confirmed: boolean }>;
+			/** Raw eviction for the purge coordinator; never throws. */
+			purgeBatch(tags: string[]): Promise<PurgeResult>;
 			replayJournals(): Promise<void>;
 			processChunkRepair(key: string): Promise<void>;
 		};

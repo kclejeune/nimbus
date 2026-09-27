@@ -64,6 +64,8 @@ export interface GcStats {
 	integrity_refs_probed: number;
 	refs_synced: number;
 	narinfo_tags_purged: number;
+	narinfo_tags_queued: number;
+	narinfo_tags_failed: number;
 	/** 1 when this run did nothing because another run held the GC lock. */
 	skipped_lock_held: number;
 	[key: string]: number;
@@ -107,6 +109,8 @@ function emptyStats(): GcStats {
 		integrity_refs_probed: 0,
 		refs_synced: 0,
 		narinfo_tags_purged: 0,
+		narinfo_tags_queued: 0,
+		narinfo_tags_failed: 0,
 		skipped_lock_held: 0
 	};
 }
@@ -248,7 +252,7 @@ export async function readGcLastRun(db: D1): Promise<GcLastRun | null> {
  * Evict the narinfo of reaped objects from the edge cache. Purges are scoped
  * to the entrypoint that issues them, so this goes through the CachedStore
  * loopback — a purge from the gateway would target its own (empty) cache.
- * Best-effort: on failure the entries linger until their max-age expires.
+ * Durable acceptance is tracked separately from confirmed eviction.
  */
 async function purgeNarinfoTags(
 	ctx: ExecutionContext | undefined,
@@ -258,7 +262,26 @@ async function purgeNarinfoTags(
 	if (tags.length > 0 && !ctx?.exports?.CachedStore) {
 		console.warn(`gc: CachedStore unavailable; skipping purge of ${tags.length} narinfo tags`);
 	}
-	stats.narinfo_tags_purged += await purgeTagsBestEffort(ctx, tags);
+	const result = await enqueueTagsBestEffort(ctx, tags);
+	stats.narinfo_tags_purged += result.confirmed;
+	stats.narinfo_tags_queued += result.queued;
+	stats.narinfo_tags_failed += result.failed;
+}
+
+/** Routine GC needs durable acceptance, not synchronous eviction. Trust/config
+ * mutations and explicit path removal retain purgeTagsBestEffort below. */
+export async function enqueueTagsBestEffort(
+	ctx: ExecutionContext | undefined,
+	tags: string[]
+): Promise<{ confirmed: number; queued: number; failed: number }> {
+	const store = ctx?.exports?.CachedStore;
+	if (!store) return { confirmed: 0, queued: 0, failed: new Set(tags).size };
+	const result = { confirmed: 0, queued: 0, failed: 0 };
+	result.failed = await eachTagBatch(tags, 'edge purge enqueue', async (batch) => {
+		const accepted = await store.enqueuePurgeTags(batch);
+		result[accepted.confirmed ? 'confirmed' : 'queued'] += batch.length;
+	});
+	return result;
 }
 
 /**
@@ -267,8 +290,8 @@ async function purgeNarinfoTags(
  * that issues them, so this goes through the CachedStore loopback — a purge
  * from the gateway would target its own (empty) cache. Batches run
  * sequentially on purpose: purge shares the zone purge API's rate limits.
- * CachedStore retries each batch and journals a final failure for bounded
- * cron replay, so callers pass tags exactly once.
+ * A deferred confirmation is reported here even if the coordinator accepted
+ * the tags durably. Routine GC uses enqueueTagsBestEffort instead.
  */
 export async function purgeTagsBestEffort(
 	ctx: ExecutionContext | undefined,
@@ -276,18 +299,29 @@ export async function purgeTagsBestEffort(
 ): Promise<number> {
 	const store = ctx?.exports?.CachedStore;
 	if (!store || tags.length === 0) return 0;
-	tags = [...new Set(tags)];
-	let purged = 0;
-	for (let i = 0; i < tags.length; i += PURGE_TAG_LIMIT) {
-		const batch = tags.slice(i, i + PURGE_TAG_LIMIT);
+	const failed = await eachTagBatch(tags, 'edge purge', (batch) => store.purgeTags(batch));
+	return new Set(tags).size - failed;
+}
+
+/** Dedupe `tags`, then run each PURGE_TAG_LIMIT batch in order. A failed batch
+ * is logged and counted, never thrown; returns the number of failed tags. */
+async function eachTagBatch(
+	tags: string[],
+	label: string,
+	run: (batch: string[]) => Promise<unknown>
+): Promise<number> {
+	const unique = [...new Set(tags)];
+	let failed = 0;
+	for (let i = 0; i < unique.length; i += PURGE_TAG_LIMIT) {
+		const batch = unique.slice(i, i + PURGE_TAG_LIMIT);
 		try {
-			await store.purgeTags(batch);
-			purged += batch.length;
-		} catch (e) {
-			console.warn(`edge purge failed (${batch.length} tags): ${e}`);
+			await run(batch);
+		} catch (error) {
+			failed += batch.length;
+			console.warn(`${label} failed (${batch.length} tags): ${error}`);
 		}
 	}
-	return purged;
+	return failed;
 }
 
 /**

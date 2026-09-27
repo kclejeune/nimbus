@@ -10,7 +10,10 @@ import {
 	confirmCandidates,
 	viaStore,
 	stampClientIp,
-	disposeLoopback
+	disposeLoopback,
+	internalRequest,
+	internalJson,
+	remainingFreshMs
 } from './metadata';
 import {
 	CacheConfigError,
@@ -39,7 +42,8 @@ import {
 	filterUpstreamPaths,
 	findExistingPaths,
 	upstreamNarRedirect,
-	upstreamsForCache
+	upstreamsForCache,
+	type UpstreamNarRedirect
 } from './missing-paths';
 import { uploadMemory, type ExecutionContext } from './platform';
 import {
@@ -63,7 +67,8 @@ import {
 	PREFETCH_MARKER_HEADER,
 	serveStore,
 	STORE_POLICY_VERSION,
-	UPSTREAM_MARKER_HEADER
+	UPSTREAM_MARKER_HEADER,
+	upstreamNarPath
 } from './store';
 import {
 	NO_PERMISSION,
@@ -361,18 +366,17 @@ async function narMiss(
 	env: Env,
 	ctx: ExecutionContext | undefined,
 	request: Request,
-	cache: Parameters<typeof upstreamNarRedirect>[2],
+	cache: { id: number; name: string } | null,
 	filename: string,
 	label: string,
 	edge: EdgeEvent,
 	notFound?: Response
 ): Promise<Response> {
-	const upstreamUrl = await upstreamNarRedirect(
-		env,
-		ctx,
-		cache,
-		filename,
-		request.headers.get('CF-Connecting-IP')
+	const path = upstreamNarPath(cache, filename);
+	const upstreamUrl = await measure('upstreamRedirect', () =>
+		upstreamNarRedirect(path, () =>
+			loadUpstreamNar(env, ctx, path, request.headers.get('CF-Connecting-IP'))
+		)
 	);
 	recordRead(env, 'nar', label, {
 		status: upstreamUrl ? 302 : 404,
@@ -384,6 +388,23 @@ async function narMiss(
 		return Response.redirect(upstreamUrl, 302);
 	}
 	return notFound ?? errorResponse(404, 'Not found', 'NoSuchObject');
+}
+
+/** The upstream redirect target for a NAR no local cache serves, through the
+ * store's edge-cached resolver (serveUpstreamNar). */
+async function loadUpstreamNar(
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	path: string,
+	ip: string | null
+): Promise<UpstreamNarRedirect> {
+	const internal = internalRequest(env, path, ip);
+	const response = await viaStore(ctx, internal, () => serveStore(internal, env, ctx));
+	const freshMs = remainingFreshMs(response.headers);
+	return {
+		url: await internalJson<string | null>(response, 'Upstream temporarily unavailable'),
+		freshMs
+	};
 }
 
 /** Retention is download-driven (like the reference server): touch every
@@ -431,8 +452,12 @@ async function handleNar(
 		let holders = (
 			await measure('candidates', () => loadCandidates(env, ctx, request, 'nar', narHashRaw))
 		).rows;
-		// Not listed: either really absent or a stale positive entry from
-		// before this cache received the NAR — confirm before refusing.
+		// Not listed: either really absent or a stale entry from before this
+		// cache received the NAR — confirm before refusing. That includes an
+		// empty entry: the upload's candidate purge is only queued (paced, and
+		// deferred further under rate limits), so the entry can outlive the
+		// upload by its full TTL. confirmCandidates is memoized per hash and
+		// budgeted, bounding the primary reads for upstream-only NARs.
 		if (!holds(holders))
 			holders = await measure('candidates', () =>
 				confirmCandidates(env, ctx, request, 'nar', narHashRaw, holders)
@@ -554,7 +579,7 @@ async function handleProxyNarInfo(
 
 	let pk: string | null = null;
 	try {
-		pk = extractPublicKey(await getProxyKeypair(env));
+		pk = extractPublicKey(await measure('proxyKeypair', () => getProxyKeypair(env)));
 	} catch {
 		// keypair unavailable: serve unsigned/stored-sig variant unkeyed
 	}
@@ -1136,19 +1161,26 @@ function apiBase(env: Env, url: URL): string {
 export async function handleCacheApi(
 	request: Request,
 	env: Env,
-	ctx?: ExecutionContext
+	ctx?: ExecutionContext,
+	route?: string
 ): Promise<Response> {
-	return observeRequest(request, env, 'gateway', async () => {
-		try {
-			return await handleCacheApiInner(request, env, ctx);
-		} catch (e) {
-			// Without this boundary an unhandled throw (a D1/R2 hiccup mid-upload, a
-			// read-path error crossing the CachedStore RPC) surfaces to Cloudflare as
-			// a raw 1101 with no logged stack. caughtResponse logs the stack and
-			// returns a controlled 500/503 so client retry paths engage.
-			return caughtResponse('cache-api unhandled', request, e);
-		}
-	});
+	return observeRequest(
+		request,
+		env,
+		'gateway',
+		async () => {
+			try {
+				return await handleCacheApiInner(request, env, ctx);
+			} catch (e) {
+				// Without this boundary an unhandled throw (a D1/R2 hiccup mid-upload, a
+				// read-path error crossing the CachedStore RPC) surfaces to Cloudflare as
+				// a raw 1101 with no logged stack. caughtResponse logs the stack and
+				// returns a controlled 500/503 so client retry paths engage.
+				return caughtResponse('cache-api unhandled', request, e);
+			}
+		},
+		route
+	);
 }
 
 async function handleCacheApiInner(

@@ -3,9 +3,11 @@ import { candidateTag } from './metadata';
 import { narBodyTag, narinfoTag, ROOT_UPSTREAM_TAG_NS } from './store';
 import { withR2Retry } from './platform';
 import { PURGE_TAG_LIMIT } from './purge';
+import { PURGE_INTERVAL_MS } from './purge-queue';
 
 type Env = App.Platform['env'];
-type Purge = (tags: string[]) => Promise<void>;
+// false means durably pending, never permission to advance the cursor.
+type Purge = (tags: string[], receipt: string) => Promise<void | boolean>;
 // One purge call per page. Persist progress before yielding so a widely
 // shared chunk never monopolizes a request or cron run.
 const TAGS_PER_OBJECT = 4;
@@ -13,13 +15,17 @@ const PAGE_SIZE = Math.floor(PURGE_TAG_LIMIT / TAGS_PER_OBJECT);
 const PAGES_PER_RUN = 10;
 export const REPAIR_RETIRE_GRACE_MS = 5 * 60 * 1000;
 
-export async function processChunkRepair(env: Env, key: string, purge: Purge): Promise<void> {
+export async function processChunkRepair(
+	env: Env,
+	key: string,
+	purge: Purge
+): Promise<number | null> {
 	const job = await db.dbFirst<db.ChunkRepair>(
 		env.ATTIC_DB.prepare('SELECT * FROM chunk_repair WHERE new_key = ?1').bind(key)
 	);
-	if (!job) return;
+	if (!job) return null;
 	if (job.retire_after !== null) {
-		if (Date.now() < job.retire_after) return;
+		if (Date.now() < job.retire_after) return job.retire_after;
 		// Every key is minted once, so a retiring key cannot become live again
 		// and retrying this deletion is safe. A row still pointing at it means
 		// the pointer moved without a journal or was rolled back: keep the
@@ -34,7 +40,7 @@ export async function processChunkRepair(env: Env, key: string, purge: Purge): P
 			await withR2Retry(() => env.CACHE_BUCKET.delete(job.old_key!));
 		}
 		await db.dbRun(env.ATTIC_DB.prepare('DELETE FROM chunk_repair WHERE new_key = ?1').bind(key));
-		return;
+		return null;
 	}
 	for (let page = 0; page < PAGES_PER_RUN; page++) {
 		const refs = await db.objectsReferencingChunk(
@@ -44,12 +50,13 @@ export async function processChunkRepair(env: Env, key: string, purge: Purge): P
 			PAGE_SIZE
 		);
 		if (refs.length === 0) {
+			const retireAt = Date.now() + REPAIR_RETIRE_GRACE_MS;
 			await db.dbRun(
 				env.ATTIC_DB.prepare(
 					'UPDATE chunk_repair SET retire_after = COALESCE(retire_after, ?1) WHERE new_key = ?2'
-				).bind(Date.now() + REPAIR_RETIRE_GRACE_MS, key)
+				).bind(retireAt, key)
 			);
-			return;
+			return retireAt;
 		}
 		const tags = new Set<string>();
 		for (const ref of refs) {
@@ -60,7 +67,10 @@ export async function processChunkRepair(env: Env, key: string, purge: Purge): P
 		}
 		// Failures leave both the cursor and old object intact. This D1 job is
 		// itself the retry journal, including failures before calling purge.
-		await purge([...tags]);
+		// Bind the receipt to the exact page contents as well as its cursor.
+		// A changed page must not reuse an earlier eviction's acknowledgement.
+		const receipt = JSON.stringify([job.object_cursor, refs.at(-1)!.id, [...tags].sort()]);
+		if ((await purge([...tags], receipt)) === false) return Date.now() + PURGE_INTERVAL_MS;
 		job.object_cursor = refs.at(-1)!.id;
 		await db.dbRun(
 			env.ATTIC_DB.prepare(
@@ -68,9 +78,14 @@ export async function processChunkRepair(env: Env, key: string, purge: Purge): P
 			).bind(job.object_cursor, key)
 		);
 	}
+	return Date.now() + PURGE_INTERVAL_MS;
 }
 
-export async function replayChunkRepairs(env: Env, purge: Purge): Promise<void> {
+/** Hand each due repair job to `process` (run it now, or schedule it). */
+export async function replayChunkRepairs(
+	env: Env,
+	process: (key: string) => Promise<unknown>
+): Promise<void> {
 	const jobs = (
 		await db.dbAll<{ new_key: string }>(
 			env.ATTIC_DB.prepare(
@@ -80,7 +95,7 @@ export async function replayChunkRepairs(env: Env, purge: Purge): Promise<void> 
 	).results;
 	for (const job of jobs) {
 		try {
-			await processChunkRepair(env, job.new_key, purge);
+			await process(job.new_key);
 		} catch (error) {
 			console.warn('chunk repair replay pending', { key: job.new_key, error });
 		}

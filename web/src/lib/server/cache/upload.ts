@@ -23,16 +23,17 @@ import {
 	extensionFor,
 	initZstd,
 	uploadCompressionFor,
-	wasmMemorySlots,
+	withWasmSlot,
 	zstdDecompress,
 	type CompressionKind
 } from './compression';
+import { measure, uploadShape } from './latency';
 import { findCacheCached } from './cache-lookup';
 import * as db from './db';
 import { recordPush, recordStoreWrite } from './metrics';
 import { issueChunkProof, verifyChunkProof } from './chunk-proof';
 import { bytesToHex, stripSha256 } from '../attic/nix-base32';
-import { newDigestStream, readAll, withR2Retry, withSlot, type ExecutionContext } from './platform';
+import { newDigestStream, readAll, withR2Retry, type ExecutionContext } from './platform';
 import { invalidateAfterUpload } from './store';
 import { bodyDeadline, isRecord, readWithTimeout } from '../request-body';
 import { AdmissionError, takeBudgetUnits } from './admission';
@@ -294,7 +295,7 @@ async function processNarChunk(
 		};
 	}
 
-	const compressed = await withSlot(wasmMemorySlots, () => compressBuffer(raw, kind));
+	const compressed = await withWasmSlot(() => compressBuffer(raw, kind));
 	const key = versionedKey('chunk', hash, kind);
 	const stored = await storeChunk(
 		env,
@@ -430,12 +431,14 @@ async function finalizeChunkedNar(
  * One entry per held record, not per row: a chunk repeated within a NAR was
  * held once per occurrence and must be released as many times. */
 async function releaseChunkLocks(env: Env, records: NarChunkRecord[]): Promise<void> {
-	await db
-		.settleChunks(
-			env.ATTIC_DB,
-			records.filter((r) => r.locked).map((r) => ({ id: r.chunkId, publish: r.fresh }))
-		)
-		.catch(() => {});
+	await measure('chunkRelease', () =>
+		db
+			.settleChunks(
+				env.ATTIC_DB,
+				records.filter((r) => r.locked).map((r) => ({ id: r.chunkId, publish: r.fresh }))
+			)
+			.catch(() => {})
+	);
 }
 
 /** nar + chunk + chunkref + object rows for a freshly stored single-chunk NAR. */
@@ -633,7 +636,7 @@ export async function handleBufferedUpload(
 		return finalizeChunkedNar(env, info, cacheId, kind, records, body.length);
 	}
 
-	const result = await withSlot(wasmMemorySlots, () => compressBuffer(body, kind));
+	const result = await withWasmSlot(() => compressBuffer(body, kind));
 
 	if (result.narHash !== stripSha256(info.nar_hash)) {
 		return errorResponse(
@@ -904,7 +907,7 @@ async function verifyChunk(
 	request: Request,
 	hash: string
 ): Promise<{ compressed: Uint8Array; rawLength: number } | Response> {
-	return withSlot(wasmMemorySlots, async () => {
+	return withWasmSlot(async () => {
 		const maxCompressed = CDC_MAX_CHUNK + 1024 * 1024;
 		if (Number(request.headers.get('content-length')) > maxCompressed) {
 			await request.body?.cancel().catch(() => {});
@@ -1076,6 +1079,7 @@ export async function handleCdcComplete(
 ): Promise<Response> {
 	const denied = validateManifest(body);
 	if (denied) return denied;
+	uploadShape(body.chunks.length, body.nar_size);
 	const info = body.nar_info;
 	const cache = await findCacheCached(env.ATTIC_DB, info.cache);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
@@ -1092,7 +1096,9 @@ export async function handleCdcComplete(
 		return uploadedResult(null, 1);
 	}
 
-	const proven = await Promise.all(body.chunks.map((c) => verifyChunkProof(env, cache, c)));
+	const proven = await measure('cdcProof', () =>
+		Promise.all(body.chunks.map((c) => verifyChunkProof(env, cache, c)))
+	);
 	if (proven.includes(false)) {
 		return errorResponse(
 			403,
@@ -1107,10 +1113,12 @@ export async function handleCdcComplete(
 	// tryLockNarProbed: the client only uploaded the chunks reported missing,
 	// so a lock hit is the common case and the probe would be pure overhead.
 	const uniqueHashes = [...new Set(body.chunks.map((c) => c.hash))];
-	const lockedRows = await db.tryLockChunks(
-		env.ATTIC_DB,
-		uniqueHashes.map((h) => `sha256:${h}`),
-		'zstd'
+	const lockedRows = await measure('cdcLock', () =>
+		db.tryLockChunks(
+			env.ATTIC_DB,
+			uniqueHashes.map((h) => `sha256:${h}`),
+			'zstd'
+		)
 	);
 	if (
 		body.chunks.some((c) => {
@@ -1168,6 +1176,7 @@ export async function handleCdcComplete(
 	const writer = digest.getWriter();
 	const vanished: string[] = [];
 	let verified = false;
+	let compressedBytes = 0;
 	try {
 		for (const chunk of body.chunks) {
 			const row = lockedRows.get(`sha256:${chunk.hash}`)!;
@@ -1176,7 +1185,7 @@ export async function handleCdcComplete(
 				vanished.push(chunk.hash);
 				break;
 			}
-			const ok = await withSlot(wasmMemorySlots, async () => {
+			const ok = await withWasmSlot(async () => {
 				let compressed: Uint8Array | null;
 				try {
 					const object = await withR2Retry(() => env.CACHE_BUCKET.get(key));
@@ -1184,37 +1193,42 @@ export async function handleCdcComplete(
 						vanished.push(chunk.hash);
 						return false;
 					}
-					compressed = await readAll(
-						object.body as unknown as ReadableStream<Uint8Array>,
-						CDC_MAX_CHUNK + 1024 * 1024
+					compressed = await measure('cdcRead', () =>
+						readAll(
+							object.body as unknown as ReadableStream<Uint8Array>,
+							CDC_MAX_CHUNK + 1024 * 1024
+						)
 					);
+					compressedBytes += compressed?.byteLength ?? 0;
 				} catch {
 					throw new AdmissionError('Chunk storage temporarily unavailable', 5);
 				}
-				let raw: Uint8Array | null = null;
-				if (compressed) {
-					await initZstd();
-					try {
-						raw = zstdDecompress(compressed, chunk.size);
-					} catch {
-						raw = null;
+				return measure('cdcVerify', async () => {
+					let raw: Uint8Array | null = null;
+					if (compressed) {
+						await initZstd();
+						try {
+							raw = zstdDecompress(compressed, chunk.size);
+						} catch {
+							raw = null;
+						}
 					}
-				}
-				if (
-					!raw ||
-					raw.length !== chunk.size ||
-					toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource)) !== chunk.hash
-				) {
-					// Oversized, undecodable, or contradicting the row: mark it so
-					// the client's re-upload repairs it instead of dedup'ing
-					// against the bad bytes. Nothing is deleted here — a repair
-					// racing this read may already have moved the row.
-					await db.markChunkDamaged(env.ATTIC_DB, row.id, row.remote_file);
-					vanished.push(chunk.hash);
-					return false;
-				}
-				await writer.write(raw as BufferSource);
-				return true;
+					if (
+						!raw ||
+						raw.length !== chunk.size ||
+						toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource)) !== chunk.hash
+					) {
+						// Oversized, undecodable, or contradicting the row: mark it so
+						// the client's re-upload repairs it instead of dedup'ing
+						// against the bad bytes. Nothing is deleted here — a repair
+						// racing this read may already have moved the row.
+						await db.markChunkDamaged(env.ATTIC_DB, row.id, row.remote_file);
+						vanished.push(chunk.hash);
+						return false;
+					}
+					await writer.write(raw as BufferSource);
+					return true;
+				});
 			});
 			if (!ok) break;
 		}
@@ -1227,6 +1241,7 @@ export async function handleCdcComplete(
 		}
 		verified = true;
 	} finally {
+		uploadShape(body.chunks.length, body.nar_size, compressedBytes);
 		if (!verified) {
 			await writer.abort(new Error('verification stopped')).catch(() => {});
 			await releaseChunkLocks(env, [...lockedByHash.values()]);
@@ -1234,13 +1249,8 @@ export async function handleCdcComplete(
 		writer.releaseLock();
 	}
 
-	await linkChunkedNarDeduped(
-		env,
-		info,
-		cache.id,
-		records,
-		[...lockedByHash.values()],
-		body.nar_size
+	await measure('cdcPublish', () =>
+		linkChunkedNarDeduped(env, info, cache.id, records, [...lockedByHash.values()], body.nar_size)
 	);
 	recordPush(env, info.cache, { deduplicated: false, narBytes: body.nar_size });
 	invalidate();

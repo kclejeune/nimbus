@@ -5,6 +5,7 @@
 // codec is recorded per-NAR, so narinfo output stays correct.
 
 import { Semaphore } from '../platform';
+import { measure } from '../latency';
 import { initZstd, zstdCompress } from './zstd';
 
 export { initZstd, zstdDecompress } from './zstd';
@@ -20,6 +21,17 @@ export { initZstd, zstdDecompress } from './zstd';
  * These inner slots only bound compression tasks within that admitted work.
  */
 export const wasmMemorySlots = new Semaphore(2);
+
+/** Run fn under a wasmMemorySlots slot, measuring contention separately from
+ * the work holding it. */
+export async function withWasmSlot<T>(fn: () => Promise<T> | T): Promise<T> {
+	await measure('wasmWait', () => wasmMemorySlots.acquire());
+	try {
+		return await measure('wasmHold', async () => fn());
+	} finally {
+		wasmMemorySlots.release();
+	}
+}
 export {
 	extensionFor,
 	uploadCompressionFor,

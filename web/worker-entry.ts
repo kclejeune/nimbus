@@ -12,7 +12,14 @@
 //   wrangler.adapter.jsonc, so this file is never overwritten by builds.
 
 import { processChunkRepair, replayChunkRepairs } from './src/lib/server/cache/repair';
-import { purgeWithJournal, replayPurges } from './src/lib/server/cache/purge';
+import {
+	purgeWithJournal,
+	replayPurges,
+	journalPurge,
+	PurgeRateLimitedError,
+	PurgeDeferredError
+} from './src/lib/server/cache/purge';
+import { withRequestSpan, withSpan } from './src/lib/server/cache/tracing';
 import { observeRequest, routeTemplate } from './src/lib/server/cache/latency';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import sveltekit from './.svelte-kit/cloudflare/_worker.js';
@@ -20,20 +27,15 @@ import { runGc } from './src/lib/server/cache/gc';
 import { caughtResponse, handleCacheApi } from './src/lib/server/cache/router';
 import { serveStore } from './src/lib/server/cache/store';
 
+export { PurgeCoordinator } from './purge-coordinator';
+
 type Env = App.Platform['env'];
 
-type Span = { setAttribute(key: string, value: string): void };
-type Tracing = { enterSpan<T>(name: string, fn: (span: Span) => Promise<T>): Promise<T> };
-
-/** Custom spans need tracing enabled in the Worker's observability config;
- * a deployment without it (the template allows that) must still serve. */
-function withSpan<T>(ctx: unknown, name: string, fn: () => Promise<T>): Promise<T> {
-	const tracing = (ctx as { tracing?: Partial<Tracing> } | undefined)?.tracing;
-	if (typeof tracing?.enterSpan !== 'function') return fn();
-	return tracing.enterSpan(name, (span) => {
-		span.setAttribute('http.route', name);
-		return fn();
-	});
+/** An urgent purge only succeeds once eviction is confirmed; queued work that
+ * is not yet confirmed must not be reported as done. */
+function confirmedOrDeferred(result: { confirmed: boolean }, urgent: boolean) {
+	if (urgent && !result.confirmed) throw new PurgeDeferredError();
+	return result;
 }
 
 /**
@@ -52,20 +54,21 @@ export class CachedStore extends WorkerEntrypoint {
 		console.log(
 			JSON.stringify({ event: 'nimbus.store', route, path: new URL(request.url).pathname })
 		);
-		try {
-			return await withSpan(this.ctx, `store ${route}`, () =>
-				observeRequest(request, this.env as Env, 'store', () =>
-					serveStore(request, this.env as Env, this.ctx as App.Platform['ctx'])
-				)
-			);
-		} catch (e) {
-			// serveNar/serveNarInfo have no internal boundary; an uncaught throw
-			// here (transient D1 error, half-linked NAR) would reject the RPC and
-			// surface to nix as a stackless 1101/500. caughtResponse logs the
-			// stack with a ref id and returns a controlled 500 — or 503 +
-			// Retry-After for transient D1 errors — across the loopback instead.
-			return caughtResponse('store read unhandled', request, e);
-		}
+		return withRequestSpan(this.ctx, route, 'store', () =>
+			observeRequest(
+				request,
+				this.env as Env,
+				'store',
+				async () => {
+					try {
+						return await serveStore(request, this.env as Env, this.ctx as App.Platform['ctx']);
+					} catch (e) {
+						return caughtResponse('store read unhandled', request, e);
+					}
+				},
+				route
+			)
+		);
 	}
 
 	/**
@@ -75,10 +78,58 @@ export class CachedStore extends WorkerEntrypoint {
 	 */
 	async purgeTags(tags: string[]) {
 		await this.observePurge('rpc', tags.length, () =>
-			withSpan(this.ctx, 'store purgeTags', () =>
-				purgeWithJournal(this.env as Env, tags, (batch) => this.purge(batch))
-			)
+			withSpan(this.ctx, 'store purgeTags', () => this.coordinatePurge(tags, true))
 		);
+	}
+
+	/** Uploads and routine GC only require durable acceptance. Trust mutations
+	 * use purgeTags; repairs use durable page receipts and alarm continuation. */
+	async enqueuePurgeTags(tags: string[]) {
+		return this.coordinatePurge(tags, false);
+	}
+
+	/** The singleton purge queue, when this deployment binds one. */
+	private coordinator() {
+		return (this.env as Env).PURGE_COORDINATOR?.getByName('cache-purges');
+	}
+
+	private async coordinatePurge(tags: string[], urgent: boolean) {
+		const env = this.env as Env;
+		const coordinator = this.coordinator();
+		if (!coordinator) {
+			await purgeWithJournal(env, tags, (batch) => this.purge(batch));
+			return { confirmed: true };
+		}
+		let result: { confirmed: boolean };
+		try {
+			result = await coordinator.enqueue(tags, urgent);
+		} catch (error) {
+			// Keep the legacy journal as a transport-failure safety net. Cron transfers
+			// it to the durable queue before deleting any R2 obligations.
+			await journalPurge(env, tags);
+			throw error;
+		}
+		return confirmedOrDeferred(result, urgent);
+	}
+
+	/** coordinatePurge without the R2 journal fallback, for callers that already
+	 * hold their own retry record (a replayed journal entry, a chunk_repair row):
+	 * journaling their failures would duplicate that record on every cron run. */
+	private async purgeUnjournaled(tags: string[], urgent: boolean) {
+		const coordinator = this.coordinator();
+		if (!coordinator) return this.purge(tags);
+		confirmedOrDeferred(await coordinator.enqueue(tags, urgent), urgent);
+	}
+
+	/** Called only by the singleton coordinator. Return the rejection category
+	 * as data across RPC so a rate limit schedules recovery, not retries. */
+	async purgeBatch(tags: string[]) {
+		try {
+			await this.purge(tags);
+			return { success: true };
+		} catch (error) {
+			return { success: false, rateLimited: error instanceof PurgeRateLimitedError };
+		}
 	}
 
 	private async observePurge<T>(operation: string, tagCount: number, run: () => Promise<T>) {
@@ -108,15 +159,18 @@ export class CachedStore extends WorkerEntrypoint {
 	}
 
 	async processChunkRepair(key: string) {
-		await processChunkRepair(this.env as Env, key, (tags) => this.purge(tags));
+		const coordinator = this.coordinator();
+		if (coordinator) await coordinator.scheduleRepair(key);
+		else
+			await processChunkRepair(this.env as Env, key, (tags) => this.purgeUnjournaled(tags, true));
 	}
 
 	/** Replay both durable journals: pending cache purges, then chunk repairs. */
 	async replayJournals() {
 		try {
-			await replayPurges(this.env as Env, (tags) => this.purge(tags));
+			await replayPurges(this.env as Env, (tags) => this.purgeUnjournaled(tags, false));
 		} finally {
-			await replayChunkRepairs(this.env as Env, (tags) => this.purge(tags));
+			await replayChunkRepairs(this.env as Env, (key) => this.processChunkRepair(key));
 		}
 	}
 
@@ -133,8 +187,12 @@ export class CachedStore extends WorkerEntrypoint {
 		if (!cache) throw new Error('ctx.cache unavailable');
 		await this.observePurge('cache', tags.length, async () => {
 			const result = await cache.purge({ tags });
-			if (!result.success)
-				throw new Error(`Cache purge rejected: ${JSON.stringify(result.errors)}`);
+			if (!result.success) {
+				const message = `Cache purge rejected: ${JSON.stringify(result.errors)}`;
+				throw result.errors.some((e) => e.code === 1134)
+					? new PurgeRateLimitedError(message)
+					: new Error(message);
+			}
 		});
 	}
 }
@@ -151,8 +209,9 @@ function isCacheHost(request: Request, cacheBaseUrl?: string): boolean {
 export default {
 	async fetch(request: Request, env: Env, ctx: unknown) {
 		if (isCacheHost(request, env.CACHE_BASE_URL)) {
-			return withSpan(ctx, routeTemplate(request), () =>
-				handleCacheApi(request, env, ctx as App.Platform['ctx'])
+			const route = routeTemplate(request);
+			return withRequestSpan(ctx, route, 'gateway', () =>
+				handleCacheApi(request, env, ctx as App.Platform['ctx'], route)
 			);
 		}
 		return sveltekit.fetch(request, env, ctx);

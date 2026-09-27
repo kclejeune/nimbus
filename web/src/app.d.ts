@@ -23,6 +23,13 @@ declare global {
 			env: {
 				ATTIC_DB: D1Database;
 				CACHE_BUCKET: R2Bucket;
+				/** Global durable tag batching; absent only in older/local test environments. */
+				PURGE_COORDINATOR?: {
+					getByName(name: string): {
+						enqueue(tags: string[], urgent?: boolean): Promise<{ confirmed: boolean }>;
+						scheduleRepair(key: string): Promise<void>;
+					};
+				};
 				APP_URL?: string;
 				CACHE_BASE_URL?: string;
 				JWT_HS256_SECRET_BASE64?: string;

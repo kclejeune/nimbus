@@ -3,12 +3,13 @@
 // admin UI calls them in-process (no more service-binding hop).
 
 import { invalidateCacheRow } from './cache-lookup';
+import { clearUpstreamsMemo } from './missing-paths';
 import { validateCompressionConfig } from './compression/config';
 import * as db from './db';
 import { purgeTagsBestEffort } from './gc';
 import { extractPublicKey, generateKeypair } from '../attic/signing';
 import type { ExecutionContext } from './platform';
-import { cacheTag, PUBLIC_NARS_TAG } from './store';
+import { cacheTag, PUBLIC_NARS_TAG, ROOT_UPSTREAM_TAG, upstreamPassthroughTag } from './store';
 import { CANDIDATES_TAG } from './metadata';
 import { FULL_CONTROL, insertGrant } from '$lib/server/auth/grants';
 
@@ -76,6 +77,9 @@ export async function createCache(
 	});
 	// Evict any brief negative memo left by a serve that raced ahead of create.
 	invalidateCacheRow(name);
+	// The live-cache list feeds upstream resolution (the root union, persist
+	// targets); other isolates rely on redirect fills reading it fresh.
+	clearUpstreamsMemo();
 
 	if (grantFullControlTo) {
 		const user = await env.ATTIC_DB.prepare('SELECT 1 AS x FROM user WHERE id = ?1')
@@ -203,13 +207,22 @@ export async function destroyCache(env: Env, name: string, ctx?: ExecutionContex
 	const deleted = await db.softDeleteCache(env.ATTIC_DB, name);
 	if (!deleted) throw new CacheConfigError(404, `Cache not found: ${name}`);
 	invalidateCacheRow(name);
+	clearUpstreamsMemo();
 	// Admin-table side effect (deliberate boundary exception, like the creator
 	// grant above): exact-name grants die with the cache, so re-creating the
 	// name never inherits the old access list.
 	await env.ATTIC_DB.prepare('DELETE FROM permission_grant WHERE pattern = ?1').bind(name).run();
 	// Deleted caches must stop serving now, not when the narinfo max-age runs
-	// out — the edge would otherwise keep answering for up to 90 days.
-	await purgeTagsBestEffort(ctx, [cacheTag(name), PUBLIC_NARS_TAG, CANDIDATES_TAG]);
+	// out — the edge would otherwise keep answering for up to 90 days. Its
+	// subscriptions also leave the root proxy's upstream union, so root
+	// passthroughs and redirects resolved through them go too.
+	await purgeTagsBestEffort(ctx, [
+		cacheTag(name),
+		PUBLIC_NARS_TAG,
+		CANDIDATES_TAG,
+		upstreamPassthroughTag(name),
+		ROOT_UPSTREAM_TAG
+	]);
 }
 
 /** Rename, keeping the keypair so existing signatures stay valid. */
@@ -228,6 +241,7 @@ export async function renameCache(env: Env, oldName: string, newName: string): P
 	}
 	invalidateCacheRow(oldName);
 	invalidateCacheRow(newName);
+	clearUpstreamsMemo();
 	// Exact-name grants follow the cache (glob grants are untouched). Minted
 	// tokens are snapshots and do not follow — existing rule.
 	await env.ATTIC_DB.prepare('UPDATE permission_grant SET pattern = ?2 WHERE pattern = ?1')

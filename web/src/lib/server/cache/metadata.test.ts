@@ -72,3 +72,47 @@ it('charges the uncached candidates fallback like a store miss', async () => {
 	);
 	expect(prepare).not.toHaveBeenCalled();
 });
+
+it('memoizes positive membership without retaining obsolete visibility', async () => {
+	const { testDatabase } = await import('./test-db');
+	const { invalidateCacheRow } = await import('./cache-lookup');
+	const { clearCandidateMemos, invalidateCandidates } = await import('./metadata');
+	clearCandidateMemos();
+	invalidateCacheRow();
+	const { sqlite, db } = testDatabase();
+	try {
+		sqlite.exec(
+			"INSERT INTO cache (id, name, keypair, is_public, created_at) VALUES (1, 'test', '', 1, datetime('now'))"
+		);
+		const fetch = vi.fn(async () => Response.json([{ id: 1, name: 'test', is_public: 1 }]));
+		const ctx = { exports: { CachedStore: { fetch } } } as unknown as ExecutionContext;
+		const env = { ATTIC_DB: db } as App.Platform['env'];
+		const request = new Request('https://cache.test');
+		expect((await loadCandidates(env, ctx, request, 'path', 'visibility')).rows[0].is_public).toBe(
+			1
+		);
+		sqlite.exec('UPDATE cache SET is_public = 0 WHERE id = 1');
+		invalidateCacheRow('test');
+		expect((await loadCandidates(env, ctx, request, 'path', 'visibility')).rows[0].is_public).toBe(
+			0
+		);
+		expect(fetch).toHaveBeenCalledOnce();
+		invalidateCandidates('path', 'visibility');
+		await loadCandidates(env, ctx, request, 'path', 'visibility');
+		expect(fetch).toHaveBeenCalledTimes(2);
+	} finally {
+		sqlite.close();
+		clearCandidateMemos();
+		invalidateCacheRow();
+	}
+});
+
+it('does not memoize empty candidate entries', async () => {
+	const fetch = vi.fn(async () => Response.json([]));
+	const ctx = { exports: { CachedStore: { fetch } } } as unknown as ExecutionContext;
+	const env = {} as App.Platform['env'];
+	const request = new Request('https://cache.test');
+	await loadCandidates(env, ctx, request, 'nar', 'empty');
+	await loadCandidates(env, ctx, request, 'nar', 'empty');
+	expect(fetch).toHaveBeenCalledTimes(2);
+});

@@ -15,10 +15,12 @@ it.each([false, true])(
 		vi.useFakeTimers();
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		const fetch = vi.fn();
-		const purgeTags = vi.fn(async () => {
+		const enqueuePurgeTags = vi.fn(async () => {
 			if (fails) throw new Error('purge failed');
 		});
-		const ctx = { exports: { CachedStore: { fetch, purgeTags } } } as unknown as ExecutionContext;
+		const ctx = {
+			exports: { CachedStore: { fetch, enqueuePurgeTags } }
+		} as unknown as ExecutionContext;
 		const path = 'a'.repeat(32);
 		const nar = `sha256:${'b'.repeat(64)}`;
 		recordAbsent(path);
@@ -26,7 +28,7 @@ it.each([false, true])(
 		expect(isKnownAbsent(path)).toBe(false);
 		await vi.advanceTimersByTimeAsync(1000);
 		await pending;
-		expect(purgeTags).toHaveBeenCalledExactlyOnceWith([
+		expect(enqueuePurgeTags).toHaveBeenCalledExactlyOnceWith([
 			narinfoTag('test', path),
 			narinfoTag(ROOT_UPSTREAM_TAG_NS, path),
 			candidateTag('path', path),

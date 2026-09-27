@@ -53,3 +53,28 @@ it('does not repopulate invalidated metadata from a stale request', async () => 
 	await pending;
 	expect(await memo.get('a', async () => 2)).toBe(2);
 });
+it('hands an unmemoized result to waiting callers instead of serializing them', async () => {
+	vi.useFakeTimers();
+	const memo = new AsyncMemo<number[]>(10000, 10);
+	let done!: (rows: number[]) => void;
+	const noMemo = () => 0;
+	const leader = memo.get(
+		'a',
+		() =>
+			new Promise((r) => {
+				done = r;
+			}),
+		noMemo
+	);
+	const load = vi.fn(async () => [2]);
+	const waiters = [memo.get('a', load, noMemo), memo.get('a', load, noMemo)];
+	await vi.advanceTimersByTimeAsync(10);
+	done([]);
+	await leader;
+	await vi.advanceTimersByTimeAsync(100);
+	expect(await Promise.all(waiters)).toEqual([[], []]);
+	expect(load).not.toHaveBeenCalled();
+	// Not memoized: a caller arriving afterwards loads for itself.
+	expect(await memo.get('a', load, noMemo)).toEqual([2]);
+	expect(load).toHaveBeenCalledOnce();
+});

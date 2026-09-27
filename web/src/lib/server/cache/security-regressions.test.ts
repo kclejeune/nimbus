@@ -21,7 +21,7 @@ import { issueChunkProof, verifyChunkProof } from './chunk-proof';
 import { findNarWithChunks, createObject, type NewObject } from './db';
 import { serveStore } from './store';
 import { clearUpstreamsMemo } from './missing-paths';
-import { clearConfirmedCandidates } from './metadata';
+import { clearCandidateMemos } from './metadata';
 
 describe('audit security regressions', () => {
 	const fixture = testDatabase();
@@ -54,7 +54,7 @@ describe('audit security regressions', () => {
 	beforeEach(() => {
 		invalidateCacheRow();
 		clearUpstreamsMemo();
-		clearConfirmedCandidates();
+		clearCandidateMemos();
 		fixture.sqlite.exec(
 			'DELETE FROM chunk_repair; DELETE FROM object; DELETE FROM chunkref; DELETE FROM nar; DELETE FROM chunk; DELETE FROM cache_upstream; DELETE FROM cache; DELETE FROM upstream_check; DELETE FROM upstream;'
 		);
@@ -465,11 +465,13 @@ describe('audit security regressions', () => {
 				return new Response(JSON.stringify(holders), {
 					headers: { 'Content-Type': 'application/json' }
 				});
+			// The miss path's upstream redirect lookup: no upstream holds it.
+			if (path.startsWith('/_upstream_nar/')) return Response.json(null);
 			// A body that survived a failed withdrawal purge.
 			return new Response('cached bytes', { status: 200 });
 		});
 		const ctx = {
-			exports: { CachedStore: { fetch: store, purgeTags: async () => {} } },
+			exports: { CachedStore: { fetch: store, enqueuePurgeTags: async () => {} } },
 			waitUntil: () => {}
 		} as unknown as import('./platform').ExecutionContext;
 		const request = () =>
@@ -477,8 +479,11 @@ describe('audit security regressions', () => {
 		// Held only by the (now private) victim: not reachable via public 'attacker'.
 		let holders = [{ id: 1, name: 'victim', priority: 0, is_public: 0 }];
 		expect((await request()).status).toBe(404);
+		// Metadata lookups only: the surviving body was never fetched.
 		expect(
-			store.mock.calls.every(([r]) => new URL((r as Request).url).pathname.startsWith('/_meta/'))
+			store.mock.calls.every(([r]) =>
+				/^\/_(meta|upstream_nar)\//.test(new URL((r as Request).url).pathname)
+			)
 		).toBe(true);
 		holders = [{ id: 2, name: 'attacker', priority: 0, is_public: 1 }];
 		expect((await request()).status).toBe(200);
@@ -512,9 +517,9 @@ describe('audit security regressions', () => {
 				);
 			return new Response('nar bytes', { status: 200 });
 		});
-		const purgeTags = vi.fn(async () => {});
+		const enqueuePurgeTags = vi.fn(async () => {});
 		const ctx = {
-			exports: { CachedStore: { fetch: store, purgeTags } },
+			exports: { CachedStore: { fetch: store, enqueuePurgeTags } },
 			waitUntil: () => {}
 		} as unknown as import('./platform').ExecutionContext;
 		const response = await handleCacheApi(
@@ -523,7 +528,7 @@ describe('audit security regressions', () => {
 			ctx
 		);
 		expect(response.status).toBe(200);
-		expect(purgeTags).toHaveBeenCalledWith([`candidate:nar:${hash}`]);
+		expect(enqueuePurgeTags).toHaveBeenCalledWith([`candidate:nar:${hash}`]);
 	});
 	it('does not expose internal metadata and retention endpoints through the gateway', async () => {
 		for (const path of [

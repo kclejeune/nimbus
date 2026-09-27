@@ -8,6 +8,19 @@ export const PURGE_TAG_LIMIT = 100;
 /** Journal entries considered per scheduled replay. */
 const REPLAY_ENTRY_LIMIT = 100;
 
+/** Code 1134: the platform's purge budget is exhausted. Unlike a generic
+ * rejection, retrying immediately only burns more of the budget. */
+export class PurgeRateLimitedError extends Error {}
+export async function journalPurge(env: Env, tags: string[]): Promise<void> {
+	const key = `${PREFIX}${Date.now()}-${crypto.randomUUID()}`;
+	await withR2Retry(() => env.CACHE_BUCKET.put(key, JSON.stringify(tags)));
+}
+export class PurgeDeferredError extends Error {
+	constructor() {
+		super('Purge queued durably; eviction is not yet confirmed');
+	}
+}
+
 /**
  * Purge with retries; only a batch that still fails after the last attempt is
  * journaled to R2 — once — for scheduled replay. Successful reads and purges
@@ -15,10 +28,13 @@ const REPLAY_ENTRY_LIMIT = 100;
  */
 export async function purgeWithJournal(env: Env, tags: string[], purge: Purge): Promise<void> {
 	try {
-		await withRetry(() => purge(tags), { attempts: 3, baseMs: 1000 });
+		await withRetry(() => purge(tags), {
+			attempts: 3,
+			baseMs: 1000,
+			shouldRetry: (e) => !(e instanceof PurgeRateLimitedError)
+		});
 	} catch (error) {
-		const key = `${PREFIX}${Date.now()}-${crypto.randomUUID()}`;
-		await withR2Retry(() => env.CACHE_BUCKET.put(key, JSON.stringify(tags)));
+		await journalPurge(env, tags);
 		throw error;
 	}
 }
@@ -97,10 +113,10 @@ let leaseUntil = 0;
 
 /**
  * Purge `tags` together with whatever else this isolate parks within the
- * window. Resolves once a flush covering the tags was attempted; a batch
- * that failed has been journaled by the purge itself (purgeWithJournal), so
- * followers treat the covered watermark as done and only the leader sees the
- * error.
+ * window. Resolves once a flush covering the tags was attempted. The purge
+ * callback owns durability (the coordinator's queue, or purgeWithJournal's R2
+ * journal without one), so followers treat the covered watermark as done and
+ * only the leader sees the error.
  */
 export async function purgeCoalesced(purge: Purge, tags: string[]): Promise<void> {
 	const mine = ++parkedSeq;
