@@ -82,6 +82,12 @@ declare global {
 				VERDICT_WRITE_LIMITER?: RateLimit;
 				UPSTREAM_GLOBAL_LIMITER?: RateLimit;
 				STORAGE_WRITE_LIMITER?: RateLimit;
+				/** Per-IP control-plane budget, charged before token verification. */
+				API_REQUEST_LIMITER?: RateLimit;
+				/** Per-token budget ahead of control-plane D1 writes. */
+				API_MUTATION_LIMITER?: RateLimit;
+				/** Per-colo cap on manual GC triggers (plus a D1 cooldown). */
+				GC_TRIGGER_LIMITER?: RateLimit;
 				/** Analytics Engine dataset for read-path traffic metrics
 				 * (narinfo/NAR hit/miss/upstream); unbound = metrics off. */
 				CACHE_METRICS?: AnalyticsEngineDataset;

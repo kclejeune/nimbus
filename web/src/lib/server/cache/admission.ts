@@ -1,5 +1,7 @@
 import type { RateLimit } from '@cloudflare/workers-types';
 import { errorResponse } from '../attic/http';
+import { recordLimit, type LimitRoute } from './metrics';
+import { limitOutcome } from '../rate-limit';
 
 export class AdmissionError extends Error {
 	constructor(
@@ -15,12 +17,7 @@ export class AdmissionError extends Error {
 
 /** Optional in local development; binding failures never authorize work. */
 export async function takeBudget(limiter: RateLimit | undefined, key: string): Promise<boolean> {
-	if (!limiter) return true;
-	try {
-		return (await limiter.limit({ key })).success;
-	} catch {
-		return false;
-	}
+	return (await limitOutcome(limiter, key)) === 'allowed';
 }
 
 export async function requireBudget(limiter: RateLimit | undefined, key: string): Promise<void> {
@@ -61,3 +58,28 @@ export function clientKey(prefix: string, ip: string | null | undefined): string
  * charge backend work per client. Never trusted from the outside: the
  * gateway overwrites it on every loopback. */
 export const CLIENT_IP_HEADER = 'X-Nimbus-Client-Ip';
+
+const LIMIT_RETRY_AFTER_S = 10;
+const LIMIT_ERROR_RETRY_AFTER_S = 5;
+
+/** Charge one unit of a control-plane budget: null to proceed, else a 429
+ * (spent) or 503 (limiter failure — fail closed) to send instead. */
+export async function enforceLimit(
+	env: App.Platform['env'],
+	limiter: RateLimit | undefined,
+	key: string,
+	route: LimitRoute
+): Promise<Response | null> {
+	if (!limiter) return null;
+	const outcome = await limitOutcome(limiter, key);
+	recordLimit(env, route, outcome);
+	if (outcome === 'allowed') return null;
+	if (outcome === 'error') {
+		return errorResponse(503, 'Request budget temporarily unavailable; retry shortly', undefined, {
+			'Retry-After': String(LIMIT_ERROR_RETRY_AFTER_S)
+		});
+	}
+	return errorResponse(429, 'Too many requests; retry shortly', undefined, {
+		'Retry-After': String(LIMIT_RETRY_AFTER_S)
+	});
+}

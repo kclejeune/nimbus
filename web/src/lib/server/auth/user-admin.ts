@@ -7,6 +7,7 @@ import { error, fail, type RequestEvent } from '@sveltejs/kit';
 import type { D1Database } from '@cloudflare/workers-types';
 import { requireAdmin } from './guard';
 import { writeAudit } from '$lib/server/audit';
+import { tombstoneUserTokens } from '$lib/server/tokens';
 
 export async function ownerCount(db: D1Database): Promise<number> {
 	const row = await db
@@ -21,6 +22,35 @@ export async function isOwner(db: D1Database, userId: string): Promise<boolean> 
 		.bind(userId)
 		.first<{ is_owner: number }>();
 	return row?.is_owner === 1;
+}
+
+/**
+ * Delete a user and their dependents in one atomic batch, tombstoning their
+ * tokens (see revoked_token). Their audit entries are detached rather than
+ * deleted — audit_log.user_id has no ON DELETE action, so D1 would refuse —
+ * and the `user.delete` entry records who the id was.
+ */
+export async function deleteUser(
+	db: D1Database,
+	userId: string,
+	actorId: string | null,
+	nowSeconds = Math.floor(Date.now() / 1000)
+): Promise<void> {
+	await db.batch([
+		db
+			.prepare(
+				`INSERT INTO audit_log (id, user_id, action, target, detail, created_at)
+				 SELECT ?1, ?2, 'user.delete', ?3, json_object('email', email, 'name', name), ?4
+				 FROM user WHERE id = ?3`
+			)
+			.bind(crypto.randomUUID(), actorId, userId, nowSeconds),
+		db.prepare('UPDATE audit_log SET user_id = NULL WHERE user_id = ?1').bind(userId),
+		tombstoneUserTokens(db, userId, 'user.delete', nowSeconds),
+		db.prepare('DELETE FROM api_token WHERE user_id = ?1').bind(userId),
+		db.prepare('DELETE FROM session WHERE userId = ?1').bind(userId),
+		db.prepare('DELETE FROM account WHERE userId = ?1').bind(userId),
+		db.prepare('DELETE FROM user WHERE id = ?1').bind(userId)
+	]);
 }
 
 function requireAdminDb({ locals, platform }: RequestEvent): D1Database {
@@ -126,14 +156,7 @@ export function userAdminActions() {
 				return fail(400, { error: 'Add another owner before deleting the last one.' });
 			}
 
-			// D1 enforces FKs but the schema has no ON DELETE CASCADE, so delete
-			// dependents before the user row (children first).
-			await db.batch([
-				db.prepare('DELETE FROM api_token WHERE user_id = ?1').bind(userId),
-				db.prepare('DELETE FROM session WHERE userId = ?1').bind(userId),
-				db.prepare('DELETE FROM account WHERE userId = ?1').bind(userId),
-				db.prepare('DELETE FROM user WHERE id = ?1').bind(userId)
-			]);
+			await deleteUser(db, userId, event.locals.user!.id);
 
 			return { deleted: true };
 		}

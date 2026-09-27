@@ -25,6 +25,8 @@ import {
 } from '$lib/server/cache/upstream-registry';
 import {
 	addGcRoot,
+	GC_ROOT_NOTE_MAX_CHARS,
+	PIN_KEEP_REVISIONS_MAX,
 	PIN_NAME_RE,
 	removeGcRoot,
 	removePin,
@@ -338,6 +340,9 @@ export const actions: Actions = {
 		}
 
 		const note = String(form.get('note') ?? '').trim() || null;
+		if (note && note.length > GC_ROOT_NOTE_MAX_CHARS) {
+			return fail(400, { rootError: `Notes are limited to ${GC_ROOT_NOTE_MAX_CHARS} characters.` });
+		}
 		const pinName = String(form.get('pin_name') ?? '').trim();
 		if (pinName) {
 			// Named pin: re-pinning the name adds a revision (cachix-style).
@@ -346,8 +351,13 @@ export const actions: Actions = {
 			}
 			const keepRaw = String(form.get('keep_revisions') ?? '').trim();
 			const keep = keepRaw === '' ? undefined : Number(keepRaw);
-			if (keep !== undefined && (!Number.isInteger(keep) || keep <= 0)) {
-				return fail(400, { rootError: 'Keep revisions must be a positive whole number.' });
+			if (
+				keep !== undefined &&
+				(!Number.isInteger(keep) || keep <= 0 || keep > PIN_KEEP_REVISIONS_MAX)
+			) {
+				return fail(400, {
+					rootError: `Keep revisions must be a whole number from 1 to ${PIN_KEEP_REVISIONS_MAX}.`
+				});
 			}
 			await upsertPin(db, cache.id, pinName, hash, { keepRevisions: keep, note });
 			return { rootAdded: true };

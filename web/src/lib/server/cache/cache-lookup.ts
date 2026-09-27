@@ -25,10 +25,43 @@ const CACHE_ROW_MISS_TTL_MS = 5_000;
 const CACHE_ROW_MEMO_MAX_ENTRIES = 10_000;
 const cacheRowMemo = new AsyncMemo<CacheRow | null>(CACHE_ROW_TTL_MS, CACHE_ROW_MEMO_MAX_ENTRIES);
 
+export interface CacheListRow {
+	name: string;
+	is_public: number;
+	priority: number;
+	compression: string;
+	retention_period: number | null;
+	retention_max_bytes: number | null;
+}
+
+// Token-independent: callers filter per token, so no caller-specific view
+// (which would leak private names) is ever memoized.
+const CACHE_LIST_KEY = 'all';
+const cacheListMemo = new AsyncMemo<CacheListRow[]>(CACHE_ROW_TTL_MS, 1);
+
 /** Drop memoized cache row(s); called by every cache-config mutation (the sole
- * choke point for cache-row writes). Pass no name to clear all, e.g. in tests. */
+ * choke point for cache-row writes), plus the list memo. Pass no name to
+ * clear all, e.g. in tests. */
 export function invalidateCacheRow(name?: string): void {
 	cacheRowMemo.clear(name);
+	cacheListMemo.clear();
+}
+
+/** Every live cache, memoized like rows; `admit` charges a memo miss. */
+export async function listLiveCachesCached(
+	db: D1Database,
+	admit: () => Promise<void>
+): Promise<CacheListRow[]> {
+	return cacheListMemo.get(CACHE_LIST_KEY, async () => {
+		await admit();
+		const { results } = await readSession(db)
+			.prepare(
+				`SELECT name, is_public, priority, compression, retention_period, retention_max_bytes
+				 FROM cache WHERE deleted_at IS NULL ORDER BY name`
+			)
+			.all<CacheListRow>();
+		return results;
+	});
 }
 
 /** findCache with the per-isolate memo, reading a replica session derived

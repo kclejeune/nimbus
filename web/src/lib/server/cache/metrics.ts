@@ -20,6 +20,8 @@
 // silently undercounts once sampling is on. Rows written before sampling
 // existed all carry double1 = 1, so the weighted form is exact for them too.
 
+import type { LimitOutcome } from '../rate-limit';
+
 type Env = App.Platform['env'];
 
 export type ReadKind = 'narinfo' | 'nar';
@@ -157,6 +159,26 @@ export function recordStoreWrite(
 		});
 	} catch {
 		// Metrics must never fail an upload.
+	}
+}
+
+export const LIMIT_LABEL = '_limit';
+
+/** Static route families only — never a token, jti, subject, or cache name. */
+export type LimitRoute = 'api' | 'mutation' | 'gc';
+
+/** Admissions are sampled like reads; refusals and errors always recorded. */
+export function recordLimit(env: Env, route: LimitRoute, outcome: LimitOutcome): void {
+	try {
+		const sample = outcome === 'allowed' ? readSampleRate(env) : 1;
+		if (Math.random() * sample >= 1) return;
+		env.CACHE_METRICS?.writeDataPoint({
+			blobs: ['limit', outcome, route],
+			doubles: [sample],
+			indexes: [LIMIT_LABEL]
+		});
+	} catch {
+		// Metrics must never fail the guarded path.
 	}
 }
 

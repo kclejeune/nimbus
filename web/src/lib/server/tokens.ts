@@ -2,6 +2,11 @@ import type { D1Database } from '@cloudflare/workers-types';
 import { mintAtticToken, type CacheAccess, type CachePermission } from './attic-token';
 import { parseTokenBits, scopeDenial, type EffectiveAccess } from './auth/permissions';
 import { writeAudit } from './audit';
+import { assertMaxLength } from './request-body';
+
+export const TOKEN_NAME_MAX_CHARS = 100;
+export const TOKEN_SCOPE_MAX_CHARS = 128;
+export const TOKEN_MAX_DAYS = 3650;
 
 export interface TokenScope {
 	/** Concrete cache name, "*", or an exact grant pattern (see scopeDenial). */
@@ -83,6 +88,22 @@ export async function revokeUserToken(
 	await writeAudit(db, { userId: actorId, action: 'token.revoke', target: tokenId });
 }
 
+/** Tombstone a user's token ids; batch it with deleting their api_token rows
+ *  (see deleteUser in auth/user-admin.ts). */
+export function tombstoneUserTokens(
+	db: D1Database,
+	userId: string,
+	reason: string,
+	nowSeconds = Math.floor(Date.now() / 1000)
+) {
+	return db
+		.prepare(
+			`INSERT OR IGNORE INTO revoked_token (jti, expires_at, revoked_at, reason)
+			 SELECT id, expires_at, ?2, ?3 FROM api_token WHERE user_id = ?1`
+		)
+		.bind(userId, nowSeconds, reason);
+}
+
 /** Lowercase hex of the SHA-256 of a string. */
 export async function sha256hex(s: string): Promise<string> {
 	const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
@@ -121,6 +142,9 @@ export function boundTokenScope(
 	minter: { access: EffectiveAccess; isAdmin: boolean }
 ): { ok: true; scope: TokenScope } | { ok: false; denial: string } {
 	const { cacheScope, bits, gc, ct } = request;
+	if (cacheScope.length > TOKEN_SCOPE_MAX_CHARS) {
+		return { ok: false, denial: `Cache scope exceeds ${TOKEN_SCOPE_MAX_CHARS} characters.` };
+	}
 
 	// The nimbus global claims are deliberately not per-cache grant bits: they
 	// can only be minted into a token, and only by an admin. gc triggers
@@ -134,7 +158,9 @@ export function boundTokenScope(
 		const denial = scopeDenial(minter.access, { pattern: cacheScope, bits });
 		if (denial) return { ok: false, denial };
 	}
-	const days = Number.isFinite(request.days) ? Math.max(1, Math.min(3650, request.days)) : 90;
+	const days = Number.isFinite(request.days)
+		? Math.max(1, Math.min(TOKEN_MAX_DAYS, request.days))
+		: 90;
 	return { ok: true, scope: { cacheScope, bits, gc, ct, days } };
 }
 
@@ -190,6 +216,7 @@ export async function mintScopedToken(
 /** SQL to record a minted token in `api_token`. Returned as a prepared statement so
  *  callers can run it standalone or inside a batch (e.g. the device-flow approval). */
 export function insertApiToken(db: D1Database, minted: MintedToken, userId: string, name: string) {
+	assertMaxLength('Token name', name, TOKEN_NAME_MAX_CHARS);
 	return db
 		.prepare(
 			`INSERT INTO api_token (id, user_id, name, token_hash, permissions, expires_at, created_at)

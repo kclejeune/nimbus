@@ -17,8 +17,9 @@ type Env = App.Platform['env'];
 
 const CACHE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,49}$/;
 
-// Names that collide with root-proxy routes on the cache host.
-const RESERVED_CACHE_NAMES = new Set(['nar', 'nix-cache-info']);
+// Names that collide with root-proxy routes on the cache host, plus `gc`,
+// which GC authorization once probed (see hasGcAuthority).
+const RESERVED_CACHE_NAMES = new Set(['nar', 'nix-cache-info', 'gc']);
 
 export class CacheConfigError extends Error {
 	constructor(
@@ -35,6 +36,64 @@ export interface CreateCacheOptions {
 	priority?: number;
 	compression?: string;
 	retention_period?: number | null;
+}
+
+const STORE_DIR_MAX_CHARS = 256;
+const UPSTREAM_KEY_NAMES_MAX = 64;
+const UPSTREAM_KEY_NAME_MAX_CHARS = 256;
+const KEYPAIR_MAX_CHARS = 1024;
+const I32_MAX = 2 ** 31 - 1;
+
+/** Shape and size of the option fields nimbus stores. Unknown fields are
+ * tolerated: attic clients send some that nimbus ignores. */
+function validateCacheOptions(options: unknown): asserts options is ConfigureCacheOptions {
+	const bad = (message: string) => new CacheConfigError(400, message);
+	if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+		throw bad('Cache options must be a JSON object');
+	}
+	const o = options as Record<string, unknown>;
+	const int = (field: string, max: number, nullable: boolean) => {
+		const v = o[field];
+		if (v === undefined || (nullable && v === null)) return;
+		if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > max) {
+			throw bad(`${field} must be a non-negative integer (≤ ${max})${nullable ? ' or null' : ''}`);
+		}
+	};
+	if (o.is_public !== undefined && typeof o.is_public !== 'boolean') {
+		throw bad('is_public must be a boolean');
+	}
+	if (o.store_dir !== undefined) {
+		if (typeof o.store_dir !== 'string' || !o.store_dir.startsWith('/')) {
+			throw bad('store_dir must be an absolute path');
+		}
+		if (o.store_dir.length > STORE_DIR_MAX_CHARS) {
+			throw bad(`store_dir exceeds ${STORE_DIR_MAX_CHARS} characters`);
+		}
+	}
+	int('priority', I32_MAX, false);
+	if (o.compression !== undefined && typeof o.compression !== 'string') {
+		throw bad('compression must be a string');
+	}
+	int('retention_period', I32_MAX, true);
+	int('retention_max_bytes', Number.MAX_SAFE_INTEGER, true);
+	if (o.upstream_cache_key_names !== undefined) {
+		const names = o.upstream_cache_key_names;
+		if (
+			!Array.isArray(names) ||
+			names.length > UPSTREAM_KEY_NAMES_MAX ||
+			!names.every((n) => typeof n === 'string' && n.length <= UPSTREAM_KEY_NAME_MAX_CHARS)
+		) {
+			throw bad(
+				`upstream_cache_key_names must be at most ${UPSTREAM_KEY_NAMES_MAX} strings of ≤ ${UPSTREAM_KEY_NAME_MAX_CHARS} characters`
+			);
+		}
+	}
+	const keypair = o.keypair as { type?: unknown; keypair?: unknown } | undefined;
+	if (keypair?.type === 'set') {
+		if (typeof keypair.keypair !== 'string' || keypair.keypair.length > KEYPAIR_MAX_CHARS) {
+			throw bad(`keypair must be a string of ≤ ${KEYPAIR_MAX_CHARS} characters`);
+		}
+	}
 }
 
 /**
@@ -54,6 +113,7 @@ export async function createCache(
 	if (!CACHE_NAME_RE.test(name) || RESERVED_CACHE_NAMES.has(name)) {
 		throw new CacheConfigError(400, `Invalid cache name: ${name}`);
 	}
+	validateCacheOptions(options);
 
 	const existing = await db.findCache(env.ATTIC_DB, name);
 	if (existing) throw new CacheConfigError(409, `A cache named "${name}" already exists`);
@@ -137,6 +197,7 @@ export async function configureCache(
 	options: ConfigureCacheOptions,
 	authz: { trustAuthorized?: boolean; ctx?: ExecutionContext } = {}
 ): Promise<{ public_key?: string }> {
+	validateCacheOptions(options);
 	if (touchesTrustFields(options) && !authz.trustAuthorized) {
 		throw new CacheConfigError(
 			403,
@@ -249,16 +310,15 @@ export async function renameCache(env: Env, oldName: string, newName: string): P
 		.run();
 }
 
-/** The public discovery document (attic-cache-info / GET cache-config). */
-export async function cacheInfo(env: Env, name: string, baseUrl: string): Promise<object> {
-	const cache = await db.findCache(env.ATTIC_DB, name);
-	if (!cache) throw new CacheConfigError(404, `Cache not found: ${name}`);
-
-	let publicKey: string;
+/** The discovery document (attic-cache-info / GET cache-config), built from
+ * the row read authorization was decided on. */
+export function cacheInfo(cache: db.CacheRow, baseUrl: string): object {
+	// Never fall back to the stored value: it holds the secret seed.
+	let publicKey: string | null;
 	try {
 		publicKey = extractPublicKey(cache.keypair);
 	} catch {
-		publicKey = cache.keypair;
+		publicKey = null;
 	}
 
 	let upstreamKeyNames: string[] = [];
@@ -270,7 +330,7 @@ export async function cacheInfo(env: Env, name: string, baseUrl: string): Promis
 	}
 
 	return {
-		substituter_endpoint: `${baseUrl}/${name}/`,
+		substituter_endpoint: `${baseUrl}/${cache.name}/`,
 		api_endpoint: `${baseUrl}/`,
 		public_key: publicKey,
 		is_public: cache.is_public === 1,

@@ -4,6 +4,7 @@ import {
 	boundTokenScope,
 	listUserTokens,
 	mintAndStore,
+	TOKEN_NAME_MAX_CHARS,
 	revokeUserToken,
 	parseTokenForm
 } from '$lib/server/tokens';
@@ -41,6 +42,9 @@ export const actions: Actions = {
 		const form = await request.formData();
 		const name = String(form.get('name') ?? '').trim();
 		if (!name) return fail(400, { error: 'Give the token a name.' });
+		if (name.length > TOKEN_NAME_MAX_CHARS) {
+			return fail(400, { error: `Token names are limited to ${TOKEN_NAME_MAX_CHARS} characters.` });
+		}
 
 		// Mint-time bounding: a token may only carry what its creator holds.
 		const bound = boundTokenScope(parseTokenForm(form), await tokenMinter(locals, env.ATTIC_DB));

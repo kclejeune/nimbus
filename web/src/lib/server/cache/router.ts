@@ -26,11 +26,17 @@ import {
 import { findCacheCached } from './cache-lookup';
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import { readDeviceCode, readMissingPaths } from './request-input';
-import { RequestBodyError, readJson } from '../request-body';
-import { AdmissionError, clientKey, requireBudget, requireBudgetUnits } from './admission';
+import { RequestBodyError, isRecord, JSON_LIMITS, readJson } from '../request-body';
+import {
+	AdmissionError,
+	clientKey,
+	enforceLimit,
+	requireBudget,
+	requireBudgetUnits
+} from './admission';
 import { checkRateLimit } from '../rate-limit';
 import * as db from './db';
-import { listPins, runGc } from './gc';
+import { claimManualGcSlot, listPins, runGc } from './gc';
 import {
 	errorResponse,
 	jsonResponse,
@@ -71,6 +77,7 @@ import {
 	upstreamNarPath
 } from './store';
 import {
+	hasGcAuthority,
 	NO_PERMISSION,
 	parseAuthToken,
 	permissionForCache,
@@ -306,6 +313,20 @@ async function forwardToStore(
 	stripped.headers.delete(PERSIST_CACHE_HEADER);
 	stripped.headers.delete(PERSIST_UPSTREAM_HEADER);
 	return stripped;
+}
+
+/** v1 routes with their own budgets instead of the per-IP API budget. */
+const UNBUDGETED_V1_ROUTES = new Set(['upload-path', 'get-missing-paths', 'cli']);
+
+function chargeApiBudget(request: Request, env: Env): Promise<Response | null> {
+	const key = clientKey('api', request.headers.get('CF-Connecting-IP'));
+	return enforceLimit(env, env.API_REQUEST_LIMITER, key, 'api');
+}
+
+/** Per jti; jti-less attic tokens fall back to subject plus client IP. */
+function mutationKey(request: Request, token: VerifiedToken): string {
+	if (token.jti) return `mutation:jti:${token.jti}`;
+	return `mutation:sub:${token.sub ?? ''}:${request.headers.get('CF-Connecting-IP') ?? 'unknown'}`;
 }
 
 /** Per-client key for cold gateway lookups (memo misses that reach D1). */
@@ -832,9 +853,9 @@ async function handleGetMissingPaths(
 }
 
 /**
- * POST /_api/v1/gc — manual GC trigger. Mirrors the Rust worker's auth: delete
- * permission on a probe cache named "gc" (in practice a wildcard-scoped
- * token). `?dry_run=1` reports what retention would delete without deleting.
+ * POST /_api/v1/gc — manual GC trigger, authorized by hasGcAuthority (the
+ * nimbus gc claim, or attic-native delete on `*`). `?dry_run=1` reports what
+ * retention would delete without deleting.
  */
 async function handleGcTrigger(
 	request: Request,
@@ -850,10 +871,18 @@ async function handleGcTrigger(
 	}
 	if (!token) return errorResponse(401, 'No token provided');
 	// The nimbus gc claim is minted admin-only from the tokens page (it is
-	// storage-wide, so it is never a per-cache grant); the wildcard-delete
-	// probe keeps attic-native tokens working.
-	if (!token.gc && !permissionForCache(token, 'gc').delete) {
+	// storage-wide, so it is never a per-cache grant).
+	if (!hasGcAuthority(token)) {
 		return errorResponse(403, 'Permission denied: garbage collection');
+	}
+	// After authorization, so an unauthorized flood cannot lock admins out.
+	const limited = await enforceLimit(env, env.GC_TRIGGER_LIMITER, 'gc', 'gc');
+	if (limited) return limited;
+	const retryAfter = await claimManualGcSlot(env.ATTIC_DB);
+	if (retryAfter !== null) {
+		return errorResponse(429, 'A manual GC ran recently; retry later', undefined, {
+			'Retry-After': String(retryAfter)
+		});
 	}
 
 	const dryRun = url.searchParams.get('dry_run') === '1';
@@ -877,14 +906,22 @@ async function handleCacheInfo(
 ): Promise<Response> {
 	const auth = await authorizeCacheRead(request, env, cacheName);
 	if ('response' in auth) return auth.response;
-	try {
-		return withVisibility(
-			jsonResponse(await cacheInfo(env, cacheName, baseUrl)),
-			auth.cache.is_public === 1
-		);
-	} catch (e) {
-		return caughtResponse('cache-info unhandled', request, e);
+	return withVisibility(jsonResponse(cacheInfo(auth.cache, baseUrl)), auth.cache.is_public === 1);
+}
+
+/** The shared gc-root/pin POST body; throws RequestBodyError (400). */
+async function readRootBody(
+	request: Request
+): Promise<{ body: Record<string, unknown>; hash: string; note: string | null }> {
+	const body = await readJson(request, JSON_LIMITS.gcRoot);
+	if (!isRecord(body)) throw new RequestBodyError(400, 'Invalid request body');
+	const hash = body.store_path_hash;
+	if (typeof hash !== 'string' || !db.STORE_PATH_HASH_RE.test(hash)) {
+		throw new RequestBodyError(400, 'Invalid store path hash');
 	}
+	const note = body.note ?? null;
+	if (note !== null && typeof note !== 'string') throw new RequestBodyError(400, 'Invalid note');
+	return { body, hash, note };
 }
 
 /** Require an authenticated token; returns a Response on failure. */
@@ -943,6 +980,12 @@ async function handleV1(
 	const method = request.method;
 	const route = segments[2];
 
+	// Before token verification, so invalid-signature floods pay too.
+	if (!UNBUDGETED_V1_ROUTES.has(route)) {
+		const limited = await chargeApiBudget(request, env);
+		if (limited) return limited;
+	}
+
 	// Unauthenticated discovery endpoints.
 	if (method === 'GET' && route === 'auth-config' && segments.length === 3) {
 		return handleAuthConfig(env);
@@ -977,7 +1020,9 @@ async function handleV1(
 		} catch {
 			token = null;
 		}
-		return handleCacheList(env, token);
+		return handleCacheList(env, token, () =>
+			requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request))
+		);
 	}
 
 	if (method === 'POST' && route === 'get-missing-paths' && segments.length === 3) {
@@ -992,6 +1037,17 @@ async function handleV1(
 	if ('response' in auth) return auth.response;
 	const token = auth.token;
 	const canPush = (cacheName: string) => permissionForCache(token, cacheName).push;
+
+	// Every write below except uploads (own budgets), so new routes are covered.
+	if (method !== 'GET' && method !== 'HEAD' && route !== 'upload-path') {
+		const limited = await enforceLimit(
+			env,
+			env.API_MUTATION_LIMITER,
+			mutationKey(request, token),
+			'mutation'
+		);
+		if (limited) return limited;
+	}
 
 	// nimbus extension: token self-service (mint/list/revoke as the user
 	// behind the presented token's jti).
@@ -1092,12 +1148,8 @@ async function handleV1(
 		if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
 
 		if (method === 'POST' && segments.length === 4) {
-			const body = await (
-				request.json() as Promise<{ store_path_hash?: string; note?: string }>
-			).catch(() => null);
-			const hash = body?.store_path_hash ?? '';
-			if (!/^[0-9a-z]{32}$/.test(hash)) return errorResponse(400, 'Invalid store path hash');
-			await db.addGcRoot(env.ATTIC_DB, cache.id, hash, body?.note ?? null);
+			const { hash, note } = await readRootBody(request);
+			await db.addGcRoot(env.ATTIC_DB, cache.id, hash, note);
 			return jsonResponse({ pinned: hash });
 		}
 		if (method === 'DELETE' && segments.length === 5) {
@@ -1125,27 +1177,17 @@ async function handleV1(
 			return jsonResponse({ pins: await listPins(env, cache.id) });
 		}
 		if (method === 'POST' && segments.length === 4) {
-			const body = await (
-				request.json() as Promise<{
-					name?: string;
-					store_path_hash?: string;
-					keep_revisions?: number;
-					keep_days?: number;
-					note?: string;
-				}>
-			).catch(() => null);
-			const name = (body?.name ?? '').trim();
-			const hash = body?.store_path_hash ?? '';
+			const { body, hash, note } = await readRootBody(request);
+			const name = typeof body.name === 'string' ? body.name.trim() : '';
 			if (!db.PIN_NAME_RE.test(name)) {
 				return errorResponse(400, 'Invalid pin name (1-100 chars, no whitespace)');
 			}
-			if (!db.STORE_PATH_HASH_RE.test(hash)) return errorResponse(400, 'Invalid store path hash');
 			const keep = (v: unknown) =>
 				typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
 			await db.upsertPin(env.ATTIC_DB, cache.id, name, hash, {
-				keepRevisions: keep(body?.keep_revisions),
-				keepDays: keep(body?.keep_days),
-				note: body?.note ?? null
+				keepRevisions: keep(body.keep_revisions),
+				keepDays: keep(body.keep_days),
+				note
 			});
 			return jsonResponse({ pinned: hash, name });
 		}
@@ -1164,11 +1206,12 @@ async function handleV1(
 		try {
 			if (method === 'POST' && segments.length === 4) {
 				if (!permission.createCache) return errorResponse(403, 'Permission denied: create cache');
-				const body = await (request.json() as Promise<Record<string, unknown>>).catch(() => ({}));
+				// Clients may send no body, or null.
+				const body = (await readJson(request, JSON_LIMITS.cacheConfig, { optional: true })) ?? {};
 				const { public_key } = await createCache(
 					env,
 					cacheName,
-					(body ?? {}) as import('./cache-config').CreateCacheOptions,
+					body as import('./cache-config').CreateCacheOptions,
 					token.sub
 				);
 				return jsonResponse({ name: cacheName, created: true, public_key });
@@ -1180,8 +1223,7 @@ async function handleV1(
 				if (!permission.configureCache) {
 					return errorResponse(403, 'Permission denied: configure cache');
 				}
-				const body = await (request.json() as Promise<Record<string, unknown>>).catch(() => null);
-				if (!body) return errorResponse(400, 'Invalid JSON');
+				const body = await readJson(request, JSON_LIMITS.cacheConfig);
 				// Trust-affecting fields (keypair, visibility, upstream key hints)
 				// are gated inside configureCache; the admin-only nimbus `ct` claim
 				// is this route's authority for them. Keypair rotations purge the
@@ -1200,17 +1242,19 @@ async function handleV1(
 				return jsonResponse({ name: cacheName, deleted: true });
 			}
 			if (method === 'POST' && segments[4] === 'rename') {
-				const body = await (request.json() as Promise<{ new_name?: string }>).catch(() => null);
-				if (!body?.new_name) return errorResponse(400, 'Missing new_name');
 				// Renaming is a configure on the source and a create on the target.
-				if (!permission.configureCache && !permission.createCache) {
-					return errorResponse(403, 'Permission denied: requires configure or create cache');
+				// Never create alone: a `cc:*` token could take over any cache.
+				if (!permission.configureCache) {
+					return errorResponse(403, 'Permission denied: configure cache');
 				}
-				if (!permissionForCache(token, body.new_name).createCache) {
-					return errorResponse(403, 'Permission denied for target name');
+				const body = await readJson(request, JSON_LIMITS.rename);
+				const newName = isRecord(body) ? body.new_name : undefined;
+				if (typeof newName !== 'string' || !newName) return errorResponse(400, 'Missing new_name');
+				if (!permissionForCache(token, newName).createCache) {
+					return errorResponse(403, 'Permission denied: create cache (target name)');
 				}
-				await renameCache(env, cacheName, body.new_name);
-				return jsonResponse({ name: body.new_name, renamed_from: cacheName, renamed: true });
+				await renameCache(env, cacheName, newName);
+				return jsonResponse({ name: newName, renamed_from: cacheName, renamed: true });
 			}
 		} catch (e) {
 			return caughtResponse('cache-config unhandled', request, e);
@@ -1301,6 +1345,8 @@ async function handleCacheApiInner(
 			return handleNixCacheInfo(request, env, cacheName, method === 'HEAD');
 		}
 		if (rest === 'attic-cache-info') {
+			const limited = await chargeApiBudget(request, env);
+			if (limited) return limited;
 			return handleCacheInfo(request, env, cacheName, apiBase(env, url));
 		}
 		if (rest.endsWith('.narinfo')) {

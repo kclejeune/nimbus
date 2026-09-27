@@ -12,7 +12,10 @@ import { isActiveUser } from '../auth/types';
 import { loadEffectiveAccess } from '../auth/permissions';
 import { PERMISSION_BIT_FIELDS } from '../../permission-bits';
 import { writeAudit } from '../audit';
+import { isRecord, JSON_LIMITS, readJson } from '../request-body';
 import {
+	TOKEN_MAX_DAYS,
+	TOKEN_NAME_MAX_CHARS,
 	auditTokenIssue,
 	boundTokenScope,
 	listUserTokens,
@@ -21,18 +24,10 @@ import {
 } from '../tokens';
 import * as db from './db';
 import { detachClosure } from './gc';
+import { listLiveCachesCached } from './cache-lookup';
 import { type ExecutionContext } from './platform';
 
 type Env = App.Platform['env'];
-
-interface CacheListRow {
-	name: string;
-	is_public: number;
-	priority: number;
-	compression: string;
-	retention_period: number | null;
-	retention_max_bytes: number | null;
-}
 
 /**
  * GET /_api/v1/caches — caches the caller may discover: public ones plus any
@@ -40,14 +35,13 @@ interface CacheListRow {
  * only, mirroring read authorization (authorizeCacheRead) — this endpoint
  * must never become an enumeration oracle for private names.
  */
-export async function handleCacheList(env: Env, token: VerifiedToken | null): Promise<Response> {
-	const { results } = await db
-		.readSession(env.ATTIC_DB)
-		.prepare(
-			`SELECT name, is_public, priority, compression, retention_period, retention_max_bytes
-			 FROM cache WHERE deleted_at IS NULL ORDER BY name`
-		)
-		.all<CacheListRow>();
+export async function handleCacheList(
+	env: Env,
+	token: VerifiedToken | null,
+	admit: () => Promise<void>
+): Promise<Response> {
+	// Shared memo; visibility is filtered per caller below.
+	const results = await listLiveCachesCached(env.ATTIC_DB, admit);
 
 	const caches = results.flatMap((row) => {
 		const perm = token ? permissionForCache(token, row.name) : { ...NO_PERMISSION };
@@ -113,6 +107,36 @@ interface TokenCreateBody {
 	expiry_days?: number;
 }
 
+/** Type- and size-check every token-create field before use. */
+function parseTokenCreateBody(raw: unknown): TokenCreateBody | Response {
+	if (!isRecord(raw)) return errorResponse(400, 'Invalid request body');
+	const bad = (field: string) => errorResponse(400, `Invalid ${field}`);
+	const optional = (v: unknown, type: 'string' | 'boolean') => v === undefined || typeof v === type;
+	if (!optional(raw.name, 'string')) return bad('name');
+	// Length is bounded by boundTokenScope.
+	if (!optional(raw.cache, 'string')) return bad('cache');
+	if (!optional(raw.gc, 'boolean')) return bad('gc');
+	if (!optional(raw.ct, 'boolean')) return bad('ct');
+	const permissions = raw.permissions;
+	if (
+		permissions !== undefined &&
+		(!Array.isArray(permissions) ||
+			permissions.length > PERMISSION_BIT_FIELDS.length ||
+			!permissions.every((p) => typeof p === 'string'))
+	) {
+		return bad('permissions');
+	}
+	if (
+		raw.expiry_days !== undefined &&
+		(!Number.isInteger(raw.expiry_days) ||
+			(raw.expiry_days as number) < 1 ||
+			(raw.expiry_days as number) > TOKEN_MAX_DAYS)
+	) {
+		return errorResponse(400, `expiry_days must be an integer in 1..${TOKEN_MAX_DAYS}`);
+	}
+	return raw as TokenCreateBody;
+}
+
 /** /_api/v1/tokens: POST (mint), GET (list own), DELETE /{id} (revoke own). */
 export async function handleTokensApi(
 	request: Request,
@@ -143,11 +167,12 @@ export async function handleTokensApi(
 	}
 
 	if (method === 'POST' && segments.length === 3) {
-		const body = await (request.json() as Promise<TokenCreateBody>).catch(() => null);
-		if (!body) return errorResponse(400, 'Invalid request body');
+		const raw = await readJson(request, JSON_LIMITS.token);
+		const body = parseTokenCreateBody(raw);
+		if (body instanceof Response) return body;
 		const name = (body.name ?? '').trim();
-		if (!name || name.length > 100)
-			return errorResponse(400, 'Token name is required (≤100 chars)');
+		if (!name || name.length > TOKEN_NAME_MAX_CHARS)
+			return errorResponse(400, `Token name is required (≤${TOKEN_NAME_MAX_CHARS} chars)`);
 
 		// Wire permission names are the token-issue form field names, mapped to
 		// bits here; boundTokenScope — the single mint-bounding rule shared
@@ -158,13 +183,6 @@ export async function handleTokensApi(
 			if (!known) return errorResponse(400, `Unknown permission "${field}"`);
 			bits[known.bit] = 1;
 		}
-		if (
-			body.expiry_days !== undefined &&
-			(!Number.isInteger(body.expiry_days) || body.expiry_days < 1)
-		) {
-			return errorResponse(400, 'expiry_days must be a positive integer');
-		}
-
 		const bound = boundTokenScope(
 			{
 				cacheScope: body.cache ?? '*',

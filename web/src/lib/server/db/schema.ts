@@ -83,6 +83,17 @@ export const apiToken = sqliteTable(
 	(t) => [index('api_token_user_idx').on(t.userId)]
 );
 
+/** Tombstones for token ids whose api_token row was deleted with its owner.
+ *  isTokenDisabled accepts a jti absent from api_token (untracked attic
+ *  tokens), so without one a deleted user's tokens would work again. Nightly
+ *  GC prunes expired rows. */
+export const revokedToken = sqliteTable('revoked_token', {
+	jti: text('jti').primaryKey(),
+	expiresAt: integer('expires_at', { mode: 'timestamp' }),
+	revokedAt: integer('revoked_at', { mode: 'timestamp' }).notNull(),
+	reason: text('reason').notNull()
+});
+
 /** Audit trail of privileged admin actions. */
 export const auditLog = sqliteTable(
 	'audit_log',

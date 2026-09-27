@@ -41,6 +41,38 @@ New accounts start `pending` and see a wall page until an admin activates
 them, or automatically when their groups claim contains
 `OIDC_ACTIVATION_GROUP`.
 
+Deleting a user tombstones their token ids in `revoked_token` in the same
+batch that removes their `api_token` rows. A `jti` absent from both tables is
+treated as an untracked attic/bootstrap token and accepted, so without the
+tombstone a deleted user's tokens would work again until their signed expiry.
+Nightly GC prunes tombstones once the token has expired; tombstones for
+tokens without an expiry are kept.
+
+Manual GC (`POST /_api/v1/gc`) accepts the nimbus `gc` claim, or an
+attic-native token with delete on the literal `*` pattern. It never resolves
+authority through a cache name, and `gc` is a reserved cache name.
+
+### Authorization freshness
+
+The cache host accepts a bounded staleness window on its high-volume paths.
+This is a deliberate security property, not a cache accident:
+
+| State                                                                                                            | Where it is checked                | Maximum staleness                                                     |
+| ---------------------------------------------------------------------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------- |
+| Token signature and expiry                                                                                       | per-isolate verify memo            | 30 s, never past the token's `exp`                                    |
+| `jti` revocation, owner deactivation or deletion — reads, uploads, batch queries                                 | per-isolate memo over a D1 replica | 30 s + replica lag                                                    |
+| `jti` revocation, owner deactivation or deletion — every other mutation (token, cache config, pins, destroy, GC) | D1 primary on every call           | none                                                                  |
+| Cache row (visibility, keypair) for read authorization and discovery documents                                   | per-isolate memo over a replica    | 30 s + replica lag (the mutating isolate drops its entry immediately) |
+
+Replica lag is platform-dependent and measured separately; the 30-second
+figures are the application's own bound and are pinned by fake-timer tests in
+`src/lib/server/cache/remediation.test.ts`. The cache-tag purges issued on a
+public→private flip or a keypair rotation remove already-cached edge
+responses; they supplement, and are not, the authorization control. Shortening
+the window needs a cross-isolate invalidation design with measured failure
+behavior — do not add another cache layer or copy authorization state into
+KV without an absolute freshness deadline.
+
 ## Structure
 
 ```

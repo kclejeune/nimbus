@@ -230,6 +230,16 @@ export function permissionForCache(token: VerifiedToken | null, cacheName: strin
 }
 
 /**
+ * Storage-wide GC authority: the nimbus gc claim, or attic-native delete on
+ * the literal `*`. Reads the claim map directly — resolving a probe cache
+ * name would let an exact grant on a cache of that name win precedence.
+ */
+export function hasGcAuthority(token: VerifiedToken | null): boolean {
+	if (!token) return false;
+	return token.gc || token.caches.get('*')?.delete === true;
+}
+
+/**
  * Extract the JWT from an Authorization header. Accepts `Bearer <jwt>` and,
  * like the reference server, `Basic <base64(user:jwt)>` with the username
  * ignored — Nix sends netrc credentials for private caches as Basic auth.

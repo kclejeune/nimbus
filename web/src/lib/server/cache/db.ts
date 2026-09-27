@@ -6,6 +6,7 @@ import { countD1, measure } from './latency';
 import type { D1Database, D1PreparedStatement, D1Result } from '@cloudflare/workers-types';
 import { isActiveUser } from '../auth/types';
 import { withRetry } from './platform';
+import { assertIntInRange, assertMaxLength, RequestBodyError } from '../request-body';
 
 /** D1 caps bound parameters per statement; IN-lists are windowed to this. */
 export const PARAM_BATCH = 99;
@@ -462,6 +463,7 @@ export async function addGcRoot(
 	storePathHash: string,
 	note: string | null
 ): Promise<void> {
+	assertMaxLength('note', note, GC_ROOT_NOTE_MAX_CHARS);
 	await db
 		.prepare(
 			'INSERT OR IGNORE INTO gc_root (cache_id, store_path_hash, note, created_at) VALUES (?1, ?2, ?3, ?4)'
@@ -489,6 +491,10 @@ export async function removeGcRoot(
  * One spelling shared by the API route and the settings action. */
 export const PIN_NAME_RE = /^\S{1,100}$/;
 
+export const GC_ROOT_NOTE_MAX_CHARS = 1000;
+export const PIN_KEEP_REVISIONS_MAX = 10_000;
+export const PIN_KEEP_DAYS_MAX = 36_500;
+
 /** nix-base32 store path hash (32 chars, alphabet excludes e/o/u/t). */
 export const STORE_PATH_HASH_RE = /^[0-9a-df-np-sv-z]{32}$/;
 
@@ -505,6 +511,13 @@ export async function upsertPin(
 	storePathHash: string,
 	opts: { keepRevisions?: number; keepDays?: number; note?: string | null } = {}
 ): Promise<void> {
+	if (!PIN_NAME_RE.test(name)) throw new RequestBodyError(400, 'Invalid pin name');
+	assertMaxLength('note', opts.note, GC_ROOT_NOTE_MAX_CHARS);
+	if (opts.keepRevisions !== undefined) {
+		assertIntInRange('keep_revisions', opts.keepRevisions, 1, PIN_KEEP_REVISIONS_MAX);
+	}
+	if (opts.keepDays !== undefined)
+		assertIntInRange('keep_days', opts.keepDays, 1, PIN_KEEP_DAYS_MAX);
 	const now = nowRfc3339();
 	// One transaction: the gc_root insert resolves the pin id created/found
 	// by the statement before it.
@@ -547,25 +560,45 @@ export async function removePin(db: D1Database, cacheId: number, name: string): 
  * Whether an admin-issued token (by jti) is revoked or suspended. Suspension
  * follows the owner's activation status (isActiveUser): a deactivated user's
  * tokens stop working immediately and resume if the account is reactivated.
- * Missing rows are valid (e.g. bootstrap tokens the admin app never tracked).
+ * Missing rows are valid (e.g. bootstrap tokens the admin app never tracked)
+ * unless a revoked_token tombstone names the jti.
  */
 export async function isTokenDisabled(db: D1Database, jti: string): Promise<boolean> {
-	const row = await dbFirst<{
+	// The derived table always yields exactly one row, even for an unknown jti.
+	const row = (await dbFirst<{
+		tombstoned: number;
 		revoked_at: string | null;
 		status: string | null;
 		role: string | null;
 	}>(
 		db
 			.prepare(
-				`SELECT t.revoked_at, u.status, u.role
-				 FROM api_token t LEFT JOIN user u ON u.id = t.user_id
-				 WHERE t.id = ?1`
+				`SELECT EXISTS (SELECT 1 FROM revoked_token WHERE jti = ?1) AS tombstoned,
+				        t.revoked_at, u.status, u.role
+				 FROM (SELECT ?1 AS jti) q
+				 LEFT JOIN api_token t ON t.id = q.jti
+				 LEFT JOIN user u ON u.id = t.user_id`
 			)
 			.bind(jti)
-	);
-	if (!row) return false;
+	))!;
+	if (row.tombstoned) return true;
 	if (row.revoked_at != null) return true;
 	return row.status != null && !isActiveUser({ role: row.role ?? 'member', status: row.status });
+}
+
+/** Outlasts token verification's clock leeway (attic/token.ts). */
+const TOMBSTONE_PRUNE_GRACE_SECONDS = 300;
+
+/** Drop tombstones of expired tokens; timeless tokens' tombstones stay. */
+export async function pruneRevokedTokens(
+	db: D1Database,
+	nowSeconds = Math.floor(Date.now() / 1000)
+): Promise<number> {
+	const result = await db
+		.prepare('DELETE FROM revoked_token WHERE expires_at IS NOT NULL AND expires_at < ?1')
+		.bind(nowSeconds - TOMBSTONE_PRUNE_GRACE_SECONDS)
+		.run();
+	return result.meta.changes ?? 0;
 }
 
 // --- Write side (uploads, cache config), mirroring the Rust worker's d1.rs ---

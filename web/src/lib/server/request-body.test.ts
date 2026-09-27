@@ -48,6 +48,15 @@ describe('bounded JSON', () => {
 		await expect(readJson(request('é'), 4)).resolves.toBe('é');
 		await expect(readJson(request('é'), 3)).rejects.toMatchObject({ status: 413 });
 	});
+	it('returns the empty value for a missing or blank optional body only', async () => {
+		const post = (body?: string) => new Request('https://example.com', { method: 'POST', body });
+		const optional = { optional: true };
+		await expect(readJson(post(), 10, optional)).resolves.toBeNull();
+		await expect(readJson(post('  '), 10, optional)).resolves.toBeNull();
+		await expect(readJson(post('{"a":1}'), 10, optional)).resolves.toEqual({ a: 1 });
+		await expect(readJson(post(), 10)).rejects.toMatchObject({ status: 400 });
+		await expect(readJson(post('{'), 10, optional)).rejects.toMatchObject({ status: 400 });
+	});
 	it('rejects malformed JSON', async () => {
 		await expect(
 			readJson(new Request('https://example.com', { method: 'POST', body: '{' }), 10)

@@ -145,6 +145,24 @@
 			"namespace_id": "1014",
 			"simple": { "limit": 512, "period": 60 }
 		},
+		// Control plane: API_REQUEST per IP, API_MUTATION per token, GC_TRIGGER
+		// per colo (plus a D1 cooldown). Starting values; tune from the `limit`
+		// Analytics Engine points.
+		{
+			"name": "API_REQUEST_LIMITER",
+			"namespace_id": "1015",
+			"simple": { "limit": 600, "period": 60 }
+		},
+		{
+			"name": "API_MUTATION_LIMITER",
+			"namespace_id": "1016",
+			"simple": { "limit": 120, "period": 60 }
+		},
+		{
+			"name": "GC_TRIGGER_LIMITER",
+			"namespace_id": "1017",
+			"simple": { "limit": 3, "period": 60 }
+		},
 		// Auth spans all endpoints per IP; device creation is much rarer than polling.
 		{ "name": "AUTH_LIMITER", "namespace_id": "1006", "simple": { "limit": 120, "period": 60 } },
 		{

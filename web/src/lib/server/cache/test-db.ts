@@ -1,13 +1,24 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { vi } from 'vitest';
 import type { D1Database } from '@cloudflare/workers-types';
 
-/** Real SQLite SQL semantics, not a simulation of D1 replication or workerd. */
-export function testDatabase() {
+/** Real SQLite SQL semantics, not a simulation of D1 replication or workerd.
+ * `admin` also applies the drizzle (admin-table) migrations. */
+export function testDatabase({ admin = false }: { admin?: boolean } = {}) {
 	const sqlite = new DatabaseSync(':memory:');
 	sqlite.exec(readFileSync(new URL('../../../../schema/schema.sql', import.meta.url), 'utf8'));
+	if (admin) {
+		const dir = new URL('../../../../drizzle/', import.meta.url);
+		for (const file of readdirSync(dir)
+			.filter((f) => f.endsWith('.sql'))
+			.sort()) {
+			sqlite.exec(
+				readFileSync(new URL(file, dir), 'utf8').replaceAll('--> statement-breakpoint', '')
+			);
+		}
+	}
 	const totalChanges = () => Number(sqlite.prepare('SELECT total_changes() AS n').get()!.n);
 	const prepare = (sql: string) => {
 		let params: Record<string, SQLInputValue> = {};

@@ -43,6 +43,13 @@
       "when": 1789417911101,
       "tag": "0005_token-audit-indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1790528248397,
+      "tag": "0006_revoked-token",
+      "breakpoints": true
     }
   ]
 }

@@ -13,6 +13,7 @@ import {
 	chunkKey,
 	dbRun,
 	PARAM_BATCH,
+	pruneRevokedTokens,
 	runBatched
 } from './db';
 import { allLiveUpstreams, filterUpstreamPaths, VERDICT_ABSENT } from './missing-paths';
@@ -124,24 +125,27 @@ function emptyStats(): GcStats {
 const GC_LOCK_KEY = 'gc_lock';
 const GC_LOCK_TTL_MS = 30 * 60 * 1000;
 
-/** Take the GC lock; returns a release token, or null when another run holds
- * a live lock. Single-statement compare-and-set: the INSERT wins outright or
- * the UPDATE only applies over an expired holder. */
-async function acquireGcLock(db: D1): Promise<string | null> {
-	const now = Date.now();
-	const token = String(now);
-	// dbRun: a transient primary blip here would otherwise abort the whole
-	// nightly run at its very first statement.
+/** Single-statement compare-and-set: stamp `key` with `now` unless it holds
+ * a stamp at or after `staleBefore`. dbRun: a transient primary blip would
+ * otherwise abort the nightly run at its first statement. */
+async function claimStamp(db: D1, key: string, now: number, staleBefore: number): Promise<boolean> {
 	const result = await dbRun(
 		db
 			.prepare(
-				`INSERT INTO server_config (key, value) VALUES ('${GC_LOCK_KEY}', ?1) ` +
+				'INSERT INTO server_config (key, value) VALUES (?1, ?2) ' +
 					'ON CONFLICT (key) DO UPDATE SET value = excluded.value ' +
-					'WHERE CAST(server_config.value AS INTEGER) < ?2'
+					'WHERE CAST(server_config.value AS INTEGER) < ?3'
 			)
-			.bind(token, now - GC_LOCK_TTL_MS)
+			.bind(key, String(now), staleBefore)
 	);
-	return (result.meta.changes ?? 0) > 0 ? token : null;
+	return (result.meta.changes ?? 0) > 0;
+}
+
+/** Take the GC lock; returns a release token, or null when another run holds
+ * a live lock. */
+async function acquireGcLock(db: D1): Promise<string | null> {
+	const now = Date.now();
+	return (await claimStamp(db, GC_LOCK_KEY, now, now - GC_LOCK_TTL_MS)) ? String(now) : null;
 }
 
 /** Release only our own lock: a run that outlived the TTL and lost the lock
@@ -150,6 +154,26 @@ async function releaseGcLock(db: D1, token: string): Promise<void> {
 	await dbRun(
 		db.prepare(`DELETE FROM server_config WHERE key = '${GC_LOCK_KEY}' AND value = ?1`).bind(token)
 	).catch((e) => console.warn(`gc: lock release failed; the stale lock expires via its TTL: ${e}`));
+}
+
+const MANUAL_GC_KEY = 'gc_manual_at';
+/** Instance-wide spacing between manual GC triggers; the lock only prevents
+ * overlap, and GC_TRIGGER_LIMITER is per colo. */
+export const MANUAL_GC_COOLDOWN_MS = 5 * 60 * 1000;
+
+/** Claim the manual-trigger slot (cron does not take it): null when
+ * claimed, else seconds until the cooldown ends. */
+export async function claimManualGcSlot(
+	db: D1,
+	now = Date.now(),
+	cooldownMs = MANUAL_GC_COOLDOWN_MS
+): Promise<number | null> {
+	if (await claimStamp(db, MANUAL_GC_KEY, now, now - cooldownMs)) return null;
+	const row = await db
+		.prepare(`SELECT value FROM server_config WHERE key = '${MANUAL_GC_KEY}'`)
+		.first<{ value: string }>();
+	const last = Number(row?.value ?? now);
+	return Math.max(1, Math.ceil((last + cooldownMs - now) / 1000));
 }
 
 export interface GcOptions {
@@ -201,6 +225,9 @@ async function runGcLocked(env: Env, opts: GcOptions): Promise<GcStats> {
 			.bind(Math.floor(Date.now() / 1000))
 			.run()
 			.catch((e) => console.warn(`gc: device_auth cleanup failed: ${e}`));
+		await pruneRevokedTokens(env.ATTIC_DB).catch((e) =>
+			console.warn(`gc: revoked_token cleanup failed: ${e}`)
+		);
 		await pruneUpstreamChecks(env.ATTIC_DB);
 		await refreshAllGcRootStats(env.ATTIC_DB);
 		await purgeNarinfoTags(opts.ctx, purgeTags, stats);

@@ -49,13 +49,22 @@ export async function readWithTimeout<T>(
 	}
 }
 
-/** Count bytes while reading: Content-Length alone cannot bound streamed input. */
-export async function readJson(request: Request, maxBytes: number): Promise<unknown> {
+/** Count bytes while reading: Content-Length alone cannot bound streamed input.
+ * With `optional`, a missing or whitespace-only body reads as null instead of
+ * a 400. */
+export async function readJson(
+	request: Request,
+	maxBytes: number,
+	{ optional = false }: { optional?: boolean } = {}
+): Promise<unknown> {
 	if (Number(request.headers.get('content-length')) > maxBytes) {
 		await request.body?.cancel().catch(() => {});
 		throw new RequestBodyError(413, 'Request body too large');
 	}
-	if (!request.body) throw new RequestBodyError(400, 'Missing JSON body');
+	if (!request.body) {
+		if (optional) return null;
+		throw new RequestBodyError(400, 'Missing JSON body');
+	}
 	const reader = request.body.getReader();
 	const deadline = bodyDeadline();
 	const decoder = new TextDecoder();
@@ -76,6 +85,7 @@ export async function readJson(request: Request, maxBytes: number): Promise<unkn
 	} finally {
 		reader.releaseLock();
 	}
+	if (optional && text.trim() === '') return null;
 	try {
 		return JSON.parse(text);
 	} catch {
@@ -85,4 +95,28 @@ export async function readJson(request: Request, maxBytes: number): Promise<unkn
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Control-plane JSON body limits, generous next to any valid request. */
+export const JSON_LIMITS = {
+	rename: 4 * 1024,
+	gcRoot: 16 * 1024,
+	cacheConfig: 32 * 1024,
+	token: 16 * 1024
+} as const;
+
+export function assertIntInRange(field: string, value: number, min: number, max: number): void {
+	if (!Number.isInteger(value) || value < min || value > max) {
+		throw new RequestBodyError(400, `${field} must be an integer in ${min}..${max}`);
+	}
+}
+
+export function assertMaxLength(
+	field: string,
+	value: string | null | undefined,
+	max: number
+): void {
+	if (value != null && value.length > max) {
+		throw new RequestBodyError(400, `${field} exceeds ${max} characters`);
+	}
 }
