@@ -74,26 +74,59 @@ export function uploadShape(chunks: number, rawBytes: number, compressedBytes?: 
 	if (s) s.upload = { chunks, rawBytes, compressedBytes };
 }
 
-/** A separate completion event: body work can outlive observeRequest's header sample. */
-export function streamObservation(): (status: 'ok' | 'error', chunks: number) => void {
+/** A multi-chunk NAR stream's timing: `wait` wraps each chunk get the pump
+ * blocks on (R2 or the chunk cache); the rest of the stream is piping, which
+ * a slow client stretches through backpressure. */
+export interface StreamObserver {
+	wait<T>(get: Promise<T>): Promise<T>;
+	finish(status: 'ok' | 'error'): void;
+}
+
+/**
+ * A separate completion event: body work outlives observeRequest's header
+ * sample. Logged for every stream, sampled or not — multi-chunk NARs are
+ * rare and are the tail this event exists to explain. Retry and fallback
+ * counts come from the header sample, so only sampled streams carry them.
+ * `bytes` is the stored (compressed) size, null when a chunk's is unknown.
+ */
+export function streamObservation(chunks: number, bytes: number | null): StreamObserver {
 	const sample = current.getStore();
 	const started = performance.now();
 	const retries = sample?.retries ?? 0;
 	const fallbacks = sample?.loopbackFallbacks ?? 0;
-	return (status, chunks) => {
-		if (!sample) return;
-		console.log(
-			JSON.stringify({
-				event: 'nimbus.stream',
-				route: 'GET /_nar/:hash',
-				layer: 'store',
-				status,
-				chunks,
-				ms: performance.now() - started,
-				retries: sample.retries - retries,
-				loopbackFallbacks: sample.loopbackFallbacks - fallbacks
-			})
-		);
+	let waitMs = 0;
+	let maxWaitMs = 0;
+	return {
+		async wait(get) {
+			const start = performance.now();
+			try {
+				return await get;
+			} finally {
+				const waited = performance.now() - start;
+				waitMs += waited;
+				maxWaitMs = Math.max(maxWaitMs, waited);
+			}
+		},
+		finish(status) {
+			const ms = performance.now() - started;
+			console.log(
+				JSON.stringify({
+					event: 'nimbus.stream',
+					route: 'GET /_nar/:hash',
+					layer: 'store',
+					status,
+					chunks,
+					bytes,
+					ms,
+					waitMs,
+					maxWaitMs,
+					pipeMs: ms - waitMs,
+					sampled: !!sample,
+					retries: sample && sample.retries - retries,
+					loopbackFallbacks: sample && sample.loopbackFallbacks - fallbacks
+				})
+			);
+		}
 	};
 }
 

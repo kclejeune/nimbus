@@ -791,7 +791,7 @@ async function serveNar(
 	const chunkStore =
 		totalSize === null || totalSize > 512 * 1024 * 1024 ? ctx?.exports?.CachedStore : undefined;
 	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
-	const finished = streamObservation();
+	const stream = streamObservation(keys.length, totalSize);
 	const pump = async () => {
 		// Queue of gets for chunks not yet piped, in key order; fill() tops it
 		// up to the lookahead window.
@@ -823,7 +823,7 @@ async function serveNar(
 		try {
 			fill();
 			for (let i = 0; i < keys.length; i++) {
-				const object = await inFlight.shift()!;
+				const object = await stream.wait(inFlight.shift()!);
 				fill();
 				if (!object) throw new Error(`File not found in storage: ${keys[i]}`);
 				await (object.body as unknown as ReadableStream<Uint8Array>).pipeTo(writable, {
@@ -843,9 +843,9 @@ async function serveNar(
 		}
 	};
 	const pumping = pump()
-		.then(() => finished('ok', keys.length))
+		.then(() => stream.finish('ok'))
 		.catch((e) => {
-			finished('error', keys.length);
+			stream.finish('error');
 			return writable.abort(e).catch(() => {});
 		});
 	ctx?.waitUntil(pumping);

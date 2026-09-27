@@ -66,10 +66,10 @@ it('samples uploads even when a read would be skipped, and records post-header f
 		env,
 		'store',
 		async () => {
-			const finish = streamObservation();
-			pumping = gate.then(() => {
+			const stream = streamObservation(2, 10);
+			pumping = stream.wait(gate).then(() => {
 				countLoopbackFallback();
-				finish('error', 2);
+				stream.finish('error');
 			});
 			return new Response();
 		}
@@ -82,7 +82,17 @@ it('samples uploads even when a read would be skipped, and records post-header f
 			event: 'nimbus.stream',
 			loopbackFallbacks: 1,
 			retries: 1,
-			status: 'error'
+			status: 'error',
+			chunks: 2,
+			sampled: true
 		})
 	);
+});
+
+it('logs stream completion even for unsampled requests', async () => {
+	const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+	streamObservation(48, null).finish('ok');
+	const event = JSON.parse(log.mock.calls.at(-1)![0]);
+	expect(event).toMatchObject({ event: 'nimbus.stream', chunks: 48, sampled: false });
+	expect(event).not.toHaveProperty('retries');
 });
