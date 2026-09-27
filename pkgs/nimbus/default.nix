@@ -12,7 +12,7 @@ buildGoModule {
   pname = "nimbus";
   inherit src version;
 
-  vendorHash = "sha256-RCiTaYHVMLuzO+34xyjuHo54RuoeBY42fXuKnRrz9Y4=";
+  vendorHash = "sha256-NWFj71HgyqbWghGLrMOQVA8PhwfRNTMg8zeyelFrE2Y=";
 
   subPackages = [ "cmd/nimbus" ];
   env.CGO_ENABLED = 0;

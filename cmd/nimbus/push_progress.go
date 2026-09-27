@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"slices"
 	"strings"
@@ -34,11 +33,13 @@ func pushProgressFactory(out *os.File) func() push.ProgressReporter {
 }
 
 type ttyPushProgress struct {
-	program *tea.Program
-	done    chan struct{}
+	program     *tea.Program
+	out         *os.File
+	restoreEcho func()
+	done        chan struct{}
 }
 
-func newTTYPushProgress(out io.Writer) *ttyPushProgress {
+func newTTYPushProgress(out *os.File) *ttyPushProgress {
 	model := newPushProgressModel()
 	program := tea.NewProgram(
 		model,
@@ -48,10 +49,11 @@ func newTTYPushProgress(out io.Writer) *ttyPushProgress {
 		// progress renderer must not compete with it for Ctrl-C.
 		tea.WithoutSignalHandler(),
 	)
-	return &ttyPushProgress{program: program, done: make(chan struct{})}
+	return &ttyPushProgress{program: program, out: out, done: make(chan struct{})}
 }
 
 func (r *ttyPushProgress) Start(cache string) {
+	r.restoreEcho = suppressTTYEcho(r.out)
 	go func() {
 		defer close(r.done)
 		_, _ = r.program.Run()
@@ -86,6 +88,7 @@ func (r *ttyPushProgress) PathFinished(result push.PathProgress) {
 func (r *ttyPushProgress) Stop() {
 	r.program.Send(pushStopMsg{})
 	<-r.done
+	r.restoreEcho()
 }
 
 type (
@@ -286,10 +289,7 @@ func (m pushProgressModel) transferredBytes() int64 {
 }
 
 func (m pushProgressModel) finalView() string {
-	elapsed := m.finished.Sub(m.started).Round(100 * time.Millisecond)
-	if elapsed < 0 {
-		elapsed = 0
-	}
+	elapsed := max(m.finished.Sub(m.started).Round(100*time.Millisecond), 0)
 	if m.total == 0 {
 		return fmt.Sprintf(
 			"%s Nothing to push to %s%s",

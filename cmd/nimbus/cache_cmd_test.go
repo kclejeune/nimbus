@@ -7,9 +7,8 @@ import (
 	"github.com/kclejeune/nimbus/internal/api"
 )
 
-func intPtr(v int) *int       { return &v }
-func int64Ptr(v int64) *int64 { return &v }
-func strPtr(v string) *string { return &v }
+//go:fix inline
+func int64Ptr(v int64) *int64 { return new(v) }
 
 func TestRetentionDesc(t *testing.T) {
 	tests := []struct {
@@ -101,13 +100,13 @@ func TestFormatPins(t *testing.T) {
 	pins := []api.Pin{
 		{
 			Name:          "deploy",
-			KeepRevisions: intPtr(5),
-			KeepDays:      intPtr(30),
+			KeepRevisions: new(5),
+			KeepDays:      new(30),
 			Revisions: []api.PinRevision{
 				{
 					Hash:      strings.Repeat("a", 32),
 					CreatedAt: "2026-07-01T00:00:00Z",
-					Note:      strPtr("prod"),
+					Note:      new("prod"),
 				},
 				{Hash: strings.Repeat("b", 32), CreatedAt: "2026-06-01T00:00:00Z"},
 			},
@@ -119,7 +118,7 @@ func TestFormatPins(t *testing.T) {
 				{
 					Hash:      strings.Repeat("c", 32),
 					CreatedAt: "2026-05-01T00:00:00Z",
-					Note:      strPtr("keep me"),
+					Note:      new("keep me"),
 				},
 			},
 		},
