@@ -54,15 +54,19 @@ export function internalRequest(
 // an hour — at 30 s prod paid a candidate D1 read per unified-endpoint
 // request, half of all D1 reads. An empty list stays short: a lagging refill
 // after an upload would otherwise hide the fresh path for the whole TTL.
-// It is still served stale while it refreshes, since upstream-only paths are
-// re-polled every couple of minutes and a synchronous refill dominated their
-// latency; stale-if-error=0 overrides the platform's indefinite default, and
-// Candidates.stale keeps a stale empty entry from ending in a 404 unconfirmed.
+// It is still served stale while it refreshes, for as long as a non-empty
+// list: upstream-only paths are re-polled by every CI run, often hours
+// apart, and past the stale window the edge refills them inline — that
+// synchronous refill was the root-read latency tail. A stale empty entry
+// is safe to serve for that long because it never decides a miss:
+// Candidates.confirmEmpty re-reads it before an upstream miss or failure
+// becomes the answer. stale-if-error=0 overrides the platform's indefinite
+// default.
 // The NAR manifest stays must-revalidate — a re-upload after GC changes its
 // chunk keys.
 const LONG_CACHE_CONTROL = 'public, max-age=3600, stale-while-revalidate=86400';
 const EMPTY_MAX_AGE_MS = 30_000;
-const EMPTY_CACHE_CONTROL = `public, max-age=${EMPTY_MAX_AGE_MS / 1000}, stale-while-revalidate=300, stale-if-error=0`;
+const EMPTY_CACHE_CONTROL = `public, max-age=${EMPTY_MAX_AGE_MS / 1000}, stale-while-revalidate=86400, stale-if-error=0`;
 const SHORT_CACHE_CONTROL = 'public, max-age=30, must-revalidate';
 
 // When a candidate list was read from D1. The edge keeps it with the entry,

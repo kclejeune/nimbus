@@ -119,7 +119,7 @@ it('serves empty candidate entries stale, but never stale on error', async () =>
 	expect(await response.json()).toEqual([]);
 	expect(Number(response.headers.get('X-Nimbus-Filled-At'))).toBeGreaterThan(0);
 	expect(response.headers.get('Cache-Control')).toBe(
-		'public, max-age=30, stale-while-revalidate=300, stale-if-error=0'
+		'public, max-age=30, stale-while-revalidate=86400, stale-if-error=0'
 	);
 });
 
