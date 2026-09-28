@@ -53,11 +53,22 @@ export const withD1Retry = <T>(op: () => Promise<T>, attempts = 4): Promise<T> =
  * account statements and rows to the request's latency record. Every
  * read-path, upload-path and touch query goes through these; the remaining
  * raw .run()/.first() sites are rare admin/config statements where a
- * surfaced transient error is fine. */
+ * surfaced transient error is fine.
+ *
+ * `ONCE` disables the retry for writes that are not replay-safe: a transient
+ * error can follow a committed transaction, so retrying a hold release
+ * (holders_count - 1) could consume a concurrent upload's hold, which the
+ * reaper trusts. A release lost that way leaves the hold to age out instead —
+ * the stageChunk takeover after an hour, GC's stale-hold reset after a day.
+ * Hold acquisitions keep retrying: a replayed increment only leaks a hold,
+ * which ages out the same way. */
+const ONCE = { attempts: 1 };
+type Retry = { attempts?: number };
 const instrumented = <T>(
 	statements: number,
 	run: () => Promise<T>,
-	results: (r: T) => D1Result[]
+	results: (r: T) => D1Result[],
+	{ attempts }: Retry = {}
 ) =>
 	measure('d1', () =>
 		withD1Retry(async () => {
@@ -65,13 +76,14 @@ const instrumented = <T>(
 			const result = await run();
 			countD1(0, results(result));
 			return result;
-		})
+		}, attempts)
 	);
-export const dbRun = (stmt: D1PreparedStatement) =>
+export const dbRun = (stmt: D1PreparedStatement, retry?: Retry) =>
 	instrumented(
 		1,
 		() => stmt.run(),
-		(r) => [r]
+		(r) => [r],
+		retry
 	);
 export const dbAll = <T = unknown>(stmt: D1PreparedStatement) =>
 	instrumented(
@@ -81,11 +93,12 @@ export const dbAll = <T = unknown>(stmt: D1PreparedStatement) =>
 	);
 export const dbFirst = <T = unknown>(stmt: D1PreparedStatement) =>
 	dbAll<T>(stmt).then((r) => r.results[0] ?? null);
-export const dbBatch = <T = unknown>(db: D1Database, stmts: D1PreparedStatement[]) =>
+export const dbBatch = <T = unknown>(db: D1Database, stmts: D1PreparedStatement[], retry?: Retry) =>
 	instrumented(
 		stmts.length,
 		() => db.batch<T>(stmts),
-		(r) => r
+		(r) => r,
+		retry
 	);
 
 /** Run statements in batches of STMT_BATCH. Only atomic within each batch.
@@ -93,11 +106,12 @@ export const dbBatch = <T = unknown>(db: D1Database, stmts: D1PreparedStatement[
  * `meta.changes` of a guarded statement. */
 export async function runBatched(
 	db: D1Database,
-	stmts: D1PreparedStatement[]
+	stmts: D1PreparedStatement[],
+	retry?: Retry
 ): Promise<D1Result[]> {
 	const results: D1Result[] = [];
 	for (let i = 0; i < stmts.length; i += STMT_BATCH) {
-		results.push(...(await dbBatch(db, stmts.slice(i, i + STMT_BATCH))));
+		results.push(...(await dbBatch(db, stmts.slice(i, i + STMT_BATCH), retry)));
 	}
 	return results;
 }
@@ -869,7 +883,8 @@ export async function settleChunks(
 						)
 						.bind(id)
 				: releaseChunkLockStmt(db, id)
-		)
+		),
+		ONCE
 	);
 }
 
@@ -1125,10 +1140,14 @@ export async function tryLockNar(db: D1Database, narHash: string): Promise<NarRo
 }
 
 export async function releaseNarLock(db: D1Database, narId: number): Promise<void> {
-	await db
-		.prepare('UPDATE nar SET holders_count = holders_count - 1 WHERE id = ?1 AND holders_count > 0')
-		.bind(narId)
-		.run();
+	await dbRun(
+		db
+			.prepare(
+				'UPDATE nar SET holders_count = holders_count - 1 WHERE id = ?1 AND holders_count > 0'
+			)
+			.bind(narId),
+		ONCE
+	);
 }
 
 /**
@@ -1193,7 +1212,8 @@ export async function releaseChunkLocksById(db: D1Database, chunkIds: number[]):
 	if (chunkIds.length === 0) return;
 	await runBatched(
 		db,
-		chunkIds.map((id) => releaseChunkLockStmt(db, id))
+		chunkIds.map((id) => releaseChunkLockStmt(db, id)),
+		ONCE
 	);
 }
 

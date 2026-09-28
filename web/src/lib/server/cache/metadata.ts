@@ -178,19 +178,11 @@ export interface Candidates {
 	confirmEmpty(): Promise<db.LiveCacheRow[] | null>;
 }
 
-// Only positive memberships are memoized. Visibility is resolved again on every
-// read, and empty entries retain precisely their existing edge-cache lifetime.
-// A new membership missing from this five-second snapshot still triggers the
-// primary confirmation path; upload/confirmation invalidate this isolate early.
-// `stale` rides with the rows so lease waiters see the leader's staleness.
-const CANDIDATE_MEMO_MS = 5_000;
-const candidateRows = new AsyncMemo<{ rows: db.LiveCacheRow[]; stale: boolean }>(
-	CANDIDATE_MEMO_MS,
-	10_000
-);
+// No per-isolate memo in front of the loopback: repeats of one hash arrive
+// minutes apart and from other colos, so a five-second positive memo hit
+// 1 of 942 sampled lookups in prod (2026-09-27); the edge entry is the cache.
 export function invalidateCandidates(kind: 'nar' | 'path', hash: string): void {
 	const key = `${kind}:${stripSha256(hash)}`;
-	candidateRows.clear(key);
 	confirmedCandidates.clear(key);
 	refreshedEmpty.clear(key);
 }
@@ -209,24 +201,15 @@ export async function loadCandidates(
 		`/_meta/${kind}/${encodeURIComponent(canonical)}`,
 		request.headers.get('CF-Connecting-IP')
 	);
-	const key = `${kind}:${canonical}`;
-	let source = 'memo';
-	const { rows, stale } = await candidateRows.get(
-		key,
-		async () => {
-			const response = await measure('candidateLoopback', () =>
-				viaStore(ctx, internal, () => serveCandidates(internal, env, kind, canonical))
-			);
-			source = response.headers.get('CF-Cache-Status') ?? 'NONE';
-			const rows = await internalJson<db.LiveCacheRow[]>(
-				response,
-				'Candidate resolution temporarily unavailable'
-			);
-			return { rows, stale: rows.length === 0 && pastEmptyMaxAge(response.headers) };
-		},
-		({ rows }) => (rows.length ? CANDIDATE_MEMO_MS : 0)
+	const response = await measure('candidateLoopback', () =>
+		viaStore(ctx, internal, () => serveCandidates(internal, env, kind, canonical))
 	);
-	candidateMetadata(source, rows.length > 0);
+	const rows = await internalJson<db.LiveCacheRow[]>(
+		response,
+		'Candidate resolution temporarily unavailable'
+	);
+	const stale = rows.length === 0 && pastEmptyMaxAge(response.headers);
+	candidateMetadata(response.headers.get('CF-Cache-Status') ?? 'NONE', rows.length > 0);
 	return {
 		rows: await measure('candidateVisibility', () => withCurrentVisibility(env, rows)),
 		listed: rows.length > 0,
@@ -249,7 +232,6 @@ const confirmedCandidates = new AsyncMemo<db.LiveCacheRow[]>(CONFIRMED_TTL_MS, 1
 export function clearCandidateMemos(): void {
 	confirmedCandidates.clear();
 	refreshedEmpty.clear();
-	candidateRows.clear();
 }
 
 function readCandidateRows(
@@ -297,7 +279,6 @@ export async function confirmCandidates(
 ): Promise<db.LiveCacheRow[]> {
 	const canonical = stripSha256(hash);
 	const key = `${kind}:${canonical}`;
-	candidateRows.clear(key);
 	const rows = await measure('candidateConfirm', () =>
 		confirmedCandidates.get(key, () =>
 			rereadCandidates(env, ctx, request, db.primarySession(env.ATTIC_DB), kind, canonical, cached)
@@ -315,9 +296,10 @@ export async function confirmCandidates(
 // that window only here, at a primary read whenever the upstream lookup
 // misses or fails; upstream hits never reach this. An empty result is
 // memoized for the empty max-age, so upstream-only lookups of one hash cost
-// an isolate at most one read per window, as the refill did; a found one
-// for the candidate memo's window, so requests racing the edge purge it
-// enqueued reuse it instead of re-reading and re-purging.
+// an isolate at most one read per window, as the refill did. A found list
+// is kept briefly too, so requests racing the edge purge it enqueued reuse
+// it instead of re-reading and re-purging.
+const REFRESHED_FOUND_MS = 5_000;
 const refreshedEmpty = new AsyncMemo<db.LiveCacheRow[]>(EMPTY_MAX_AGE_MS, 10_000);
 
 async function refreshEmptyCandidates(
@@ -331,7 +313,7 @@ async function refreshEmptyCandidates(
 		refreshedEmpty.get(
 			`${kind}:${canonical}`,
 			() => rereadCandidates(env, ctx, request, db.readSession(env.ATTIC_DB), kind, canonical, []),
-			(rows) => (rows.length ? CANDIDATE_MEMO_MS : EMPTY_MAX_AGE_MS)
+			(rows) => (rows.length ? REFRESHED_FOUND_MS : EMPTY_MAX_AGE_MS)
 		)
 	);
 	return measure('candidateVisibility', () => withCurrentVisibility(env, rows));

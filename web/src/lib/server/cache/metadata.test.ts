@@ -74,10 +74,10 @@ it('charges the uncached candidates fallback like a store miss', async () => {
 	expect(prepare).not.toHaveBeenCalled();
 });
 
-it('memoizes positive membership without retaining obsolete visibility', async () => {
+it('re-reads membership through the store with current visibility each time', async () => {
 	const { testDatabase } = await import('./test-db');
 	const { invalidateCacheRow } = await import('./cache-lookup');
-	const { clearCandidateMemos, invalidateCandidates } = await import('./metadata');
+	const { clearCandidateMemos } = await import('./metadata');
 	clearCandidateMemos();
 	invalidateCacheRow();
 	const { sqlite, db } = testDatabase();
@@ -97,9 +97,6 @@ it('memoizes positive membership without retaining obsolete visibility', async (
 		expect((await loadCandidates(env, ctx, request, 'path', 'visibility')).rows[0].is_public).toBe(
 			0
 		);
-		expect(fetch).toHaveBeenCalledOnce();
-		invalidateCandidates('path', 'visibility');
-		await loadCandidates(env, ctx, request, 'path', 'visibility');
 		expect(fetch).toHaveBeenCalledTimes(2);
 	} finally {
 		sqlite.close();

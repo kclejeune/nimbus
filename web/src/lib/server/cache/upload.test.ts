@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { stubDigestStream, testDatabase } from './test-db';
+import { loseBatchResponses, stubDigestStream, testDatabase } from './test-db';
 import { invalidateCacheRow } from './cache-lookup';
 import { MemoryBudget } from './platform';
 import {
+	finishDeduplicated,
 	handleBufferedUpload,
 	handleCdcQuery,
 	handleCdcComplete,
@@ -84,6 +85,121 @@ describe('upload lifecycle', () => {
 		}
 		expect(fixture.totalChanges()).toBe(before);
 		expect(waitUntil).not.toHaveBeenCalled();
+	});
+
+	it('still settles the chunk hold when the publish transaction fails', async () => {
+		const batch = fixture.db.batch.bind(fixture.db);
+		vi.spyOn(fixture.db, 'batch').mockImplementation(async (stmts) => {
+			if (stmts.length > 2) throw new Error('D1_ERROR: constraint failed');
+			return batch(stmts);
+		});
+		const defer = vi.fn();
+		await expect(
+			handleBufferedUpload(env, manifest.nar_info, 1, 'zstd', raw, defer)
+		).rejects.toThrow('constraint failed');
+		// A failed publication releases before it rethrows, never deferred.
+		expect(defer).not.toHaveBeenCalled();
+		expect(fixture.sqlite.prepare('SELECT state, holders_count FROM chunk').get()).toMatchObject({
+			state: 'V',
+			holders_count: 0
+		});
+		expect(fixture.sqlite.prepare('SELECT COUNT(*) AS n FROM nar').get()).toMatchObject({ n: 0 });
+	});
+
+	it('answers before the success-path hold release, which it defers', async () => {
+		let open!: () => void;
+		const gate = new Promise<void>((resolve) => (open = resolve));
+		const batch = fixture.db.batch.bind(fixture.db);
+		let calls = 0;
+		// stageChunk, publishNar, then the release, held until the gate opens.
+		vi.spyOn(fixture.db, 'batch').mockImplementation(async (stmts) => {
+			if (++calls === 3) await gate;
+			return batch(stmts);
+		});
+		const deferred: Promise<unknown>[] = [];
+		const response = await handleBufferedUpload(env, manifest.nar_info, 1, 'zstd', raw, (work) =>
+			deferred.push(work)
+		);
+		expect(response.status).toBe(200);
+		expect(deferred).toHaveLength(1);
+		// Published before the answer; only the hold is still outstanding.
+		expect(fixture.sqlite.prepare('SELECT state, holders_count FROM chunk').get()).toMatchObject({
+			state: 'V',
+			holders_count: 1
+		});
+		expect(fixture.sqlite.prepare('SELECT state FROM nar').get()).toMatchObject({ state: 'V' });
+		open();
+		await Promise.all(deferred);
+		expect(fixture.sqlite.prepare('SELECT holders_count FROM chunk').get()).toMatchObject({
+			holders_count: 0
+		});
+	});
+
+	it('defers a dedup hold release only once the object row has landed', async () => {
+		expect((await handleBufferedUpload(env, manifest.nar_info, 1, 'zstd', raw)).status).toBe(200);
+		const narId = (fixture.sqlite.prepare('SELECT id FROM nar').get() as { id: number }).id;
+		fixture.sqlite.exec(`UPDATE nar SET holders_count = 1 WHERE id = ${narId}`);
+		const deferred: Promise<unknown>[] = [];
+		const again = { ...manifest.nar_info, store_path_hash: 'b'.repeat(32) };
+		expect((await finishDeduplicated(env, again, 1, narId, (w) => deferred.push(w))).status).toBe(
+			200
+		);
+		expect(deferred).toHaveLength(1);
+		await Promise.all(deferred);
+		expect(fixture.sqlite.prepare('SELECT holders_count FROM nar').get()).toMatchObject({
+			holders_count: 0
+		});
+		expect(fixture.sqlite.prepare('SELECT COUNT(*) AS n FROM object').get()).toMatchObject({
+			n: 2
+		});
+	});
+
+	it("does not release a concurrent upload's chunk hold when settlement fails after committing", async () => {
+		// Another upload shares the pending chunk while this one stores it.
+		put.mockImplementation(async () => {
+			fixture.sqlite.exec('UPDATE chunk SET holders_count = holders_count + 1');
+			return {};
+		});
+		// stageChunk, then publishNar, then settleChunks: the settlement
+		// commits and every response for it is lost.
+		const batch = loseBatchResponses(fixture.db, (call) => call >= 3);
+		expect((await handleBufferedUpload(env, manifest.nar_info, 1, 'zstd', raw)).status).toBe(200);
+		expect(batch).toHaveBeenCalledTimes(3);
+		expect(fixture.sqlite.prepare('SELECT state, holders_count FROM chunk').get()).toMatchObject({
+			state: 'V',
+			holders_count: 1
+		});
+	});
+
+	it('releases a dedup hold exactly once when a committed insert is replayed', async () => {
+		expect((await handleBufferedUpload(env, manifest.nar_info, 1, 'zstd', raw)).status).toBe(200);
+		const narId = (fixture.sqlite.prepare('SELECT id FROM nar').get() as { id: number }).id;
+		// This upload's hold plus a concurrent upload's.
+		fixture.sqlite.exec(`UPDATE nar SET holders_count = 2 WHERE id = ${narId}`);
+		const prepare = fixture.db.prepare.bind(fixture.db);
+		let lost = false;
+		vi.spyOn(fixture.db, 'prepare').mockImplementation((sql: string) => {
+			const stmt = prepare(sql);
+			if (!sql.startsWith('INSERT INTO object')) return stmt;
+			const run = stmt.run.bind(stmt);
+			// D1 commits the first attempt, then loses its response.
+			stmt.run = (async () => {
+				const result = await run();
+				if (lost) return result;
+				lost = true;
+				throw new Error('D1_ERROR: Network connection lost.');
+			}) as typeof stmt.run;
+			return stmt;
+		});
+		const again = { ...manifest.nar_info, store_path_hash: 'b'.repeat(32) };
+		expect((await finishDeduplicated(env, again, 1, narId)).status).toBe(200);
+		expect(lost).toBe(true);
+		expect(fixture.sqlite.prepare('SELECT holders_count FROM nar').get()).toMatchObject({
+			holders_count: 1
+		});
+		expect(fixture.sqlite.prepare('SELECT COUNT(*) AS n FROM object').get()).toMatchObject({
+			n: 2
+		});
 	});
 
 	it('charges the storage budget only for bytes actually written', async () => {

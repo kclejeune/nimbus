@@ -585,10 +585,10 @@ async function handleProxyNarInfo(
 	}
 
 	// Token verification (CPU plus, at worst, a memoized revocation read) and
-	// candidate resolution (memoized replica read) are independent — run them
-	// concurrently. The candidates memo is what keeps edge hits off D1: the
-	// winner determines the edge key, so this resolution runs on every root
-	// read, cached or not.
+	// candidate resolution (an edge-cached /_meta loopback) are independent —
+	// run them concurrently. The candidates' edge entry is what keeps edge hits
+	// off D1: the winner determines the edge key, so this resolution runs on
+	// every root read, cached or not.
 	const [token, cached] = await Promise.all([
 		proxyToken(request, env),
 		measure('candidates', () => loadCandidates(env, ctx, request, 'path', storePathHash))

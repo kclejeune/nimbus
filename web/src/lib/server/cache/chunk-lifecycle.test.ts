@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { testDatabase } from './test-db';
+import { loseBatchResponses, testDatabase } from './test-db';
 import {
 	claimOrphanChunks,
 	publishChunk,
@@ -67,6 +67,21 @@ describe('chunk ownership and GC', () => {
 		});
 		await settleChunks(fixture.db, [{ id: a!.id, publish: true }]);
 		expect(fixture.sqlite.prepare('SELECT holders_count FROM chunk').get()!.holders_count).toBe(0);
+	});
+	it.each([
+		['settleChunks', (id: number) => settleChunks(fixture.db, [{ id, publish: true }])],
+		['releaseChunkLocksById', (id: number) => releaseChunkLocksById(fixture.db, [id])]
+	])('%s never replays a committed release onto another holder', async (_, release) => {
+		const mine = await stageChunk(fixture.db, chunk);
+		await stageChunk(fixture.db, chunk); // a concurrent upload's hold
+		const spy = loseBatchResponses(fixture.db);
+		try {
+			await expect(release(mine!.id)).rejects.toThrow('Network connection lost');
+			expect(spy).toHaveBeenCalledOnce();
+		} finally {
+			spy.mockRestore();
+		}
+		expect(fixture.sqlite.prepare('SELECT holders_count FROM chunk').get()!.holders_count).toBe(1);
 	});
 	it('protects held chunks and prevents adoption after GC claims an orphan', async () => {
 		const row = await stageChunk(fixture.db, chunk);

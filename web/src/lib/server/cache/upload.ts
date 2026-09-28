@@ -15,7 +15,7 @@
 // lacks (pre-compressed, stored verbatim), and a stateless complete call
 // assembles the NAR from chunk references.
 
-import type { D1Database, D1PreparedStatement, D1Result } from '@cloudflare/workers-types';
+import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types';
 import { errorResponse, jsonResponse as json } from '../attic/http';
 import { FastCdcChunker, NAR_CHUNK_THRESHOLD, chunkBuffer } from './chunking';
 import {
@@ -217,10 +217,58 @@ async function verifyPossession(
  * is inside the reaper's grace period). A probe hit whose row vanished
  * before the lock (GC race) comes back null and falls through to fresh.
  */
-export async function tryLockNarProbed(env: Env, narHash: string): Promise<db.NarRow | null> {
-	const probed = await db.findValidNar(db.readSession(env.ATTIC_DB), narHash);
-	return probed ? db.tryLockNar(env.ATTIC_DB, narHash) : null;
+export async function tryLockNarProbed(
+	env: Env,
+	narHash: string,
+	probe = probeNar(env, narHash)
+): Promise<db.NarRow | null> {
+	return (await probe) ? db.tryLockNar(env.ATTIC_DB, narHash) : null;
 }
+
+/** tryLockNarProbed's replica read, startable ahead of the lock. */
+export function probeNar(env: Env, narHash: string): Promise<db.NarRow | null> {
+	return db.findValidNar(db.readSession(env.ATTIC_DB), narHash);
+}
+
+/** Hands work to the request's waitUntil (see publishThenRelease). */
+export type Defer = (work: Promise<unknown>) => void;
+
+function deferTo(ctx: ExecutionContext | undefined): Defer | undefined {
+	return ctx && ((work) => ctx.waitUntil(work));
+}
+
+/**
+ * Run a publication, then release its holds: awaited when it fails, after the
+ * response when it succeeds and the request can outlive it — the response
+ * does not depend on the release, so it need not wait a primary round trip.
+ * Pull-through already runs in waitUntil and passes no `defer`. The rows just
+ * published protect the held ones from the reaper meanwhile, and every
+ * release swallows its own failure: a lost one leaves the hold to age out.
+ * Build `release` with a module-level factory (releaseNarHold, settleHolds)
+ * so a deferred release retains only ids, not its caller's request body.
+ */
+async function publishThenRelease<T>(
+	defer: Defer | undefined,
+	publish: () => Promise<T>,
+	release: () => Promise<void>
+): Promise<T> {
+	let published: T;
+	try {
+		published = await publish();
+	} catch (e) {
+		await release();
+		throw e;
+	}
+	if (defer) defer(release());
+	else await release();
+	return published;
+}
+
+// The release stays out of the insert's retried call: a replay after a
+// committed-but-lost response would decrement again and could consume a
+// concurrent upload's hold.
+const releaseNarHold = (env: Env, narId: number) => () =>
+	db.releaseNarLock(env.ATTIC_DB, narId).catch(() => {});
 
 /** Create an object row pointing at an existing NAR (dedup hit). Also used
  * by pull-through ingestion (pullthrough.ts). */
@@ -228,17 +276,20 @@ export async function finishDeduplicated(
 	env: Env,
 	info: UploadNarInfo,
 	cacheId: number,
-	narId: number
+	narId: number,
+	defer?: Defer
 ): Promise<Response> {
-	try {
-		if (!(await db.createObject(env.ATTIC_DB, newObjectFrom(info, cacheId, narId)))) {
-			// The NAR is shared with whoever else holds it; only this cache's
-			// attachment was refused, so there is nothing to roll back.
-			throw new PublicationRejectedError(info);
-		}
-	} finally {
-		await db.releaseNarLock(env.ATTIC_DB, narId).catch(() => {});
-	}
+	await publishThenRelease(
+		defer,
+		async () => {
+			if (!(await db.createObject(env.ATTIC_DB, newObjectFrom(info, cacheId, narId)))) {
+				// The NAR is shared with whoever else holds it; only this cache's
+				// attachment was refused, so there is nothing to roll back.
+				throw new PublicationRejectedError(info);
+			}
+		},
+		releaseNarHold(env, narId)
+	);
 	return uploadedResult(null, 1);
 }
 
@@ -379,22 +430,24 @@ async function linkChunkedNar(
 	cacheId: number,
 	kind: CompressionKind,
 	records: NarChunkRecord[],
-	narSize: number
+	narSize: number,
+	defer?: Defer
 ): Promise<void> {
 	const d1 = env.ATTIC_DB;
 	const fresh = [...new Set(records.filter((r) => r.fresh).map((r) => r.chunkId))];
-	try {
-		await publishNar(d1, info, cacheId, narSize, kind, records.length, (ref) => [
-			...fresh.map((id) => db.publishChunkStmt(d1, id)),
-			...records.map((record, seq) =>
-				db.insertChunkRefStmt(d1, ref, seq, record.chunkId, `sha256:${record.hash}`, kind)
-			)
-		]);
-	} finally {
-		// Staged chunks may be shared with another upload; GC owns their R2
-		// cleanup, so only the NAR (inside publishNar) is rolled back.
-		await releaseChunkLocks(env, records);
-	}
+	// Staged chunks may be shared with another upload; GC owns their R2
+	// cleanup, so only the NAR (inside publishNar) is rolled back on failure.
+	await publishThenRelease(
+		defer,
+		() =>
+			publishNar(d1, info, cacheId, narSize, kind, records.length, (ref) => [
+				...fresh.map((id) => db.publishChunkStmt(d1, id)),
+				...records.map((record, seq) =>
+					db.insertChunkRefStmt(d1, ref, seq, record.chunkId, `sha256:${record.hash}`, kind)
+				)
+			]),
+		settleHolds(env, chunkSettlements(records))
+	);
 }
 
 /**
@@ -455,9 +508,10 @@ async function finalizeChunkedNar(
 	cacheId: number,
 	kind: CompressionKind,
 	records: NarChunkRecord[],
-	narSize: number
+	narSize: number,
+	defer?: Defer
 ): Promise<Response> {
-	await linkChunkedNar(env, info, cacheId, kind, records, narSize);
+	await linkChunkedNar(env, info, cacheId, kind, records, narSize, defer);
 	const dedupedBytes = records.reduce((sum, r) => sum + (r.key ? 0 : r.size), 0);
 	const fileSize = records.every((r) => r.fileSize != null)
 		? records.reduce((sum, r) => sum + (r.fileSize ?? 0), 0)
@@ -469,15 +523,15 @@ async function finalizeChunkedNar(
  * One entry per held record, not per row: a chunk repeated within a NAR was
  * held once per occurrence and must be released as many times. */
 async function releaseChunkLocks(env: Env, records: NarChunkRecord[]): Promise<void> {
-	await measure('chunkRelease', () =>
-		db
-			.settleChunks(
-				env.ATTIC_DB,
-				records.filter((r) => r.locked).map((r) => ({ id: r.chunkId, publish: r.fresh }))
-			)
-			.catch(() => {})
-	);
+	await settleHolds(env, chunkSettlements(records))();
 }
+
+function chunkSettlements(records: NarChunkRecord[]): { id: number; publish: boolean }[] {
+	return records.filter((r) => r.locked).map((r) => ({ id: r.chunkId, publish: r.fresh }));
+}
+
+const settleHolds = (env: Env, held: { id: number; publish: boolean }[]) => () =>
+	measure('chunkRelease', () => db.settleChunks(env.ATTIC_DB, held).catch(() => {}));
 
 /** nar + chunk + chunkref + object rows for a freshly stored single-chunk NAR. */
 async function createUploadRows(
@@ -592,13 +646,17 @@ export async function handleUploadPath(
 	// Memoized replica read, like the serve path: push bursts otherwise re-read
 	// the row from the primary once per pushed path, and staleness only delays
 	// a create-then-push or affects tolerant fields (compression choice).
-	const cache = await findCacheCached(env.ATTIC_DB, info.cache);
+	// The dedup probe only needs the hash, so it overlaps the cache lookup;
+	// the lock still waits for the cache.
+	const probe = probeNar(env, info.nar_hash);
+	const [cache] = await Promise.all([findCacheCached(env.ATTIC_DB, info.cache), probe]);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
 
+	const defer = deferTo(ctx);
 	let response: Response;
 	// Dedup: an existing valid NAR with this hash just gains another object —
 	// after the client proves possession by streaming the claimed bytes.
-	const existing = await tryLockNarProbed(env, info.nar_hash);
+	const existing = await tryLockNarProbed(env, info.nar_hash, probe);
 	if (existing) {
 		let denied: Response | null;
 		try {
@@ -611,7 +669,7 @@ export async function handleUploadPath(
 			await db.releaseNarLock(env.ATTIC_DB, existing.id).catch(() => {});
 			return denied;
 		}
-		response = await finishDeduplicated(env, info, cache.id, existing.id);
+		response = await finishDeduplicated(env, info, cache.id, existing.id, defer);
 	} else {
 		const kind = uploadCompressionFor(cache.compression);
 		if (!narBody) return errorResponse(400, 'Missing request body');
@@ -620,9 +678,9 @@ export async function handleUploadPath(
 			// Capped at the declared length: admission charged for exactly that.
 			const body = await readAll(narBody, narLength);
 			if (!body) return errorResponse(400, 'Body exceeds declared Content-Length');
-			response = await handleBufferedUpload(env, info, cache.id, kind, body);
+			response = await handleBufferedUpload(env, info, cache.id, kind, body, defer);
 		} else {
-			response = await handleStreamingUpload(env, narBody, info, cache.id, kind);
+			response = await handleStreamingUpload(env, narBody, info, cache.id, kind, defer);
 		}
 	}
 	if (response.ok) {
@@ -643,7 +701,8 @@ export async function handleBufferedUpload(
 	info: UploadNarInfo,
 	cacheId: number,
 	kind: CompressionKind,
-	body: Uint8Array
+	body: Uint8Array,
+	defer?: Defer
 ): Promise<Response> {
 	if (body.length >= NAR_CHUNK_THRESHOLD) {
 		const narHash = toHex(await crypto.subtle.digest('SHA-256', body as BufferSource));
@@ -668,7 +727,7 @@ export async function handleBufferedUpload(
 			await releaseChunkLocks(env, records);
 			throw failed.reason;
 		}
-		return finalizeChunkedNar(env, info, cacheId, kind, records, body.length);
+		return finalizeChunkedNar(env, info, cacheId, kind, records, body.length, defer);
 	}
 
 	const result = await withWasmSlot(() => compressBuffer(body, kind));
@@ -697,16 +756,17 @@ export async function handleBufferedUpload(
 	);
 	recordStoreWrite(env, { deduplicated: false, fileBytes: result.fileSize ?? 0 });
 
-	try {
-		return await createUploadRows(env, info, cacheId, {
-			narSize: result.narSize,
-			compression: kind,
-			fileSize: stored.file_size ?? result.fileSize,
-			chunkId: stored.id
-		});
-	} finally {
-		await db.settleChunks(env.ATTIC_DB, [{ id: stored.id, publish: true }]).catch(() => {});
-	}
+	return publishThenRelease(
+		defer,
+		() =>
+			createUploadRows(env, info, cacheId, {
+				narSize: result.narSize,
+				compression: kind,
+				fileSize: stored.file_size ?? result.fileSize,
+				chunkId: stored.id
+			}),
+		settleHolds(env, [{ id: stored.id, publish: true }])
+	);
 }
 
 /**
@@ -722,7 +782,8 @@ export async function handleStreamingUpload(
 	body: ReadableStream<Uint8Array>,
 	info: UploadNarInfo,
 	cacheId: number,
-	kind: CompressionKind
+	kind: CompressionKind,
+	defer?: Defer
 ): Promise<Response> {
 	const narHasher = newDigestStream();
 	narHasher.digest.catch(() => {});
@@ -799,9 +860,9 @@ export async function handleStreamingUpload(
 		if (records.length === 0) {
 			return errorResponse(400, 'Empty NAR');
 		}
-		// From here linkChunkedNar owns the holds (its finally releases them).
+		// From here linkChunkedNar owns the holds.
 		released = true;
-		return finalizeChunkedNar(env, info, cacheId, kind, records, narSize);
+		return finalizeChunkedNar(env, info, cacheId, kind, records, narSize, defer);
 	} catch (e) {
 		await reader.cancel(e).catch(() => {});
 		await narWriter.abort(e).catch(() => {});
@@ -1036,6 +1097,8 @@ export async function handleCdcChunkPut(
 		},
 		compressed
 	);
+	// Awaited, unlike the NAR-level releases: this also publishes the chunk,
+	// and the client's cdc-complete, sent on this answer, must find it valid.
 	await db.settleChunks(env.ATTIC_DB, [{ id: stored.id, publish: true }]);
 	recordStoreWrite(env, { deduplicated: stored.state === 'V', fileBytes: stored.file_size ?? 0 });
 	return json({ ok: true, deduplicated: stored.state === 'V', proof });
@@ -1285,7 +1348,15 @@ export async function handleCdcComplete(
 	}
 
 	await measure('cdcPublish', () =>
-		linkChunkedNarDeduped(env, info, cache.id, records, [...lockedByHash.values()], body.nar_size)
+		linkChunkedNarDeduped(
+			env,
+			info,
+			cache.id,
+			records,
+			[...lockedByHash.values()],
+			body.nar_size,
+			deferTo(ctx)
+		)
 	);
 	recordPush(env, info.cache, { deduplicated: false, narBytes: body.nar_size });
 	invalidate();
@@ -1306,9 +1377,10 @@ async function linkChunkedNarDeduped(
 	cacheId: number,
 	records: NarChunkRecord[],
 	uniqueLocked: NarChunkRecord[],
-	narSize: number
+	narSize: number,
+	defer?: Defer
 ): Promise<void> {
 	const releasable = new Set(uniqueLocked);
 	const perRef = records.map((r) => ({ ...r, locked: releasable.delete(r) }));
-	await linkChunkedNar(env, info, cacheId, 'zstd', perRef, narSize);
+	await linkChunkedNar(env, info, cacheId, 'zstd', perRef, narSize, defer);
 }

@@ -72,6 +72,19 @@ export function testDatabase({ admin = false }: { admin?: boolean } = {}) {
 	return { sqlite, db: binding as unknown as D1Database, totalChanges };
 }
 
+/** Fault `batch` the way a committed transaction with a lost response looks
+ * to the caller: it commits, then throws a transient error on the calls
+ * `lose` selects (1-based), which the D1 retry wrapper would replay. */
+export function loseBatchResponses(db: D1Database, lose: (call: number) => boolean = () => true) {
+	const batch = db.batch.bind(db);
+	let calls = 0;
+	return vi.spyOn(db, 'batch').mockImplementation(async (stmts) => {
+		const result = await batch(stmts);
+		if (lose(++calls)) throw new Error('D1_ERROR: Network connection lost.');
+		return result;
+	});
+}
+
 /** Node has no crypto.DigestStream; streaming uploads and CDC completion
  * hash through it. Restored by vi.unstubAllGlobals / the test's afterEach. */
 export function stubDigestStream(): void {
