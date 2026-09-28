@@ -102,7 +102,12 @@ function filtersPath(upstream: Upstream, verdict: Verdict): boolean {
 	);
 }
 
-const BATCH = 99;
+/** Hashes per lookup statement, bound as one JSON array (json_each) rather
+ * than one parameter each: D1 caps bound parameters at 100 per statement and
+ * queries at 1000 per invocation, so a 50k-path preflight would otherwise
+ * need ~500 statements per lookup. 2000 hashes are ~70 KB of JSON, far under
+ * D1's 2 MB value limit. */
+const HASHES_PER_STATEMENT = 2000;
 /** Max live upstream narinfo probes per request (Workers subrequest budget). */
 const MAX_UPSTREAM_PROBES = 250;
 
@@ -137,9 +142,8 @@ export async function findExistingPaths(
 ): Promise<Set<string>> {
 	const existing = new Set<string>();
 	const stmts: D1PreparedStatement[] = [];
-	for (let i = 0; i < hashes.length; i += BATCH) {
-		const batch = hashes.slice(i, i + BATCH);
-		const placeholders = batch.map((_, j) => `?${j + 2}`).join(', ');
+	for (let i = 0; i < hashes.length; i += HASHES_PER_STATEMENT) {
+		const batch = hashes.slice(i, i + HASHES_PER_STATEMENT);
 		stmts.push(
 			db
 				.prepare(
@@ -147,9 +151,9 @@ export async function findExistingPaths(
 						'INNER JOIN cache c ON o.cache_id = c.id ' +
 						'INNER JOIN nar n ON o.nar_id = n.id ' +
 						"WHERE c.name = ?1 AND c.deleted_at IS NULL AND n.state = 'V' " +
-						`AND o.store_path_hash IN (${placeholders})`
+						'AND o.store_path_hash IN (SELECT value FROM json_each(?2))'
 				)
-				.bind(cacheName, ...batch)
+				.bind(cacheName, JSON.stringify(batch))
 		);
 	}
 	for (const result of await dbBatch<{ store_path_hash: string }>(db, stmts)) {
@@ -181,16 +185,15 @@ async function cachedVerdicts(
 	const verdicts = new Map<string, Verdict>();
 	const ttlSecs = upstreamTtlSecs(upstream);
 	const stmts: D1PreparedStatement[] = [];
-	for (let i = 0; i < hashes.length; i += BATCH) {
-		const batch = hashes.slice(i, i + BATCH);
-		const placeholders = batch.map((_, j) => `?${j + 2}`).join(', ');
+	for (let i = 0; i < hashes.length; i += HASHES_PER_STATEMENT) {
+		const batch = hashes.slice(i, i + HASHES_PER_STATEMENT);
 		stmts.push(
 			db
 				.prepare(
 					'SELECT store_path_hash, present, checked_at FROM upstream_check ' +
-						`WHERE upstream_id = ?1 AND store_path_hash IN (${placeholders})`
+						'WHERE upstream_id = ?1 AND store_path_hash IN (SELECT value FROM json_each(?2))'
 				)
-				.bind(upstream.id, ...batch)
+				.bind(upstream.id, JSON.stringify(batch))
 		);
 	}
 	type Row = { store_path_hash: string; present: number; checked_at: string };

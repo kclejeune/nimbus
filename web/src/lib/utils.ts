@@ -5,8 +5,11 @@ export function cn(...inputs: ClassValue[]) {
 	return twMerge(clsx(inputs));
 }
 
-/** Valid cache name: lowercase alphanumeric with dashes, 1–50 chars. */
-export const CACHE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,49}$/;
+/** Valid cache name, attic's rule: 1–50 chars of letters, digits, `-`, `_`,
+ * and `+`, not starting with punctuation. Case-sensitive. */
+export const CACHE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_+-]{0,49}$/;
+
+export const CACHE_NAME_HINT = 'Letters, digits, and - _ +, up to 50 characters.';
 
 export type WithoutChild<T> = T extends { child?: unknown } ? Omit<T, 'child'> : T;
 export type WithoutChildren<T> = T extends { children?: unknown } ? Omit<T, 'children'> : T;

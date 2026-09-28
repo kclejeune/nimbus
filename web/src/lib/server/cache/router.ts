@@ -792,7 +792,7 @@ async function handleGetMissingPaths(
 	}
 	// One unit per request plus one per started 1000 hashes, charged
 	// together and per client: a full 10k batch (what the Go client sends)
-	// is 11 units, so the limit is expressed in requests, not hash windows,
+	// is 11 units, a 50k stock-attic closure 51, so the limit is expressed in requests, not hash windows,
 	// and one pusher's burst cannot exhaust the colo for everyone else.
 	await requireBudgetUnits(
 		env.BATCH_QUERY_LIMITER,
@@ -1105,7 +1105,8 @@ async function handleV1(
 		const release = narRoute ? await admitUpload(request, narRoute) : null;
 		try {
 			if (method === 'PUT' && segments.length === 3) {
-				return await handleUploadPath(request, env, ctx, canPush, token.sub ?? null);
+				const response = await handleUploadPath(request, env, ctx, canPush, token.sub ?? null);
+				return isAtticClient(request) ? await atticUploadKind(response) : response;
 			} else if (method === 'POST' && segments[3] === 'chunks' && segments.length === 4) {
 				const manifest = await parseManifest();
 				if (manifest instanceof Response) return manifest;
@@ -1262,6 +1263,22 @@ async function handleV1(
 	}
 
 	return errorResponse(404, 'Not found');
+}
+
+/** The stock attic client (User-Agent `Attic/<version> (...)`, sent since
+ * 2025). Older attic clients send none and keep nimbus's defaults. */
+function isAtticClient(request: Request): boolean {
+	return /^attic\//i.test(request.headers.get('User-Agent') ?? '');
+}
+
+/** attic's UploadPathResultKind is `Uploaded` / `Deduplicated`; nimbus clients
+ * compare the lowercase forms, so only attic gets the capitalized spelling. */
+async function atticUploadKind(response: Response): Promise<Response> {
+	if (!response.ok) return response;
+	const body = (await response.json()) as Record<string, unknown>;
+	if (body.kind === 'uploaded') body.kind = 'Uploaded';
+	else if (body.kind === 'deduplicated') body.kind = 'Deduplicated';
+	return jsonResponse(body, response.status);
 }
 
 /** Public base URL for API/substituter endpoints in cache-info responses.

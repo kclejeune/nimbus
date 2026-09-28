@@ -1,7 +1,7 @@
 import { fail, redirect, error } from '@sveltejs/kit';
 import { CacheConfigError, createCache } from '$lib/server/cache/cache-config';
 import { writeAudit } from '$lib/server/audit';
-import { CACHE_NAME_RE } from '$lib/utils';
+import { CACHE_NAME_HINT, CACHE_NAME_RE } from '$lib/utils';
 import type { Actions } from './$types';
 
 export const actions: Actions = {
@@ -21,7 +21,7 @@ export const actions: Actions = {
 
 		if (!CACHE_NAME_RE.test(name)) {
 			return fail(400, {
-				error: 'Name must be lowercase alphanumeric with dashes (max 50 chars).',
+				error: `Invalid name. ${CACHE_NAME_HINT}`,
 				values: { name, isPublic, priority, compression, retentionRaw }
 			});
 		}

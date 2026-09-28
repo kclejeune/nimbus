@@ -75,6 +75,8 @@ const STREAM_CONCURRENT_CHUNKS = 1;
 // footprint. The active cap bounds per-isolate D1 write concurrency.
 export const UPLOAD_SLOT_BYTES = 32 * 1024 * 1024;
 export const uploadMemory = new MemoryBudget(2 * UPLOAD_SLOT_BYTES, 8);
+const ADMISSION_WAIT_MS = 5_000;
+const STREAMED_ADMISSION_WAIT_MS = 30_000;
 
 /** Resident bytes of an upload body: raw plus compressed output (≤ raw) plus
  * stream slack for a buffered body of declared length, else a full slot. */
@@ -88,8 +90,15 @@ export function uploadWeight(declared: number | null): number {
  * charged a full slot: its compressed length does not bound its
  * decompressed size. */
 export async function admitUpload(request: Request, route: 'path' | 'chunk'): Promise<() => void> {
-	const weight = uploadWeight(route === 'path' ? declaredLength(request) : null);
-	if (!(await measure('admission', () => uploadMemory.acquireBounded(weight, 64, 5_000))))
+	const declared = route === 'path' ? declaredLength(request) : null;
+	const weight = uploadWeight(declared);
+	// A path upload without Content-Length is the stock attic client, which
+	// streams every NAR and never retries a 503; give it room to queue behind
+	// its own fan-out. Everything else keeps the short wait, since a waiter
+	// whose client disconnected holds the queue head until its deadline.
+	const waitMs =
+		route === 'path' && declared === null ? STREAMED_ADMISSION_WAIT_MS : ADMISSION_WAIT_MS;
+	if (!(await measure('admission', () => uploadMemory.acquireBounded(weight, 64, waitMs))))
 		throw new AdmissionError('Upload memory busy; retry shortly', 5);
 	return () => uploadMemory.release(weight);
 }

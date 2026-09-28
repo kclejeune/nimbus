@@ -12,7 +12,7 @@ import { parseGrantActions } from './permissions';
 import { writeAudit } from '$lib/server/audit';
 
 /** CACHE_NAME_RE widened with the attic glob characters. */
-const GRANT_PATTERN_RE = /^[a-z0-9*?][a-z0-9*?-]{0,49}$/;
+const GRANT_PATTERN_RE = /^[A-Za-z0-9*?][A-Za-z0-9_+*?-]{0,49}$/;
 
 /** Everything an owner needs on an existing cache. `cr` (Configure) already
  *  covers retention server-side, so cq is unnecessary; cc (create-anywhere)

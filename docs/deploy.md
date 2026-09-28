@@ -299,8 +299,9 @@ which nimbus does not implement.
 Each isolate admits NAR-carrying requests against a 64 MiB budget with at
 most 8 concurrent holders. A body with a declared length up to 15 MiB is
 charged `2 × length + 1 MiB`; chunk PUTs and streamed or larger bodies take a
-32 MiB slot. Up to 64 requests queue for at most 5 s, after which they get a
-503 with `Retry-After: 5`. CDC manifest calls are not gated, and pull-through
+32 MiB slot. Up to 64 requests queue, for at most 5 s (30 s for path uploads
+with no `Content-Length`, which is how the stock attic client sends them),
+after which they get a 503 with `Retry-After: 5`. CDC manifest calls are not gated, and pull-through
 ingestion never queues; it runs only when a slot is free. Body reads have a
 30 s idle deadline and a 30 min absolute backstop (the CLI's request timeout).
 Pull-through ingestion is limited to NARs up to 16 MiB decompressed; larger

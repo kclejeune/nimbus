@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -289,7 +290,7 @@ func (p *Pusher) uploadOne(
 		return pathProgress, err
 	}
 
-	pathProgress.Deduplicated = result.Kind == "deduplicated"
+	pathProgress.Deduplicated = strings.EqualFold(result.Kind, "deduplicated")
 	return pathProgress, nil
 }
 

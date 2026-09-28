@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { CACHE_NAME_HINT } from '$lib/utils';
 	import { toastErrors } from '$lib/enhance';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
@@ -42,7 +43,7 @@
 		<div class="space-y-2">
 			<Label for="name">Name</Label>
 			<Input id="name" name="name" placeholder="my-cache" value={v?.name ?? ''} autofocus />
-			<p class="text-xs text-muted-foreground">Lowercase letters, digits, and dashes.</p>
+			<p class="text-xs text-muted-foreground">{CACHE_NAME_HINT}</p>
 		</div>
 
 		<div class="flex items-center gap-3">

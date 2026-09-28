@@ -1270,14 +1270,15 @@ export interface NewCache {
 	priority: number;
 	compression: string;
 	retention_period: number | null;
+	upstream_cache_key_names: string[];
 }
 
 export async function createCacheRow(db: D1Database, cache: NewCache): Promise<void> {
 	await db
 		.prepare(
 			'INSERT INTO cache (name, keypair, is_public, store_dir, priority, ' +
-				"upstream_cache_key_names, compression, created_at) VALUES (?1, ?2, ?3, ?4, ?5, '[]', ?6, ?7) " +
-				'ON CONFLICT (name) DO NOTHING'
+				'upstream_cache_key_names, compression, retention_period, created_at) ' +
+				'VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT (name) DO NOTHING'
 		)
 		.bind(
 			cache.name,
@@ -1285,7 +1286,9 @@ export async function createCacheRow(db: D1Database, cache: NewCache): Promise<v
 			cache.is_public ? 1 : 0,
 			cache.store_dir,
 			cache.priority,
+			JSON.stringify(cache.upstream_cache_key_names),
 			cache.compression,
+			cache.retention_period,
 			nowRfc3339()
 		)
 		.run();

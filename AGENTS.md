@@ -156,6 +156,13 @@ bug.
 - **Never resolve a promise from another request's I/O context on Workers.**
   The continuation is canceled, the waiter hangs, and the client sees error 1101. Cross-request coordination (`cache/platform.ts` `Semaphore`) polls a
   shared counter on the waiter's own jittered `setTimeout`.
+- **`/_api/v1` speaks attic's serde shapes to stock attic clients**
+  (`cache-config.ts` `fromAtticOptions`, `cacheInfo`; `router.ts`
+  `atticUploadKind`): retention is attic's `{"Period": secs}` / `"Global"` on
+  the wire but whole days in D1, keypair is `"Generate"`, and the upload
+  `kind` is capitalized only for an `Attic/` User-Agent because released nimbus
+  CLIs compare lowercase. `attic-compat.test.ts` pins these; a nimbus-side field
+  change that looks harmless can break every stock client decoding it.
 - **`cacheInfo` URLs come from `CACHE_BASE_URL`, not the request origin.**
   Deriving from the origin poisons `api_endpoint` under `wrangler dev`.
 - **Nix interop, from real bugs:** `os.UserConfigDir` is wrong on macOS (returns

@@ -1,14 +1,10 @@
 # nimbus
 
 nimbus is a serverless, self-hostable Nix binary cache. A Cloudflare Worker
-backed by D1 and R2 serves a cache built on
-[attic](https://github.com/zhaofengli/attic)'s protocol, with deduplicated
-storage, closure-aware garbage collection, and a web dashboard. There is no
-server to run and no idle cost.
-
-> **Partial attic compatibility.** Nix substitution, attic tokens, and the
-> stock client's push/pull path work; `attic cache configure` and a few other
-> operations do not. See [attic compatibility](#attic-compatibility).
+backed by D1 and R2 serves deduplicated caches with closure-aware garbage
+collection and a web dashboard, with no server to run and no idle cost. It
+speaks [attic](https://github.com/zhaofengli/attic)'s protocol, so the stock
+`attic` client works against it ([details](#nimbus-and-attic)).
 
 ```bash
 # install the CLI
@@ -107,95 +103,44 @@ object layout), but Cloudflare is the only supported target today.
 
 ## nimbus and attic
 
-nimbus reimplements [attic](https://github.com/zhaofengli/attic), and the
-design is attic's: caches as isolated views into one deduplicated
-content-addressed store, content-defined chunking so dedup survives small
-rebuilds, JWT-scoped per-cache permissions, and an HTTP protocol clean enough
-to reimplement from the source. nimbus keeps attic's wire protocol and token
-format and replaces the implementation underneath with one that fits a
-Worker's constraints.
+nimbus is a reimplementation of attic, and the design is attic's: caches as
+views into one deduplicated, content-addressed store, content-defined
+chunking, and JWT-scoped permissions. What changes is the runtime underneath.
+Everything below was checked against attic
+[`7a19204`](https://github.com/zhaofengli/attic/commit/7a19204).
 
-### attic compatibility
+### Compatibility
 
-Verified with the stock client built from attic
-[`7a19204`](https://github.com/zhaofengli/attic/commit/7a19204) against a local
-nimbus Worker, plus a source comparison of both sides.
+The stock `attic` client and attic-minted tokens (HS256, or RS256 with the
+public key) work for login, `use`, `push`, `watch-store`, and every `cache`
+subcommand. The exceptions:
 
-**Works:**
+- NARs of 100 MiB or more exceed the Workers request-body limit. Push them
+  with the nimbus CLI, which uploads them in chunks.
+- Changing a cache's visibility, keypair, or upstream key names requires a
+  token issued by nimbus.
+- Retention is kept in whole days, so shorter periods round up to a day.
+  nimbus has no global default, so attic's `Global` setting means unlimited.
+- The stock client does not retry the `503` that upload admission can return
+  under load.
 
-- Nix substitution from public and private caches (netrc Basic auth), with
-  nimbus-signed narinfos.
-- attic-minted tokens: HS256, or RS256 given the public key, including
-  `iss`/`aud` binding and cache-name globs.
-- `attic login`, `use`, `cache create`, `cache info`, `cache destroy`, and
-  `push` / `watch-store` of closures, deduplicated against what the cache
-  already holds.
+### Differences
 
-**Broken:**
-
-- `attic cache configure` always fails: the client sends retention as attic's
-  `{"Period": seconds}` / `"Global"` enum, which nimbus rejects (nimbus stores
-  retention as an integer number of days).
-- Once a cache has a retention period (set from the dashboard or nimbus
-  CLI), the stock client cannot decode its config, so `attic push`, `use`,
-  `cache info`, and `watch-store` fail for that cache.
-- NARs of 100 MiB or more exceed the Workers request-body limit; nimbus
-  replaces attic's single-PUT upload with a chunked protocol only the nimbus
-  CLI speaks.
-- A push whose closure has more than 10,000 paths fails: attic sends them in
-  one `get-missing-paths` request, which nimbus caps at 10,000.
-- Cache names are limited to lowercase letters, digits, and `-`; attic also
-  allows uppercase, `_`, and `+`.
-
-**Differs:**
-
-- `upstream_cache_key_names` from `attic cache create` is discarded, so the
-  client's signature-based upstream skip is off; nimbus filters upstream
-  paths server-side through its upstream registry instead.
-- Changing visibility, keys, or upstream key names needs a nimbus-only token
-  claim, so attic-minted tokens cannot make those changes.
-- Upload admission can return `503` with `Retry-After` under load; the stock
-  client does not retry.
-
-### Comparison with attic
-
-As of attic [`7a19204`](https://github.com/zhaofengli/attic/commit/7a19204) (July 2026).
-
-|                    | attic                                                                                                     | nimbus                                                                                                   |
-| ------------------ | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Runtime            | `atticd` (Rust) on a host you run: monolithic, or split API and GC processes; NixOS module and OCI images | Cloudflare Worker; no host, scales to zero                                                               |
-| Database           | PostgreSQL or SQLite                                                                                      | D1 (SQLite)                                                                                              |
-| Storage            | any S3-compatible service, or local disk                                                                  | R2                                                                                                       |
-| Chunking           | server-side FastCDC, 16/64/256 KiB (min/avg/max) for NARs ≥ 64 KiB; configurable                          | FastCDC 2/8/16 MiB for NARs ≥ 8 MiB; NARs ≥ 100 MiB cut by the CLI with identical boundaries             |
-| Uploads            | one streaming PUT; a dedup hit still streams the full NAR as proof of possession                          | one PUT below 100 MiB; above, a chunked protocol that sends only missing chunks, with per-chunk receipts |
-| Compression        | server-wide zstd (default), brotli, xz, or none                                                           | per-cache zstd, gzip, or none                                                                            |
-| Garbage collection | per-object expiry by creation/last download, off by default; ignores references                           | closure-aware retention by age and size, global storage ceiling, pins                                    |
-| Path removal       | none (the `d` bit is defined but no endpoint uses it)                                                     | closure-safe `cache rm`                                                                                  |
-| Upstream caches    | client-side: `attic push` skips paths signed by the cache's upstream key names                            | server-side registry: filtered at get-missing-paths, redirect or persist pull-through, enforced entries  |
-| Tokens             | `atticadm make-token` (HS256 or RS256); stateless, no revocation short of rotating the key                | minted from the dashboard or CLI, scoped, revocable by `jti`, bounded by the issuer's grants             |
-| Access control     | per-token permission bits; no user accounts                                                               | user/group grants (same bits) with OIDC group sync; tokens carry the bits on the wire                    |
-| Substituter config | one URL and key per cache                                                                                 | per cache, or one unified endpoint and key for every readable cache                                      |
-| CLI login          | paste a token                                                                                             | browser loopback, device code, or paste a token                                                          |
-| Admin interface    | CLI                                                                                                       | web dashboard and CLI                                                                                    |
-| Cache rename       | no                                                                                                        | yes                                                                                                      |
-| NAR downloads      | single-chunk NARs on S3 redirect to presigned URLs; multi-chunk NARs stream through the server            | streamed through the Worker, edge-cached; upstream paths redirect to the upstream                        |
-
-### Gaps and differences
-
-Server-side gaps beyond the table above (client-protocol gaps are under
-[attic compatibility](#attic-compatibility)):
-
-- attic runs anywhere: local disk or any S3 service, SQLite or PostgreSQL, a
-  NixOS module, a single binary with zero-config first run. nimbus needs a
-  Cloudflare account on Workers Paid.
-- nimbus chunks are larger (each is an R2 subrequest) and use fixed
-  parameters, so a store migrated from attic does not share chunk identities
-  with it.
-- nimbus accepts RS256 tokens but mints only HS256; attic can sign with
-  either.
-- There is no `atticadm make-token` equivalent that mints from the signing
-  secret alone. `nimbus token create` mints scoped tokens headlessly, but as
-  the user behind an existing dashboard- or CLI-login token.
+|                    | attic                                                                        | nimbus                                                                      |
+| ------------------ | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Runs on            | any host; NixOS module, OCI images                                           | Cloudflare Workers Paid                                                     |
+| Metadata / storage | PostgreSQL or SQLite; S3-compatible or local disk                            | D1; R2                                                                      |
+| Chunking           | FastCDC 16/64/256 KiB, configurable                                          | FastCDC 2/8/16 MiB, fixed; chunks are not shared with an attic store        |
+| Large uploads      | one streaming PUT                                                            | chunked above 100 MiB, sending only missing chunks                          |
+| Compression        | server-wide zstd, brotli, xz, or none                                        | per-cache zstd, gzip, or none                                               |
+| Garbage collection | per-object expiry, off by default                                            | closure-aware, by age and size, with pins                                   |
+| Path removal       | none                                                                         | closure-safe `cache rm`                                                     |
+| Upstream caches    | client skips paths signed by listed keys                                     | server-side registry with filtering and pull-through                        |
+| Tokens             | `atticadm make-token` from the signing secret, HS256 or RS256, no revocation | issued by a signed-in user from the dashboard or CLI, HS256 only, revocable |
+| Access control     | token permission bits                                                        | user and group grants over the same bits, OIDC group sync                   |
+| Substituters       | one per cache                                                                | one per cache, or a single endpoint for every readable cache                |
+| Admin interface    | CLI                                                                          | web dashboard and CLI                                                       |
+| NAR downloads      | presigned S3 redirect for single-chunk NARs                                  | through the Worker, edge-cached                                             |
 
 ## CLI
 

@@ -33,7 +33,7 @@ import {
 	STORE_PATH_HASH_RE,
 	upsertPin
 } from '$lib/server/cache/db';
-import { CACHE_NAME_RE } from '$lib/utils';
+import { CACHE_NAME_HINT, CACHE_NAME_RE } from '$lib/utils';
 import type { PageServerLoad, Actions } from './$types';
 
 interface CacheRow {
@@ -394,7 +394,7 @@ export const actions: Actions = {
 
 		if (!CACHE_NAME_RE.test(newName)) {
 			return fail(400, {
-				renameError: 'Name must be lowercase alphanumeric with dashes (max 50 chars).'
+				renameError: `Invalid name. ${CACHE_NAME_HINT}`
 			});
 		}
 		if (newName === params.name) {

@@ -12,10 +12,10 @@ import type { ExecutionContext } from './platform';
 import { cacheTag, PUBLIC_NARS_TAG, ROOT_UPSTREAM_TAG, upstreamPassthroughTag } from './store';
 import { CANDIDATES_TAG } from './metadata';
 import { FULL_CONTROL, insertGrant } from '$lib/server/auth/grants';
+import { CACHE_NAME_RE } from '$lib/utils';
+import { isRecord } from '../request-body';
 
 type Env = App.Platform['env'];
-
-const CACHE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,49}$/;
 
 // Names that collide with root-proxy routes on the cache host, plus `gc`,
 // which GC authorization once probed (see hasGcAuthority).
@@ -35,7 +35,10 @@ export interface CreateCacheOptions {
 	store_dir?: string;
 	priority?: number;
 	compression?: string;
+	/** Days; null = unlimited. */
 	retention_period?: number | null;
+	upstream_cache_key_names?: string[];
+	keypair?: { type: 'generate' } | { type: 'set'; keypair: string };
 }
 
 const STORE_DIR_MAX_CHARS = 256;
@@ -43,6 +46,41 @@ const UPSTREAM_KEY_NAMES_MAX = 64;
 const UPSTREAM_KEY_NAME_MAX_CHARS = 256;
 const KEYPAIR_MAX_CHARS = 1024;
 const I32_MAX = 2 ** 31 - 1;
+const U32_MAX = 2 ** 32 - 1;
+const DAY_SECS = 86_400;
+
+/**
+ * Accept attic's enum encodings alongside nimbus's own, so a stock attic
+ * client's create/configure bodies validate:
+ *
+ * - retention_period `"Global"` resets to the server default (unlimited in
+ *   nimbus), and `{"Period": seconds}` becomes whole days, rounded up; attic's
+ *   `Period(0)` disables time-based GC, which is also unlimited. The attic
+ *   client sends `"Global"` on every configure that omits --retention-period,
+ *   exactly as it does against attic.
+ * - keypair `"Generate"` and `{"Keypair": "<secret>"}`.
+ *
+ * Malformed values pass through untouched for validateCacheOptions to reject.
+ */
+function fromAtticOptions(options: unknown): unknown {
+	if (!isRecord(options)) return options;
+	const o = { ...options };
+	const retention = o.retention_period;
+	if (retention === 'Global') {
+		o.retention_period = null;
+	} else if (isRecord(retention) && 'Period' in retention) {
+		const secs = retention.Period;
+		if (typeof secs === 'number' && Number.isInteger(secs) && secs >= 0 && secs <= U32_MAX) {
+			o.retention_period = secs === 0 ? null : Math.ceil(secs / DAY_SECS);
+		}
+	}
+	if (o.keypair === 'Generate') {
+		o.keypair = { type: 'generate' };
+	} else if (isRecord(o.keypair) && typeof o.keypair.Keypair === 'string') {
+		o.keypair = { type: 'set', keypair: o.keypair.Keypair };
+	}
+	return o;
+}
 
 /** Shape and size of the option fields nimbus stores. Unknown fields are
  * tolerated: attic clients send some that nimbus ignores. */
@@ -107,12 +145,13 @@ function validateCacheOptions(options: unknown): asserts options is ConfigureCac
 export async function createCache(
 	env: Env,
 	name: string,
-	options: CreateCacheOptions,
+	body: CreateCacheOptions,
 	grantFullControlTo?: string
 ): Promise<{ public_key: string }> {
 	if (!CACHE_NAME_RE.test(name) || RESERVED_CACHE_NAMES.has(name)) {
 		throw new CacheConfigError(400, `Invalid cache name: ${name}`);
 	}
+	const options = fromAtticOptions(body);
 	validateCacheOptions(options);
 
 	const existing = await db.findCache(env.ATTIC_DB, name);
@@ -125,7 +164,13 @@ export async function createCache(
 		throw new CacheConfigError(400, `Unsupported compression: ${options.compression}`);
 	}
 
-	const keypair = await generateKeypair(name);
+	const keypair =
+		options.keypair?.type === 'set' ? options.keypair.keypair : await generateKeypair(name);
+	try {
+		extractPublicKey(keypair);
+	} catch (e) {
+		throw new CacheConfigError(400, `Invalid keypair: ${e}`);
+	}
 	await db.createCacheRow(env.ATTIC_DB, {
 		name,
 		keypair,
@@ -133,7 +178,8 @@ export async function createCache(
 		store_dir: options.store_dir ?? '/nix/store',
 		priority: options.priority ?? 40,
 		compression,
-		retention_period: options.retention_period ?? null
+		retention_period: options.retention_period ?? null,
+		upstream_cache_key_names: options.upstream_cache_key_names ?? []
 	});
 	// Evict any brief negative memo left by a serve that raced ahead of create.
 	invalidateCacheRow(name);
@@ -194,9 +240,10 @@ function touchesTrustFields(options: ConfigureCacheOptions): boolean {
 export async function configureCache(
 	env: Env,
 	name: string,
-	options: ConfigureCacheOptions,
+	body: ConfigureCacheOptions,
 	authz: { trustAuthorized?: boolean; ctx?: ExecutionContext } = {}
 ): Promise<{ public_key?: string }> {
+	const options = fromAtticOptions(body);
 	validateCacheOptions(options);
 	if (touchesTrustFields(options) && !authz.trustAuthorized) {
 		throw new CacheConfigError(
@@ -330,7 +377,9 @@ export function cacheInfo(cache: db.CacheRow, baseUrl: string): object {
 	}
 
 	return {
-		substituter_endpoint: `${baseUrl}/${cache.name}/`,
+		// No trailing slash, like attic. Nix's daemon also accepts this form
+		// when trusted-substituters lists the slashed one.
+		substituter_endpoint: `${baseUrl}/${cache.name}`,
 		api_endpoint: `${baseUrl}/`,
 		public_key: publicKey,
 		is_public: cache.is_public === 1,
@@ -338,7 +387,11 @@ export function cacheInfo(cache: db.CacheRow, baseUrl: string): object {
 		priority: cache.priority,
 		compression: cache.compression,
 		upstream_cache_key_names: upstreamKeyNames,
-		retention_period: cache.retention_period,
+		// attic's RetentionPeriodConfig; its client rejects a bare number. Unset
+		// is omitted rather than "Global": nimbus has no global default.
+		...(cache.retention_period != null
+			? { retention_period: { Period: Math.min(cache.retention_period * DAY_SECS, U32_MAX) } }
+			: {}),
 		retention_max_bytes: cache.retention_max_bytes,
 		worker_capabilities: {
 			preamble_nar_info: true,

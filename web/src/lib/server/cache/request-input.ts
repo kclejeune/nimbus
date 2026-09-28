@@ -1,10 +1,13 @@
 import { isRecord, readJson, RequestBodyError } from '../request-body';
 
-// The CLI batches at this limit; cap before deduplication to bound parsing and DB work.
-export const MAX_MISSING_PATHS = 10_000;
+// Cap before deduplication to bound parsing and DB work. The stock attic
+// client sends a whole closure in one request, so this sits well above real
+// closures; the nimbus CLI batches at 10k.
+export const MAX_MISSING_PATHS = 50_000;
 
 export async function readMissingPaths(request: Request) {
-	const body = await readJson(request, 512 * 1024);
+	// ~35 bytes of JSON per hash.
+	const body = await readJson(request, 2 * 1024 * 1024);
 	if (
 		!isRecord(body) ||
 		typeof body.cache !== 'string' ||
