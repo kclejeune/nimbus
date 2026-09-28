@@ -1,8 +1,9 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
-import { eq, or, sql } from 'drizzle-orm';
+import { eq, or } from 'drizzle-orm';
 import type { RequestEvent } from '@sveltejs/kit';
 import { getDb, schema } from '$lib/server/db';
 import { base64urlDecode } from '$lib/server/attic/token';
+import { claimBootstrapAdmin } from './bootstrap';
 import { syncGroupsAndMaybeActivate } from './group-sync';
 import { refreshCachedUser } from './refresh';
 import { isActiveUser, type SessionUser, type UserRole, type UserStatus } from './types';
@@ -248,38 +249,27 @@ async function upsertAccessUser(
 	const existing = rows.find((u) => u.email === email) ?? rows[0];
 
 	if (existing) {
-		let role = (existing.role as UserRole) ?? 'member';
-		// Bootstrap edge: while no admin exists, whoever signs in is promoted so
-		// there is always someone who can manage the rest.
-		if (role === 'member' && !(await hasAdmin(env))) {
-			await db.update(schema.user).set({ role: 'admin' }).where(eq(schema.user.id, existing.id));
-			role = 'admin';
-		}
 		return {
 			id: existing.id,
 			sub: identity.sub,
 			provider: 'cf-access',
 			email: existing.email,
 			name: existing.name,
-			role,
-			status: (existing.status as UserStatus) ?? 'pending'
+			role: (existing.role as UserRole) ?? 'member',
+			status: (existing.status as UserStatus) ?? 'pending',
+			...(await claimBootstrapAdmin(env.ATTIC_DB, existing.id))
 		};
 	}
 
-	// Bootstrap: the deployment's first user (and any user while no admin
-	// exists) is promoted to admin. The very first user also becomes the
-	// protected owner and is active; everyone else waits for activation.
-	const [adminExists, anyUser] = await Promise.all([hasAdmin(env), hasAnyUser(env)]);
-	const role: UserRole = adminExists ? 'member' : 'admin';
-	const status: UserStatus = anyUser ? 'pending' : 'active';
+	// New accounts start as pending members; the bootstrap claim then makes
+	// the deployment's first user (or anyone while no admin exists) its owner.
 	await db.insert(schema.user).values({
 		id,
 		name: identity.name ?? identity.email ?? identity.sub,
 		email,
 		emailVerified: true,
-		role,
-		isOwner: !anyUser,
-		status,
+		role: 'member',
+		status: 'pending',
 		createdAt: now,
 		updatedAt: now
 	});
@@ -290,22 +280,8 @@ async function upsertAccessUser(
 		provider: 'cf-access',
 		email: identity.email,
 		name: identity.name,
-		role,
-		status
+		role: 'member',
+		status: 'pending',
+		...(await claimBootstrapAdmin(env.ATTIC_DB, id))
 	};
-}
-
-async function hasAdmin(env: Env): Promise<boolean> {
-	const db = getDb(env.ATTIC_DB);
-	const rows = await db
-		.select({ n: sql<number>`count(*)` })
-		.from(schema.user)
-		.where(eq(schema.user.role, 'admin'));
-	return (rows[0]?.n ?? 0) > 0;
-}
-
-async function hasAnyUser(env: Env): Promise<boolean> {
-	const db = getDb(env.ATTIC_DB);
-	const rows = await db.select({ n: sql<number>`count(*)` }).from(schema.user);
-	return (rows[0]?.n ?? 0) > 0;
 }

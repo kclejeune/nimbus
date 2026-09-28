@@ -7,6 +7,7 @@ import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { getRequestEvent } from '$app/server';
 import { getDb, schema } from '$lib/server/db';
 import { buildAuthProviders } from './providers';
+import { claimBootstrapAdmin } from './bootstrap';
 import { decodeJwtClaims, syncGroupsAndMaybeActivate } from './group-sync';
 
 type Env = App.Platform['env'];
@@ -54,6 +55,24 @@ export function createAuth(env: Env) {
 			cookieCache: {
 				enabled: true,
 				maxAge: 15 * 60
+			}
+		},
+		databaseHooks: {
+			session: {
+				create: {
+					// Every sign-in may claim the bootstrap admin role. Role and status
+					// are re-read per request (refresh.ts), so the cookie cache never
+					// holds the pre-promotion values.
+					after: async (session) => {
+						try {
+							if (await claimBootstrapAdmin(env.ATTIC_DB, session.userId)) {
+								console.log(`bootstrap: promoted ${session.userId} to admin and owner`);
+							}
+						} catch (e) {
+							console.warn(`bootstrap admin claim failed: ${e}`);
+						}
+					}
+				}
 			}
 		},
 		hooks: {

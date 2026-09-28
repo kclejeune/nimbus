@@ -69,7 +69,17 @@ export function testDatabase({ admin = false }: { admin?: boolean } = {}) {
 			}
 		}
 	};
-	return { sqlite, db: binding as unknown as D1Database, totalChanges };
+	/** Admin-table user row (requires `admin`). */
+	const seedUser = (id: string, status = 'active', role = 'member') => {
+		const now = Math.floor(Date.now() / 1000);
+		sqlite
+			.prepare(
+				`INSERT INTO user (id, name, email, emailVerified, role, is_owner, status, createdAt, updatedAt)
+				 VALUES (?, ?, ?, 0, ?, 0, ?, ?, ?)`
+			)
+			.run(id, id, `${id}@example.test`, role, status, now, now);
+	};
+	return { sqlite, db: binding as unknown as D1Database, totalChanges, seedUser };
 }
 
 /** Fault `batch` the way a committed transaction with a lost response looks

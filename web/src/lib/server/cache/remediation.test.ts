@@ -73,15 +73,6 @@ function call(
 
 const now = () => Math.floor(Date.now() / 1000);
 
-function seedUser(id: string, status = 'active', role = 'member') {
-	fixture.sqlite
-		.prepare(
-			`INSERT INTO user (id, name, email, emailVerified, role, is_owner, status, createdAt, updatedAt)
-			 VALUES (?, ?, ?, 0, ?, 0, ?, ?, ?)`
-		)
-		.run(id, id, `${id}@example.test`, role, status, now(), now());
-}
-
 function seedToken(jti: string, userId: string, expiresAt: number | null = now() + 3600) {
 	fixture.sqlite
 		.prepare(
@@ -115,7 +106,7 @@ afterEach(() => {
 
 describe('P0: user deletion preserves token revocation', () => {
 	it('rejects a deleted user’s token on private read, upload, configure, and GC', async () => {
-		seedUser('alice');
+		fixture.seedUser('alice');
 		const jti = freshJti('deleted');
 		seedToken(jti, 'alice');
 		const token = await mint({ victim: { r: 1, w: 1, cr: 1 } }, { jti, gc: true });
@@ -142,7 +133,7 @@ describe('P0: user deletion preserves token revocation', () => {
 	});
 
 	it('keeps a deactivated user’s token disabled through deletion', async () => {
-		seedUser('bob', 'pending');
+		fixture.seedUser('bob', 'pending');
 		const jti = freshJti('deactivated');
 		seedToken(jti, 'bob');
 		expect(await isTokenDisabled(fixture.db, jti)).toBe(true);
@@ -158,7 +149,7 @@ describe('P0: user deletion preserves token revocation', () => {
 	});
 
 	it('prunes expired tombstones and keeps unexpired and timeless ones', async () => {
-		seedUser('carol');
+		fixture.seedUser('carol');
 		seedToken('expired', 'carol', now() - 86_400);
 		seedToken('live', 'carol', now() + 86_400);
 		seedToken('timeless', 'carol', null);
@@ -173,8 +164,8 @@ describe('P0: user deletion preserves token revocation', () => {
 	});
 
 	it('deletes a user with audit history under FK enforcement, keeping the trail', async () => {
-		seedUser('admin', 'active', 'admin');
-		seedUser('dave');
+		fixture.seedUser('admin', 'active', 'admin');
+		fixture.seedUser('dave');
 		seedToken('dave-token', 'dave');
 		fixture.sqlite
 			.prepare(
@@ -199,7 +190,7 @@ describe('P0: user deletion preserves token revocation', () => {
 	});
 
 	it('leaves tokens intact and writes no tombstone when the batch fails', async () => {
-		seedUser('dave');
+		fixture.seedUser('dave');
 		seedToken('dave-token', 'dave');
 		// Fail the final DELETE; the whole batch must roll back.
 		fixture.sqlite.exec(
@@ -534,7 +525,7 @@ describe('P2: authorization freshness window', () => {
 
 	it('stops a revoked token on reads within the memo TTL, and on mutations at once', async () => {
 		vi.useFakeTimers({ toFake: ['Date'] });
-		seedUser('erin');
+		fixture.seedUser('erin');
 		const jti = freshJti('revoke');
 		seedToken(jti, 'erin');
 		const token = await mint({ victim: { r: 1, cr: 1 } }, { jti });

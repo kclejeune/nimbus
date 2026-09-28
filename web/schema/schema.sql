@@ -228,12 +228,6 @@ CREATE TABLE IF NOT EXISTS device_auth (
 -- expiry sweep needs one, though — this table takes unauthenticated inserts.
 CREATE INDEX IF NOT EXISTS idx_device_auth_expires ON device_auth(expires_at);
 
--- Migrations tracking table
-CREATE TABLE IF NOT EXISTS _migrations (
-    id TEXT PRIMARY KEY,
-    applied_at TEXT NOT NULL
-);
-
 -- Repairs must survive a lost response or a failed purge. No foreign key:
 -- GC may remove the chunk before its old R2 representation is retired.
 CREATE TABLE IF NOT EXISTS chunk_repair (

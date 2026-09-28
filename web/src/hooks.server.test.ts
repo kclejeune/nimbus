@@ -32,7 +32,10 @@ import { handle } from './hooks.server';
 import { requireAdmin } from '$lib/server/auth/guard';
 import { mintSessionToken } from '$lib/server/auth/cf-access';
 
-const binding = { prepare: () => ({ bind: () => ({ first: mocks.primary }) }) };
+// Unbound first() is the bootstrap claim's admin-exists probe: an admin exists.
+const binding = {
+	prepare: () => ({ first: async () => ({ 1: 1 }), bind: () => ({ first: mocks.primary }) })
+};
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.getSession.mockResolvedValue(null);
@@ -127,7 +130,7 @@ function fakeDb(row: { id: string; email: string; role: string; status: string }
 		b.then = (ok: (v: unknown) => unknown) => Promise.resolve(result).then(ok);
 		return b;
 	};
-	return { select: (cols?: unknown) => chain(cols ? [{ n: 1 }] : [row]) };
+	return { select: () => chain([row]) };
 }
 it('trusts the primary row on a first visit instead of re-reading a lagging replica', async () => {
 	mocks.getDb.mockReturnValue(

@@ -5,10 +5,11 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
-		"dev:worker": "wrangler dev --host localhost:8788 $(test -f wrangler.local.jsonc && echo --config=wrangler.local.jsonc)",
+		"dev:worker": "wrangler dev --port 8788 --host localhost:8788 $(test -f wrangler.local.jsonc && echo --config=wrangler.local.jsonc)",
 		"build": "wireit",
 		"preview": "vite preview",
 		"migrate": "wireit",
+		"migrate:local": "node scripts/migrate.mjs --local",
 		"deploy": "wireit",
 		"deploy:preview": "wireit",
 		"deploy:worker": "wireit",
@@ -40,7 +41,7 @@
 			"command": "node scripts/materialize-config.mjs"
 		},
 		"migrate": {
-			"command": "wrangler d1 migrations apply ATTIC_DB --remote $(test -f wrangler.local.jsonc && echo --config=wrangler.local.jsonc)",
+			"command": "node scripts/migrate.mjs",
 			"dependencies": [
 				"config"
 			]
