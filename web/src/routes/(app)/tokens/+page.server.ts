@@ -2,31 +2,50 @@ import { error, fail } from '@sveltejs/kit';
 import {
 	auditTokenIssue,
 	boundTokenScope,
+	listAllTokens,
 	listUserTokens,
+	ALL_TOKENS_PAGE_SIZE,
 	mintAndStore,
 	TOKEN_NAME_MAX_CHARS,
 	revokeUserToken,
 	parseTokenForm
 } from '$lib/server/tokens';
 import { listCacheNames } from '$lib/server/db/queries';
-import { effectiveAccessOf, tokenMinter } from '$lib/server/auth/guard';
+import { effectiveAccessOf, requireAdmin, tokenMinter } from '$lib/server/auth/guard';
+import { parsePage } from '$lib/pagination';
 import { tokenScopeOptions } from '$lib/server/auth/permissions';
 import type { PageServerLoad, Actions } from './$types';
 
-export const load: PageServerLoad = async ({ platform, locals }) => {
+export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	if (!locals.user) throw error(401, 'Not signed in');
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
-	const [tokens, cacheNames, access] = await Promise.all([
-		listUserTokens(db, locals.user.id),
+	// ?view=all is the admin-only everyone view; for members the parameter is
+	// ignored and they get their own tokens, same as before.
+	const isAdmin = locals.user.role === 'admin';
+	const viewAll = isAdmin && url.searchParams.get('view') === 'all';
+	const page = parsePage(url.searchParams.get('page'));
+
+	const [own, all, cacheNames, access] = await Promise.all([
+		viewAll ? null : listUserTokens(db, locals.user.id),
+		viewAll
+			? listAllTokens(db, {
+					limit: ALL_TOKENS_PAGE_SIZE,
+					offset: (page - 1) * ALL_TOKENS_PAGE_SIZE
+				})
+			: null,
 		listCacheNames(db),
 		effectiveAccessOf(locals, db)
 	]);
 
 	return {
 		scopeOptions: tokenScopeOptions(access, cacheNames),
-		tokens
+		isAdmin,
+		view: viewAll ? ('all' as const) : ('mine' as const),
+		tokens: all ? all.tokens : own!,
+		page,
+		hasMore: all?.hasMore ?? false
 	};
 };
 
@@ -67,8 +86,14 @@ export const actions: Actions = {
 		const db = platform?.env.ATTIC_DB;
 		if (!db) throw error(500, 'Database binding unavailable');
 
-		const id = String((await request.formData()).get('id') ?? '');
-		await revokeUserToken(db, id, locals.user.id, locals.user.id);
+		const form = await request.formData();
+		const id = String(form.get('id') ?? '');
+		// The everyone view posts the owner; revoking someone else's token is
+		// admin-only, the same rule as /users/[id]'s revokeToken. The owner
+		// scope in revokeUserToken keeps a mismatched pair a no-op.
+		const owner = String(form.get('owner') ?? '') || locals.user.id;
+		if (owner !== locals.user.id) requireAdmin(locals);
+		await revokeUserToken(db, id, owner, locals.user.id);
 
 		return { revoked: true };
 	}

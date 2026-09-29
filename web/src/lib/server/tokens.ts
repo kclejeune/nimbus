@@ -2,6 +2,7 @@ import type { D1Database } from '@cloudflare/workers-types';
 import { mintAtticToken, type CacheAccess, type CachePermission } from './attic-token';
 import { parseTokenBits, scopeDenial, type EffectiveAccess } from './auth/permissions';
 import { writeAudit } from './audit';
+import { isActiveUser } from './auth/types';
 import { assertMaxLength } from './request-body';
 
 export const TOKEN_NAME_MAX_CHARS = 100;
@@ -70,6 +71,66 @@ export async function listUserTokens(db: D1Database, userId: string): Promise<Pr
 				? ('expired' as const)
 				: ('active' as const)
 	}));
+}
+
+/** Rows shown per page of the admin all-tokens view. */
+export const ALL_TOKENS_PAGE_SIZE = 50;
+
+export interface OwnedToken extends Omit<PresentedToken, 'status'> {
+	/** 'suspended': valid but inert while the owner is deactivated (mirrors
+	 *  isTokenDisabled in cache/db.ts). */
+	status: PresentedToken['status'] | 'suspended';
+	owner: { id: string; name: string; email: string };
+}
+
+/** Every user's tokens, newest first, one page at a time (admin view). Fetches
+ *  one extra row to report `hasMore` without a COUNT scan. */
+export async function listAllTokens(
+	db: D1Database,
+	{ limit = ALL_TOKENS_PAGE_SIZE, offset = 0 }: { limit?: number; offset?: number } = {}
+): Promise<{ tokens: OwnedToken[]; hasMore: boolean }> {
+	const { results } = await db
+		.prepare(
+			`SELECT t.id, t.name, t.permissions, t.expires_at, t.revoked_at, t.created_at,
+			        u.id AS owner_id, u.name AS owner_name, u.email AS owner_email,
+			        u.role AS owner_role, u.status AS owner_status
+			 FROM api_token t JOIN user u ON u.id = t.user_id
+			 ORDER BY t.created_at DESC, t.id
+			 LIMIT ?1 OFFSET ?2`
+		)
+		.bind(limit + 1, offset)
+		.all<{
+			id: string;
+			name: string;
+			permissions: string;
+			expires_at: number | null;
+			revoked_at: number | null;
+			created_at: number;
+			owner_id: string;
+			owner_name: string;
+			owner_email: string;
+			owner_role: string;
+			owner_status: string;
+		}>();
+	const now = Math.floor(Date.now() / 1000);
+	const tokens = results.slice(0, limit).map((t) => {
+		const base: PresentedToken['status'] = t.revoked_at
+			? 'revoked'
+			: t.expires_at && t.expires_at < now
+				? 'expired'
+				: 'active';
+		const ownerActive = isActiveUser({ role: t.owner_role, status: t.owner_status });
+		return {
+			id: t.id,
+			name: t.name,
+			scope: t.permissions,
+			createdAt: t.created_at,
+			expiresAt: t.expires_at,
+			status: base === 'active' && !ownerActive ? ('suspended' as const) : base,
+			owner: { id: t.owner_id, name: t.owner_name, email: t.owner_email }
+		};
+	});
+	return { tokens, hasMore: results.length > limit };
 }
 
 /** Revoke a token, scoped to its owner (self-service and the admin view on

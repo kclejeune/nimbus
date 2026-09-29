@@ -39,10 +39,51 @@
 		</div>
 	{/if}
 
+	{#if data.isAdmin}
+		<div
+			role="tablist"
+			aria-label="Whose tokens"
+			class="mb-4 inline-flex rounded-lg border bg-subtle p-0.5 text-sm"
+		>
+			{#each [{ value: 'mine', label: 'Yours', href: '?' }, { value: 'all', label: 'Everyone', href: '?view=all' }] as opt (opt.value)}
+				<a
+					role="tab"
+					aria-selected={data.view === opt.value}
+					href={opt.href}
+					data-sveltekit-noscroll
+					class="rounded-md px-3 py-1 font-medium transition-colors {data.view === opt.value
+						? 'bg-background text-foreground shadow-(--shadow-sheet)'
+						: 'text-muted-foreground hover:text-foreground'}">{opt.label}</a
+				>
+			{/each}
+		</div>
+	{/if}
+
 	<TokenTable
 		tokens={data.tokens}
-		emptyText="Create a token to push from CI or run scripts against the cache API."
+		emptyText={data.view === 'all'
+			? 'Nobody has created a token yet.'
+			: 'Create a token to push from CI or run scripts against the cache API.'}
 	/>
+
+	{#if data.view === 'all' && (data.page > 1 || data.hasMore)}
+		<div class="mt-3 flex items-center justify-between gap-3">
+			<p class="text-xs text-muted-foreground tabular-nums">Page {data.page}, newest first</p>
+			<div class="flex items-center gap-2">
+				{#if data.page > 1}
+					<Button variant="outline" size="sm" href="?view=all&page={data.page - 1}">Previous</Button
+					>
+				{:else}
+					<Button variant="outline" size="sm" disabled>Previous</Button>
+				{/if}
+				{#if data.hasMore}
+					<Button variant="outline" size="sm" href="?view=all&page={data.page + 1}">Next</Button>
+				{:else}
+					<Button variant="outline" size="sm" disabled>Next</Button>
+				{/if}
+			</div>
+		</div>
+	{/if}
 </Page>
 
 <Sheet.Root bind:open={sheetOpen}>

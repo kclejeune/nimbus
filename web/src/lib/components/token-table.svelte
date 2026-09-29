@@ -21,11 +21,16 @@
 			expiresAt: number | null;
 			/** 'suspended': valid but inert while the owner is deactivated. */
 			status: 'active' | 'expired' | 'revoked' | 'suspended';
+			/** Present in the admin everyone view: renders the Owner column and
+			 *  posts the owner with a revoke. */
+			owner?: { id: string; name: string; email: string };
 		}[];
 		/** Form action revoking a token by hidden `id` field. */
 		revokeAction?: string;
 		emptyText?: string;
 	} = $props();
+
+	const showOwner = $derived(tokens.some((t) => t.owner));
 
 	/** A token's scope JSON ({pattern: bits}) as {cache, perms} rows. */
 	function scopeEntries(scopeJson: string): { cache: string; perms: string }[] {
@@ -46,6 +51,7 @@
 			<thead>
 				<tr>
 					<th>Token</th>
+					{#if showOwner}<th>Owner</th>{/if}
 					<th>Scope</th>
 					<th>Permissions</th>
 					<th>Created</th>
@@ -60,6 +66,15 @@
 					{@const inert = t.status === 'revoked' || t.status === 'expired'}
 					<tr class={inert ? 'text-muted-foreground' : ''}>
 						<td class="font-medium whitespace-nowrap">{t.name}</td>
+						{#if showOwner}
+							<td class="whitespace-nowrap">
+								{#if t.owner}
+									<a href="/users/{t.owner.id}" class="row-link font-normal" title={t.owner.email}
+										>{t.owner.name || t.owner.email}</a
+									>
+								{/if}
+							</td>
+						{/if}
 						<td>
 							<div class="flex flex-wrap gap-1">
 								{#each entries as entry (entry.cache)}
@@ -102,6 +117,7 @@
 							{#if t.status === 'active' || t.status === 'suspended'}
 								<form method="POST" action={revokeAction} use:enhance={toastErrors()}>
 									<input type="hidden" name="id" value={t.id} />
+									{#if t.owner}<input type="hidden" name="owner" value={t.owner.id} />{/if}
 									<Button
 										type="submit"
 										variant="ghost"
