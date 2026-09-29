@@ -1,10 +1,10 @@
 import { error } from '@sveltejs/kit';
 import { requireAdmin } from '$lib/server/auth/guard';
 import { readSession } from '$lib/server/cache/db';
+import { IN_IDS, rowsByIds } from '$lib/server/cache/cache-page';
 import { parseLimit, parsePage } from '$lib/pagination';
 import {
 	auditWhere,
-	groupActions,
 	hasFilters,
 	parseAuditFilters,
 	targetRef,
@@ -25,10 +25,6 @@ interface AuditRow {
 	user_email: string | null;
 }
 
-/** Bounds on the filter option lists (distinct scans over audit_log). */
-const MAX_ACTIONS = 100;
-const MAX_ACTORS = 200;
-
 export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	requireAdmin(locals);
 	const db = platform?.env.ATTIC_DB;
@@ -43,7 +39,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 
 	// One row past the page detects "next" without a second scan per request;
 	// the total (under the same filters) drives the "X–Y of N" footer.
-	const [{ results }, total, actions, actors] = await Promise.all([
+	const [{ results }, total] = await Promise.all([
 		read
 			.prepare(
 				`SELECT a.id, a.action, a.target, a.detail, a.created_at, a.user_id,
@@ -59,20 +55,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 		read
 			.prepare(`SELECT COUNT(*) AS n FROM audit_log a ${where.sql}`)
 			.bind(...where.binds)
-			.first<{ n: number }>(),
-		// Filter options come from what the log actually holds, so the list
-		// stays right as new action names appear.
-		read
-			.prepare(`SELECT DISTINCT action FROM audit_log ORDER BY action LIMIT ${MAX_ACTIONS}`)
-			.all<{ action: string }>(),
-		read
-			.prepare(
-				`SELECT u.id, u.name, u.email
-				 FROM (SELECT DISTINCT user_id FROM audit_log WHERE user_id IS NOT NULL) a
-				 JOIN user u ON u.id = a.user_id
-				 ORDER BY u.name LIMIT ${MAX_ACTORS}`
-			)
-			.all<{ id: string; name: string | null; email: string | null }>()
+			.first<{ n: number }>()
 	]);
 
 	const rows = results.slice(0, limit);
@@ -89,33 +72,27 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 		const ref = targetRef(r.action, r.target);
 		if (ref) keys[ref.kind].add(ref.key);
 	}
-	const lookup = async <T>(kind: TargetKind, sql: (inList: string) => string): Promise<T[]> => {
-		const ids = [...keys[kind]];
-		if (ids.length === 0) return [];
-		const { results } = await read
-			.prepare(sql(ids.map(() => '?').join(', ')))
-			.bind(...ids)
-			.all<T>();
-		return results;
-	};
 	const [liveCaches, liveUsers, liveGroups, tokenOwners] = await Promise.all([
-		lookup<{ name: string }>(
-			'cache',
-			(ins) => `SELECT name FROM cache WHERE deleted_at IS NULL AND name IN (${ins})`
+		rowsByIds<{ name: string }>(
+			read,
+			`SELECT name FROM cache WHERE deleted_at IS NULL AND name ${IN_IDS}`,
+			[...keys.cache]
 		),
-		lookup<{ id: string; name: string | null }>(
-			'user',
-			(ins) => `SELECT id, name FROM user WHERE id IN (${ins})`
+		rowsByIds<{ id: string; name: string | null }>(
+			read,
+			`SELECT id, name FROM user WHERE id ${IN_IDS}`,
+			[...keys.user]
 		),
-		lookup<{ id: string; name: string }>(
-			'group',
-			(ins) => `SELECT id, name FROM groups WHERE id IN (${ins})`
+		rowsByIds<{ id: string; name: string }>(
+			read,
+			`SELECT id, name FROM groups WHERE id ${IN_IDS}`,
+			[...keys.group]
 		),
-		lookup<{ id: string; user_id: string; name: string; owner: string | null }>(
-			'token',
-			(ins) =>
-				`SELECT t.id, t.user_id, t.name, u.name AS owner FROM api_token t
-				 JOIN user u ON u.id = t.user_id WHERE t.id IN (${ins})`
+		rowsByIds<{ id: string; user_id: string; name: string; owner: string | null }>(
+			read,
+			`SELECT t.id, t.user_id, t.name, u.name AS owner FROM api_token t
+			 JOIN user u ON u.id = t.user_id WHERE t.id ${IN_IDS}`,
+			[...keys.token]
 		)
 	]);
 	const cacheSet = new Set(liveCaches.map((c) => c.name));
@@ -162,8 +139,6 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 		hasMore: results.length > limit,
 		filters,
 		filtered: hasFilters(filters),
-		actionGroups: groupActions(actions.results.map((a) => a.action)),
-		actors: actors.results.map((u) => ({ id: u.id, label: u.name || u.email || u.id })),
 		entries: rows.map((r) => ({
 			id: r.id,
 			action: r.action,
