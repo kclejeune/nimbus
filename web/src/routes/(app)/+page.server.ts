@@ -90,10 +90,10 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 						 FROM object o
 						 JOIN cache c ON c.id = o.cache_id
 						 JOIN nar n ON n.id = o.nar_id
-						 WHERE o.cache_id IN (${ids.map(() => '?').join(', ')})
+						 WHERE o.cache_id IN (SELECT value FROM json_each(?))
 						 ORDER BY o.created_at DESC LIMIT 6`
 					)
-					.bind(...ids)
+					.bind(JSON.stringify(ids))
 					.all<{
 						store_path: string;
 						store_path_hash: string;
@@ -107,18 +107,17 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 			: (() => {
 					// Same accounting as /caches: a NAR shared by several paths in one
 					// cache counts once. Only caches with a budget are scanned.
-					const inList = budgeted.map(() => '?').join(', ');
 					return read
 						.prepare(
 							`SELECT o.cache_id, COALESCE(SUM(sz.bytes), 0) AS bytes
 							 FROM (SELECT DISTINCT cache_id, nar_id FROM object
-							       WHERE cache_id IN (${inList})) o
+							       WHERE cache_id IN (SELECT value FROM json_each(?))) o
 							 JOIN (SELECT cr.nar_id, SUM(ch.file_size) AS bytes FROM chunkref cr
 							       JOIN chunk ch ON ch.id = cr.chunk_id GROUP BY cr.nar_id) sz
 							   ON sz.nar_id = o.nar_id
 							 GROUP BY o.cache_id`
 						)
-						.bind(...budgeted.map((c) => c.id))
+						.bind(JSON.stringify(budgeted.map((c) => c.id)))
 						.all<{ cache_id: number; bytes: number }>()
 						.then((r) => new Map(r.results.map((x) => [x.cache_id, x.bytes])));
 				})(),
@@ -129,9 +128,9 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 			: read
 					.prepare(
 						`SELECT EXISTS (SELECT 1 FROM object
-						 WHERE cache_id IN (${writable.map(() => '?').join(', ')}) AND created_by = ?) AS pushed`
+						 WHERE cache_id IN (SELECT value FROM json_each(?)) AND created_by = ?) AS pushed`
 					)
-					.bind(...writable.map((c) => c.id), user.id)
+					.bind(JSON.stringify(writable.map((c) => c.id)), user.id)
 					.first<{ pushed: number }>()
 					.then((r) => Boolean(r?.pushed))
 	]);

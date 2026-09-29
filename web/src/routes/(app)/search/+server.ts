@@ -43,7 +43,7 @@ export const GET: RequestHandler = async ({ url, platform, locals }) => {
 					.prepare(
 						`SELECT o.store_path, o.store_path_hash, c.name AS cache_name
 						 FROM object o JOIN cache c ON c.id = o.cache_id
-						 WHERE o.cache_id IN (${inScope.map(() => '?').join(', ')})
+						 WHERE o.cache_id IN (SELECT value FROM json_each(?))
 						   AND (substr(o.store_path, instr(o.store_path, o.store_path_hash) + 33)
 						          LIKE ? ESCAPE '\\'
 						        OR o.store_path_hash LIKE ? ESCAPE '\\')
@@ -51,7 +51,7 @@ export const GET: RequestHandler = async ({ url, platform, locals }) => {
 					)
 					// Match the name after `<hash>-`, not inside the random hash —
 					// except as a prefix, for someone pasting a hash.
-					.bind(...inScope.map((c) => c.id), like, hashPrefix)
+					.bind(JSON.stringify(inScope.map((c) => c.id)), like, hashPrefix)
 					.all<{ store_path: string; store_path_hash: string; cache_name: string }>()
 					.then((r) => r.results),
 		isAdmin

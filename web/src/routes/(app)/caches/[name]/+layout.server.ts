@@ -1,5 +1,5 @@
 import { error } from '@sveltejs/kit';
-import { canOnCache, canSeeCache } from '$lib/server/auth/permissions';
+import { canBrowseCache, canOnCache } from '$lib/server/auth/permissions';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
 import { readSession } from '$lib/server/cache/db';
 import { getCache } from '$lib/server/cache/cache-page';
@@ -16,7 +16,9 @@ export const load: LayoutServerLoad = async ({ platform, params, locals }) => {
 		getCache(readSession(db), params.name),
 		effectiveAccessOf(locals, db)
 	]);
-	if (!canSeeCache(access, params.name)) throw error(403, 'Permission denied');
+	if (!canBrowseCache(access, { name: cache.name, isPublic: cache.is_public !== 0 })) {
+		throw error(403, 'Permission denied');
+	}
 
 	const canConfigure = canOnCache(access, 'cr', params.name);
 	const canDestroy = canOnCache(access, 'cd', params.name);
