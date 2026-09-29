@@ -199,11 +199,15 @@ hash must not let another cache claim its bytes.
 
 ### Monitoring
 
-The Usage page's traffic, edge-cache, and write charts query Workers
-Analytics Engine (dataset `nimbus_cache_metrics`). Set `vars.CF_ACCOUNT_ID`
-and a `CF_ANALYTICS_TOKEN` secret (API token with **Account Analytics:
-Read**). Without them those sections are hidden, but metrics are still
-recorded.
+The Usage page's Performance view (request rates, error rates, p50/p95/p99
+latency by route and layer, edge cache hit rate, D1 replica vs. primary
+statements and serving regions, colos, writes and rate-limit refusals)
+queries Workers Analytics Engine (dataset `nimbus_cache_metrics`). Set
+`vars.CF_ACCOUNT_ID` and a `CF_ANALYTICS_TOKEN` secret (API token with
+**Account Analytics: Read**). Without them the view explains how to connect
+it, but metrics are still recorded. For local development,
+`OBSERVABILITY_FIXTURES=1` in `web/.dev.vars` serves generated sample data
+instead (ignored in production builds).
 
 Read and guard metrics are sampled 1-in-`CACHE_METRICS_SAMPLE` (100) with
 weights, traces at 25%; automatic invocation logs are off and application

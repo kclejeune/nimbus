@@ -57,6 +57,20 @@
 	--sidebar-ring: oklch(0.52 0.155 264);
 	--shadow-panel: 0 1px 2px oklch(0.3 0.03 264 / 0.05);
 	--shadow-sheet: 0 1px 3px oklch(0.3 0.03 264 / 0.06), 0 0 0 1px oklch(0.3 0.03 264 / 0.06);
+	/* Data-viz roles, validated with the dataviz skill's checker against the
+	   card surface (#fff): categorical slots in fixed order (identity), and a
+	   one-hue ordinal ramp for ordered series (p50 < p95 < p99). Status
+	   colors stay --success / --warning / --destructive and never stand in
+	   for a series. */
+	--viz-1: #3963c1;
+	--viz-2: #eb6834;
+	--viz-3: #1baf7a;
+	--viz-4: #eda100;
+	--viz-5: #e87ba4;
+	--viz-6: #4a3aa7;
+	--viz-ord-1: #86b6ef;
+	--viz-ord-2: #2a78d6;
+	--viz-ord-3: #104281;
 }
 
 /* Same values as the @media block below — CSS has no way to share a declaration
@@ -99,6 +113,15 @@
 	--sidebar-ring: oklch(0.7 0.13 262);
 	--shadow-panel: 0 1px 2px oklch(0 0 0 / 0.2);
 	--shadow-sheet: 0 0 0 1px oklch(1 0 0 / 0.06), 0 8px 24px oklch(0 0 0 / 0.25);
+	--viz-1: #5c8ae1;
+	--viz-2: #d95926;
+	--viz-3: #199e70;
+	--viz-4: #c98500;
+	--viz-5: #d55181;
+	--viz-6: #9085e9;
+	--viz-ord-1: #1c5cab;
+	--viz-ord-2: #3987e5;
+	--viz-ord-3: #9ec5f4;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -140,6 +163,15 @@
 		--sidebar-ring: oklch(0.7 0.13 262);
 		--shadow-panel: 0 1px 2px oklch(0 0 0 / 0.2);
 		--shadow-sheet: 0 0 0 1px oklch(1 0 0 / 0.06), 0 8px 24px oklch(0 0 0 / 0.25);
+		--viz-1: #5c8ae1;
+		--viz-2: #d95926;
+		--viz-3: #199e70;
+		--viz-4: #c98500;
+		--viz-5: #d55181;
+		--viz-6: #9085e9;
+		--viz-ord-1: #1c5cab;
+		--viz-ord-2: #3987e5;
+		--viz-ord-3: #9ec5f4;
 	}
 }
 

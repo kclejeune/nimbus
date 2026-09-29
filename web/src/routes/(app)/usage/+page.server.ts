@@ -3,7 +3,8 @@ import { error } from '@sveltejs/kit';
 import { readSession } from '$lib/server/cache/db';
 import { instanceStatsSnapshot, type InstanceStats } from '$lib/server/cache/stats';
 import { readGcLastRun } from '$lib/server/cache/gc';
-import { loadTraffic } from '$lib/server/traffic';
+import { loadObservability } from '$lib/server/observability/load';
+import { parseWindow, WINDOWS } from '$lib/server/observability/query';
 import { ingestBaseline, ingestSeries, type Granularity } from '$lib/server/cache/ingest';
 import type { PageServerLoad } from './$types';
 
@@ -66,7 +67,7 @@ function rangeStart(range: RangeKey, nowMs: number): number | null {
 	}
 }
 
-export const load: PageServerLoad = async ({ platform, url }) => {
+async function loadStorage({ platform, url }: Parameters<PageServerLoad>[0]) {
 	const db = platform?.env.ATTIC_DB;
 	const granularity = parseGranularity(url.searchParams.get('granularity'));
 	const range = parseRange(url.searchParams.get('range'));
@@ -78,15 +79,11 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 			buckets: sampleBuckets(granularity),
 			granularity,
 			range,
-			traffic: null,
 			stats: sampleStats(),
 			statsAt: null,
 			globalMaxBytes: null
 		};
 	}
-
-	// Config-gated (returns null when unconfigured); runs alongside the D1 work.
-	const trafficPromise = platform?.env ? loadTraffic(platform.env) : Promise.resolve(null);
 
 	// Read-only aggregation page: the heavy scans stay off the write primary.
 	const read = readSession(db);
@@ -117,7 +114,6 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 			buckets: [],
 			granularity,
 			range,
-			traffic: await trafficPromise,
 			stats,
 			statsAt,
 			globalMaxBytes
@@ -154,11 +150,32 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 		buckets,
 		granularity,
 		range,
-		traffic: await trafficPromise,
 		stats,
 		statsAt,
 		globalMaxBytes
 	};
+}
+
+export type View = 'performance' | 'storage';
+
+// Two views with different time horizons, so each keeps its own controls:
+// performance windows are hours to a month of Analytics Engine data; storage
+// growth spans the instance's whole life in D1. Only the viewed one loads.
+export const load: PageServerLoad = async (event) => {
+	const view: View = event.url.searchParams.get('view') === 'storage' ? 'storage' : 'performance';
+	const windowKey = parseWindow(event.url.searchParams.get('window'));
+	const windows = Object.values(WINDOWS).map((w) => ({ key: w.key, label: w.label }));
+	if (view === 'performance') {
+		const env = event.platform?.env;
+		if (!env) throw error(500, 'Platform bindings unavailable');
+		return {
+			view,
+			window: windowKey,
+			windows,
+			observability: await loadObservability(env, windowKey)
+		};
+	}
+	return { view, window: windowKey, windows, storage: await loadStorage(event) };
 };
 
 function sampleStats(): InstanceStats {

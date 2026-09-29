@@ -60,3 +60,38 @@ export function formatRelativeTime(iso: string): string {
 	const d = Math.floor(s / 86400);
 	return d === 1 ? 'yesterday' : `${d} days ago`;
 }
+
+/** Latency: sub-10 ms keeps a decimal, seconds past 1,000 ms. */
+export function formatMs(ms: number): string {
+	if (!Number.isFinite(ms) || ms <= 0) return '0 ms';
+	if (ms < 10) return `${ms.toFixed(1)} ms`;
+	if (ms < 1000) return `${Math.round(ms)} ms`;
+	return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`;
+}
+
+/** Compact count: 950, 12.9K, 4.2M. */
+export function formatCompact(n: number): string {
+	if (!Number.isFinite(n)) return '0';
+	const abs = Math.abs(n);
+	if (abs < 1000) return String(Math.round(n));
+	const [div, unit] = abs < 1e6 ? [1e3, 'K'] : abs < 1e9 ? [1e6, 'M'] : [1e9, 'B'];
+	const v = n / div;
+	return `${Math.abs(v) < 100 ? v.toFixed(1) : Math.round(v)}${unit}`;
+}
+
+/** A rate per second, scaled to /min or /h when it's too small to read. */
+export function formatRate(perSecond: number): string {
+	if (!Number.isFinite(perSecond) || perSecond <= 0) return '0/s';
+	if (perSecond >= 1)
+		return `${perSecond < 100 ? perSecond.toFixed(1) : formatCompact(perSecond)}/s`;
+	if (perSecond * 60 >= 1) return `${(perSecond * 60).toFixed(1)}/min`;
+	return `${(perSecond * 3600).toFixed(1)}/h`;
+}
+
+/** A 0–1 fraction as a percentage; small nonzero shares keep precision. */
+export function formatPct(fraction: number | null | undefined, digits?: number): string {
+	if (fraction == null || !Number.isFinite(fraction)) return '—';
+	const p = fraction * 100;
+	const d = digits ?? (p !== 0 && Math.abs(p) < 1 ? 2 : p < 10 ? 1 : 0);
+	return `${p.toFixed(d)}%`;
+}

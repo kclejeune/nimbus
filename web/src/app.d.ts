@@ -96,9 +96,13 @@ declare global {
 				CACHE_METRICS_SAMPLE?: string;
 				/** Account id + API token (Account Analytics read) for querying
 				 * CACHE_METRICS from the dashboard via the Analytics Engine SQL
-				 * API; the usage page's traffic section hides when either is unset. */
+				 * API; the usage page's performance views need both. */
 				CF_ACCOUNT_ID?: string;
 				CF_ANALYTICS_TOKEN?: string;
+				/** Dev only: '1' serves generated sample metrics on the usage page
+				 * when the Analytics Engine credentials above are unset. Ignored
+				 * in production builds. */
+				OBSERVABILITY_FIXTURES?: string;
 			};
 			ctx: ExecutionContext;
 		}
