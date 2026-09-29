@@ -5,7 +5,7 @@ import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { readSession } from '$lib/server/cache/db';
 import { instanceStatsSnapshot } from '$lib/server/cache/stats';
-import { canBrowseCache } from '$lib/server/auth/permissions';
+import { canBrowseCache, canOnCache } from '$lib/server/auth/permissions';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
 import { listUserTokens } from '$lib/server/tokens';
 import type { PageServerLoad } from './$types';
@@ -42,7 +42,6 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 		{ results: caches },
 		access,
 		tokens,
-		progress,
 		{ pendingUsers }
 	] = await Promise.all([
 		read
@@ -63,14 +62,6 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 			.all<{ id: number; name: string; is_public: number; retention_max_bytes: number | null }>(),
 		effectiveAccessOf(locals, db),
 		listUserTokens(db, user.id),
-		// Live (not the GC snapshot) so getting-started steps tick off right away.
-		read
-			.prepare(
-				`SELECT EXISTS (SELECT 1 FROM cache WHERE deleted_at IS NULL) AS has_cache,
-				        EXISTS (SELECT 1 FROM object o JOIN cache c ON c.id = o.cache_id
-				                WHERE c.deleted_at IS NULL) AS has_push`
-			)
-			.first<{ has_cache: number; has_push: number }>(),
 		parent()
 	]);
 
@@ -81,11 +72,16 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 		canBrowseCache(access, { name: c.name, isPublic: c.is_public !== 0 })
 	);
 	const ids = inScope.map((c) => c.id);
-	const budgeted = inScope.filter((c) => c.retention_max_bytes);
+	// Budget warnings only for caches whose retention this viewer can change —
+	// a reader of a public cache can't act on them.
+	const budgeted = inScope.filter((c) => c.retention_max_bytes && canOnCache(access, 'cr', c.name));
+	// Getting started tracks the viewer's own progress, not the instance's: a
+	// new member on a busy instance still needs to sign in and push themselves.
+	const writable = inScope.filter((c) => canOnCache(access, 'w', c.name));
 
 	// Recent pushes and budget usage are scoped to caches this viewer can
 	// browse; an empty IN () is invalid SQL, so empty scopes skip the query.
-	const [recent, budgetBytes] = await Promise.all([
+	const [recent, budgetBytes, pushed] = await Promise.all([
 		ids.length === 0
 			? []
 			: read
@@ -125,7 +121,19 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 						.bind(...budgeted.map((c) => c.id))
 						.all<{ cache_id: number; bytes: number }>()
 						.then((r) => new Map(r.results.map((x) => [x.cache_id, x.bytes])));
-				})()
+				})(),
+		// created_by is the pushing token's subject (the user id). Bounded to
+		// the viewer's writable caches so the (cache_id, …) index narrows it.
+		writable.length === 0
+			? false
+			: read
+					.prepare(
+						`SELECT EXISTS (SELECT 1 FROM object
+						 WHERE cache_id IN (${writable.map(() => '?').join(', ')}) AND created_by = ?) AS pushed`
+					)
+					.bind(...writable.map((c) => c.id), user.id)
+					.first<{ pushed: number }>()
+					.then((r) => Boolean(r?.pushed))
 	]);
 
 	// --- Needs attention: each item names the fix and links straight to it. ---
@@ -152,7 +160,7 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 			action: 'See affected paths'
 		});
 	}
-	if (isAdmin && progress?.has_push) {
+	if (isAdmin && stats.objects > 0) {
 		const last = gcLastRun ? Date.parse(gcLastRun.at) : NaN;
 		if (!gcLastRun || Date.now() - last > GC_OVERDUE_MS) {
 			attention.push({
@@ -215,10 +223,10 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 		gcLastRun,
 		attention,
 		onboarding: {
-			hasCache: Boolean(progress?.has_cache),
+			hasCache: writable.length > 0,
 			hasToken: tokens.length > 0,
-			hasPush: Boolean(progress?.has_push),
-			firstCache: inScope[0]?.name ?? null
+			hasPush: pushed,
+			firstCache: writable[0]?.name ?? null
 		},
 		recent: recent.map((r) => ({
 			storePath: r.store_path,

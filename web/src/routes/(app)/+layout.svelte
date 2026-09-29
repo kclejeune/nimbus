@@ -15,8 +15,8 @@
 		<!-- Plain block (not flex): flex items default to min-width auto, which
 		     would let wide tables force page-level horizontal scroll instead of
 		     scrolling inside their own overflow-x-auto containers. -->
-		<main class="min-w-0 flex-1">
+		<div class="min-w-0 flex-1">
 			{@render children()}
-		</main>
+		</div>
 	</Sidebar.Inset>
 </Sidebar.Provider>

@@ -282,27 +282,29 @@ insert('account', {
 	updatedAt: secs(NOW - 3 * DAY)
 });
 
-// --- session for the signed-in admin --------------------------------------------
+// --- sessions: the admin, plus a plain member for previewing role scoping -----
 
-const sessionToken = createHmac('sha256', devVars.SESSION_SECRET)
-	.update('nimbus-dev-seed-session')
-	.digest('base64url')
-	.slice(0, 32);
-insert('session', {
-	id: alnum(32),
-	token: sessionToken,
-	expiresAt: secs(NOW + 365 * DAY),
-	createdAt: secs(NOW),
-	updatedAt: secs(NOW),
-	ipAddress: '127.0.0.1',
-	userAgent: 'dev-seed',
-	userId: U.kennan.id
-});
 // Matches better-call's signCookieValue: `${value}.${base64(HMAC-SHA256)}`, URI-encoded.
-const signature = createHmac('sha256', devVars.SESSION_SECRET)
-	.update(sessionToken)
-	.digest('base64');
-const cookieValue = encodeURIComponent(`${sessionToken}.${signature}`);
+function mintSession(label, userId) {
+	const token = createHmac('sha256', devVars.SESSION_SECRET)
+		.update(label)
+		.digest('base64url')
+		.slice(0, 32);
+	insert('session', {
+		id: alnum(32),
+		token,
+		expiresAt: secs(NOW + 365 * DAY),
+		createdAt: secs(NOW),
+		updatedAt: secs(NOW),
+		ipAddress: '127.0.0.1',
+		userAgent: 'dev-seed',
+		userId
+	});
+	const signature = createHmac('sha256', devVars.SESSION_SECRET).update(token).digest('base64');
+	return encodeURIComponent(`${token}.${signature}`);
+}
+const cookieValue = mintSession('nimbus-dev-seed-session', U.kennan.id);
+const memberCookieValue = mintSession('nimbus-dev-seed-member-session', U.marcus.id);
 const cookieName = appUrl.startsWith('https://')
 	? '__Secure-better-auth.session_token'
 	: 'better-auth.session_token';
@@ -1173,6 +1175,8 @@ console.log(
 );
 console.log(`  ${cookieName}=${cookieValue}\n`);
 console.log(`  curl -b '${cookieName}=${cookieValue}' ${appUrl}/`);
+console.log(`\nMember (${U.marcus.name}, no admin role), for previewing role scoping:`);
+console.log(`  ${cookieName}=${memberCookieValue}`);
 console.log(
 	`\nIn a browser: open ${appUrl}, then in devtools run\n  document.cookie = "${cookieName}=${cookieValue}; path=/"\nand reload.`
 );

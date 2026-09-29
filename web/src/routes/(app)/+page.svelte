@@ -37,6 +37,25 @@
 	// --- Getting started: three steps, each checked against live data. ---
 	const ob = $derived(data.onboarding);
 	const onboarded = $derived(ob.hasCache && ob.hasToken && ob.hasPush);
+	// Per-browser dismissal for people who only pull and never push; storage
+	// can be unavailable (private mode), in which case it just stays visible.
+	const DISMISS_KEY = 'nimbus:onboarding-dismissed';
+	let dismissed = $state(false);
+	$effect(() => {
+		try {
+			dismissed = localStorage.getItem(DISMISS_KEY) === '1';
+		} catch {
+			/* storage unavailable */
+		}
+	});
+	function dismiss() {
+		dismissed = true;
+		try {
+			localStorage.setItem(DISMISS_KEY, '1');
+		} catch {
+			/* storage unavailable */
+		}
+	}
 	const endpoint = $derived(data.cacheBaseUrl ?? 'https://cache.example.com');
 	// A short server alias for `nimbus login`, from the cache host: the first
 	// label that isn't a generic "cache"/"app"/"www" prefix.
@@ -53,7 +72,7 @@
 		{
 			done: ob.hasCache,
 			title: 'Create a cache',
-			body: 'Each cache has its own substituter URL, signing key and access list.',
+			body: 'Each cache has its own substituter URL, signing key and access list. If a teammate already has one, ask them for push access instead.',
 			command: null,
 			href: '/caches/new',
 			action: 'New cache'
@@ -95,16 +114,19 @@
 		{/snippet}
 	</PageHeader>
 
-	{#if !onboarded}
+	{#if !onboarded && !dismissed}
 		<section
 			aria-labelledby="onboarding-heading"
 			class="mb-6 overflow-hidden rounded-lg border bg-card shadow-(--shadow-panel)"
 		>
 			<div class="flex flex-wrap items-baseline justify-between gap-2 px-5 pt-4">
 				<h2 id="onboarding-heading" class="text-[0.9375rem] font-semibold">Get started</h2>
-				<span class="text-sm text-muted-foreground tabular-nums">
-					{steps.filter((st) => st.done).length} of {steps.length} done
-				</span>
+				<div class="flex items-center gap-3">
+					<span class="text-sm text-muted-foreground tabular-nums">
+						{steps.filter((st) => st.done).length} of {steps.length} done
+					</span>
+					<Button variant="ghost" size="sm" onclick={dismiss}>Dismiss</Button>
+				</div>
 			</div>
 			<ol class="mt-3 divide-y border-t">
 				{#each steps as step, i (step.title)}
