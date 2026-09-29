@@ -5,6 +5,10 @@ import { defineConfig } from 'vite';
 import { existsSync } from 'node:fs';
 
 export default defineConfig({
+	// Bundle devalue into the server output. Left external, the build keeps
+	// a bare `import "devalue"` in one chunk, which wrangler's esbuild then
+	// drops with an ignored-bare-import warning (devalue is side-effect free).
+	ssr: { noExternal: ['devalue'] },
 	plugins: [
 		tailwindcss(),
 		sveltekit({
