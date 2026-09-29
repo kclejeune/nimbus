@@ -1,9 +1,16 @@
 import { error } from '@sveltejs/kit';
 import { requireAdmin } from '$lib/server/auth/guard';
 import { readSession } from '$lib/server/cache/db';
-import type { PageServerLoad } from './$types';
-
 import { parseLimit, parsePage } from '$lib/pagination';
+import {
+	auditWhere,
+	groupActions,
+	hasFilters,
+	parseAuditFilters,
+	targetRef,
+	type TargetKind
+} from '$lib/audit-filters';
+import type { PageServerLoad } from './$types';
 
 interface AuditRow {
 	id: string;
@@ -13,9 +20,14 @@ interface AuditRow {
 	/** Unix seconds; surfaced to the page as an ISO string like every other
 	 *  timestamp so the UI shares one set of date formatters. */
 	created_at: number;
+	user_id: string | null;
 	user_name: string | null;
 	user_email: string | null;
 }
+
+/** Bounds on the filter option lists (distinct scans over audit_log). */
+const MAX_ACTIONS = 100;
+const MAX_ACTORS = 200;
 
 export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	requireAdmin(locals);
@@ -24,39 +36,144 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 
 	const page = parsePage(url.searchParams.get('page'));
 	const limit = parseLimit(url.searchParams.get('limit'));
+	const filters = parseAuditFilters(url.searchParams);
+	const where = auditWhere(filters);
 	// Read-only viewer; an entry lagging one replica tick is fine.
 	const read = readSession(db);
 
 	// One row past the page detects "next" without a second scan per request;
-	// the total drives the "X–Y of N" footer.
-	const [{ results }, total] = await Promise.all([
+	// the total (under the same filters) drives the "X–Y of N" footer.
+	const [{ results }, total, actions, actors] = await Promise.all([
 		read
 			.prepare(
-				`SELECT a.id, a.action, a.target, a.detail, a.created_at,
+				`SELECT a.id, a.action, a.target, a.detail, a.created_at, a.user_id,
 				        u.name AS user_name, u.email AS user_email
 				 FROM audit_log a
 				 LEFT JOIN user u ON u.id = a.user_id
+				 ${where.sql}
 				 ORDER BY a.created_at DESC, a.id DESC
-				 LIMIT ?1 OFFSET ?2`
+				 LIMIT ? OFFSET ?`
 			)
-			.bind(limit + 1, (page - 1) * limit)
+			.bind(...where.binds, limit + 1, (page - 1) * limit)
 			.all<AuditRow>(),
-		read.prepare('SELECT COUNT(*) AS n FROM audit_log').first<{ n: number }>()
+		read
+			.prepare(`SELECT COUNT(*) AS n FROM audit_log a ${where.sql}`)
+			.bind(...where.binds)
+			.first<{ n: number }>(),
+		// Filter options come from what the log actually holds, so the list
+		// stays right as new action names appear.
+		read
+			.prepare(`SELECT DISTINCT action FROM audit_log ORDER BY action LIMIT ${MAX_ACTIONS}`)
+			.all<{ action: string }>(),
+		read
+			.prepare(
+				`SELECT u.id, u.name, u.email
+				 FROM (SELECT DISTINCT user_id FROM audit_log WHERE user_id IS NOT NULL) a
+				 JOIN user u ON u.id = a.user_id
+				 ORDER BY u.name LIMIT ${MAX_ACTORS}`
+			)
+			.all<{ id: string; name: string | null; email: string | null }>()
 	]);
+
+	const rows = results.slice(0, limit);
+
+	// Resolve this page's targets to live entities in one bounded query per
+	// kind; anything unresolved (deleted, renamed) renders as plain text.
+	const keys: Record<TargetKind, Set<string>> = {
+		cache: new Set(),
+		user: new Set(),
+		group: new Set(),
+		token: new Set()
+	};
+	for (const r of rows) {
+		const ref = targetRef(r.action, r.target);
+		if (ref) keys[ref.kind].add(ref.key);
+	}
+	const lookup = async <T>(kind: TargetKind, sql: (inList: string) => string): Promise<T[]> => {
+		const ids = [...keys[kind]];
+		if (ids.length === 0) return [];
+		const { results } = await read
+			.prepare(sql(ids.map(() => '?').join(', ')))
+			.bind(...ids)
+			.all<T>();
+		return results;
+	};
+	const [liveCaches, liveUsers, liveGroups, tokenOwners] = await Promise.all([
+		lookup<{ name: string }>(
+			'cache',
+			(ins) => `SELECT name FROM cache WHERE deleted_at IS NULL AND name IN (${ins})`
+		),
+		lookup<{ id: string; name: string | null }>(
+			'user',
+			(ins) => `SELECT id, name FROM user WHERE id IN (${ins})`
+		),
+		lookup<{ id: string; name: string }>(
+			'group',
+			(ins) => `SELECT id, name FROM groups WHERE id IN (${ins})`
+		),
+		lookup<{ id: string; user_id: string; name: string; owner: string | null }>(
+			'token',
+			(ins) =>
+				`SELECT t.id, t.user_id, t.name, u.name AS owner FROM api_token t
+				 JOIN user u ON u.id = t.user_id WHERE t.id IN (${ins})`
+		)
+	]);
+	const cacheSet = new Set(liveCaches.map((c) => c.name));
+	const userMap = new Map(liveUsers.map((u) => [u.id, u.name]));
+	const groupMap = new Map(liveGroups.map((g) => [g.id, g.name]));
+	const tokenMap = new Map(tokenOwners.map((t) => [t.id, t]));
+
+	/** A link (and a friendlier label when the id has a name) for a target. */
+	function resolve(action: string, target: string | null): { href: string; label: string } | null {
+		const ref = targetRef(action, target);
+		if (!ref) return null;
+		switch (ref.kind) {
+			case 'cache':
+				return cacheSet.has(ref.key)
+					? { href: `/caches/${encodeURIComponent(ref.key)}`, label: target! }
+					: null;
+			case 'user':
+				return userMap.has(ref.key)
+					? {
+							href: `/users/${encodeURIComponent(ref.key)}`,
+							label: userMap.get(ref.key) || target!
+						}
+					: null;
+			case 'group':
+				return groupMap.has(ref.key)
+					? { href: `/groups/${encodeURIComponent(ref.key)}`, label: groupMap.get(ref.key)! }
+					: null;
+			case 'token': {
+				const t = tokenMap.get(ref.key);
+				return t
+					? {
+							href: `/users/${encodeURIComponent(t.user_id)}`,
+							label: `${t.name}${t.owner ? ` (${t.owner})` : ''}`
+						}
+					: null;
+			}
+		}
+	}
 
 	return {
 		page,
 		pageSize: limit,
 		total: total?.n ?? 0,
 		hasMore: results.length > limit,
-		entries: results.slice(0, limit).map((r) => ({
+		filters,
+		filtered: hasFilters(filters),
+		actionGroups: groupActions(actions.results.map((a) => a.action)),
+		actors: actors.results.map((u) => ({ id: u.id, label: u.name || u.email || u.id })),
+		entries: rows.map((r) => ({
 			id: r.id,
 			action: r.action,
 			target: r.target,
+			targetLink: resolve(r.action, r.target),
 			detail: r.detail,
 			createdAt: new Date(r.created_at * 1000).toISOString(),
 			// Null for system-initiated actions and unresolvable user ids alike.
-			user: r.user_name || r.user_email || null
+			user: r.user_name || r.user_email || null,
+			userId: r.user_id
 		}))
 	};
 };
