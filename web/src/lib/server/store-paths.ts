@@ -1,4 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
+import { escapeLike } from '$lib/utils';
 
 /** Rows fetched per page for the store-paths list (initial load + each scroll). */
 export const PATHS_PAGE_SIZE = 25;
@@ -43,7 +44,7 @@ const toStorePath = (p: PathRow): StorePath => ({
 
 /** Escape LIKE wildcards so a search term is matched literally. */
 export function likeTerm(q: string): string {
-	return `%${q.replace(/[%_\\]/g, (m) => '\\' + m)}%`;
+	return `%${escapeLike(q)}%`;
 }
 
 /**

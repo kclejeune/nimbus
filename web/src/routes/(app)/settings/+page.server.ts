@@ -1,5 +1,5 @@
 import { error, fail, redirect } from '@sveltejs/kit';
-import { runGc, readGcLastRun } from '$lib/server/cache/gc';
+import { runGc, readGcLastRun, readGlobalMaxBytes } from '$lib/server/cache/gc';
 import { requireAdmin } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
 import { readSession } from '$lib/server/cache/db';
@@ -19,7 +19,7 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 	// stay on the primary because this page's own actions write them (the
 	// reloaded value must reflect a just-saved limit / just-run GC).
 	const read = readSession(db);
-	const [pending, orphanNars, orphanChunks, globalLimit, gcLastRun] = await Promise.all([
+	const [pending, orphanNars, orphanChunks, globalMaxBytes, gcLastRun] = await Promise.all([
 		read.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'P'").first<Count>(),
 		read
 			.prepare(
@@ -31,9 +31,7 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 				'SELECT COUNT(*) AS n FROM chunk WHERE NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id)'
 			)
 			.first<Count>(),
-		db
-			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
-			.first<{ value: string }>(),
+		readGlobalMaxBytes(db),
 		readGcLastRun(db)
 	]);
 
@@ -41,7 +39,7 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 		pendingNars: pending?.n ?? 0,
 		orphanNars: orphanNars?.n ?? 0,
 		orphanChunks: orphanChunks?.n ?? 0,
-		globalMaxBytes: globalLimit ? Number(globalLimit.value) : null,
+		globalMaxBytes,
 		gcLastRun
 	};
 };

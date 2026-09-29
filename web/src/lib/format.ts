@@ -49,6 +49,34 @@ export function shortStorePath(path: string): string {
 	return path.replace(/^\/nix\/store\//, '');
 }
 
+/** /nix/store/<hash>-<name> split into its parts; `hash` is '' (and `name`
+ *  the whole trimmed path) when the path doesn't have that shape. */
+export function splitStorePath(path: string): { hash: string; name: string } {
+	const base = shortStorePath(path);
+	const m = /^([0-9a-z]{32})-(.+)$/.exec(base);
+	return m ? { hash: m[1], name: m[2] } : { hash: '', name: base };
+}
+
+/** Dedup savings and limit usage from instance stats (Overview tiles and the
+ *  Usage storage view): bytes the store would hold without NAR- and
+ *  chunk-level dedup, minus what it actually holds. */
+export function storageSavings(
+	stats: { logicalBytes: number; storageBytes: number },
+	globalMaxBytes: number | null
+): { dedupBytes: number; dedupPct: number; usagePct: number | null } {
+	const dedupBytes = Math.max(0, stats.logicalBytes - stats.storageBytes);
+	return {
+		dedupBytes,
+		dedupPct: stats.logicalBytes > 0 ? Math.round((dedupBytes / stats.logicalBytes) * 100) : 0,
+		usagePct: globalMaxBytes ? Math.round((stats.storageBytes / globalMaxBytes) * 100) : null
+	};
+}
+
+/** "1 path", "3 paths". */
+export function plural(n: number, one: string, many = one + 's'): string {
+	return `${n} ${n === 1 ? one : many}`;
+}
+
 /** Coarse relative time ("3h ago") from an ISO timestamp; '' when unparsable. */
 export function formatRelativeTime(iso: string): string {
 	const ms = Date.now() - Date.parse(iso);

@@ -2,7 +2,7 @@ import { dev } from '$app/environment';
 import { error } from '@sveltejs/kit';
 import { readSession } from '$lib/server/cache/db';
 import { instanceStatsSnapshot, type InstanceStats } from '$lib/server/cache/stats';
-import { readGcLastRun } from '$lib/server/cache/gc';
+import { readGcLastRun, readGlobalMaxBytes } from '$lib/server/cache/gc';
 import { loadObservability } from '$lib/server/observability/load';
 import { parseWindow, WINDOWS } from '$lib/server/observability/query';
 import { ingestBaseline, ingestSeries, type Granularity } from '$lib/server/cache/ingest';
@@ -94,15 +94,12 @@ async function loadStorage({ platform, url }: Parameters<PageServerLoad>[0]) {
 
 	// The bucketed series and the pre-range baseline are independent — run them
 	// together. Cumulative series include everything added before the range.
-	const [rows, baseline, gcLastRun, globalLimit] = await Promise.all([
+	const [rows, baseline, gcLastRun, globalMaxBytes] = await Promise.all([
 		ingestSeries(read, granularity, startDate),
 		startDate ? ingestBaseline(read, startDate) : Promise.resolve(null),
 		readGcLastRun(read),
-		read
-			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
-			.first<{ value: string }>()
+		readGlobalMaxBytes(read)
 	]);
-	const globalMaxBytes = globalLimit ? Number(globalLimit.value) : null;
 	const { stats, statsAt } = await instanceStatsSnapshot(read, gcLastRun);
 
 	const basePaths = baseline?.paths ?? 0;

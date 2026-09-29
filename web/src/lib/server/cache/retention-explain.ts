@@ -2,6 +2,7 @@
 // the page's loader gathers the facts; this turns them into reasons that
 // mirror what gc.ts actually does (see the rule notes on each branch).
 import { TOUCH_GRANULARITY_MS } from './db';
+import { plural } from '$lib/format';
 
 const DAY_MS = 86400_000;
 
@@ -44,18 +45,17 @@ export interface RetentionExplanation {
 	reasons: RetentionReason[];
 }
 
-const plural = (n: number, one: string, many = one + 's') => `${n} ${n === 1 ? one : many}`;
-
 function listNames(names: string[], max = 3): string {
 	const shown = names.slice(0, max);
 	const rest = names.length - shown.length;
 	return rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ');
 }
 
-/** The retention cutoff gc.ts's retentionPass uses for a window of `days`. */
+/** The retention cutoff for a window of `days` — gc.ts's retention pass and
+ *  this page's explanation both use it, so they can't disagree. */
 export function retentionCutoff(now: number, days: number): number {
-	// Mirrors retentionPass: the window plus slack for a cached touch
-	// decision and the gateway memo window.
+	// The window plus slack for a cached touch decision and the gateway memo
+	// window.
 	return now - days * DAY_MS - 2 * TOUCH_GRANULARITY_MS;
 }
 

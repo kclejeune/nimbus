@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { formatBytes, formatCount } from '$lib/format';
+	import { formatBytes, formatCount, shortStorePath, splitStorePath } from '$lib/format';
 	import { goto } from '$app/navigation';
 	import { enhance } from '$app/forms';
 	import { confirmFirst, toastErrors } from '$lib/enhance';
@@ -29,11 +29,6 @@
 	let { data, form } = $props();
 	const c = $derived(data.cache);
 	const pinnedSet = $derived(new Set(data.pinnedHashes));
-
-	function shortHash(path: string): string {
-		// Trim the /nix/store/<hash>- prefix for readability; keep the human name.
-		return path.replace(/^\/nix\/store\//, '');
-	}
 
 	// RFC3339 timestamp → YYYY-MM-DD.
 	const fmtDate = (s: string) => (s ? s.slice(0, 10) : '');
@@ -269,7 +264,7 @@
 								<td class="w-10 !pr-0">
 									<input
 										type="checkbox"
-										aria-label="Select {shortHash(p.storePath)}"
+										aria-label="Select {shortStorePath(p.storePath)}"
 										checked={selected.has(p.hash)}
 										onchange={() => toggle(p.hash)}
 										class="size-4 rounded border-input text-primary focus:ring-ring"
@@ -326,7 +321,7 @@
 											use:enhance={toastErrors(
 												confirmFirst(
 													{
-														title: `Remove ${shortHash(p.storePath).replace(/^[0-9a-z]{32}-/, '')}?`,
+														title: `Remove ${splitStorePath(p.storePath).name}?`,
 														description:
 															'It stops being served from this cache now. Anything another path still depends on is kept until its last dependent goes, and garbage collection reclaims the storage.',
 														confirmLabel: 'Remove path',

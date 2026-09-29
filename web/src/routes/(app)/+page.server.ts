@@ -1,13 +1,14 @@
 import { error } from '@sveltejs/kit';
-import { readGcLastRun } from '$lib/server/cache/gc';
+import { cacheSizes, readGcLastRun, readGlobalMaxBytes } from '$lib/server/cache/gc';
 import { allLiveUpstreams } from '$lib/server/cache/missing-paths';
 import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { readSession } from '$lib/server/cache/db';
 import { instanceStatsSnapshot } from '$lib/server/cache/stats';
-import { canBrowseCache, canOnCache } from '$lib/server/auth/permissions';
-import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { canOnCache } from '$lib/server/auth/permissions';
+import { browsableCaches } from '$lib/server/cache/cache-page';
 import { listUserTokens } from '$lib/server/tokens';
+import { plural } from '$lib/format';
 import type { PageServerLoad } from './$types';
 
 export interface AttentionItem {
@@ -35,18 +36,15 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 	const read = readSession(db);
 
 	const [
-		globalLimit,
+		globalMaxBytes,
 		gcLastRun,
 		proxyPublicKey,
 		proxyUpstreams,
-		{ results: caches },
-		access,
+		{ caches: inScope, access },
 		tokens,
 		{ pendingUsers }
 	] = await Promise.all([
-		read
-			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
-			.first<{ value: string }>(),
+		readGlobalMaxBytes(read),
 		readGcLastRun(read),
 		platform?.env
 			? getProxyKeypair(platform.env)
@@ -54,23 +52,13 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 					.catch(() => null)
 			: null,
 		allLiveUpstreams(read),
-		read
-			.prepare(
-				`SELECT id, name, is_public, retention_max_bytes FROM cache
-				 WHERE deleted_at IS NULL ORDER BY name`
-			)
-			.all<{ id: number; name: string; is_public: number; retention_max_bytes: number | null }>(),
-		effectiveAccessOf(locals, db),
+		browsableCaches(locals, db, read),
 		listUserTokens(db, user.id),
 		parent()
 	]);
 
 	const { stats, statsAt } = await instanceStatsSnapshot(read, gcLastRun);
-	const globalMaxBytes = globalLimit ? Number(globalLimit.value) : null;
 
-	const inScope = caches.filter((c) =>
-		canBrowseCache(access, { name: c.name, isPublic: c.is_public !== 0 })
-	);
 	const ids = inScope.map((c) => c.id);
 	// Budget warnings only for caches whose retention this viewer can change —
 	// a reader of a public cache can't act on them.
@@ -102,25 +90,11 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 						cache_name: string;
 					}>()
 					.then((r) => r.results),
-		budgeted.length === 0
-			? new Map<number, number>()
-			: (() => {
-					// Same accounting as /caches: a NAR shared by several paths in one
-					// cache counts once. Only caches with a budget are scanned.
-					return read
-						.prepare(
-							`SELECT o.cache_id, COALESCE(SUM(sz.bytes), 0) AS bytes
-							 FROM (SELECT DISTINCT cache_id, nar_id FROM object
-							       WHERE cache_id IN (SELECT value FROM json_each(?))) o
-							 JOIN (SELECT cr.nar_id, SUM(ch.file_size) AS bytes FROM chunkref cr
-							       JOIN chunk ch ON ch.id = cr.chunk_id GROUP BY cr.nar_id) sz
-							   ON sz.nar_id = o.nar_id
-							 GROUP BY o.cache_id`
-						)
-						.bind(JSON.stringify(budgeted.map((c) => c.id)))
-						.all<{ cache_id: number; bytes: number }>()
-						.then((r) => new Map(r.results.map((x) => [x.cache_id, x.bytes])));
-				})(),
+		// Same accounting as /caches; only caches with a budget are scanned.
+		cacheSizes(
+			read,
+			budgeted.map((c) => c.id)
+		),
 		// created_by is the pushing token's subject (the user id). Bounded to
 		// the viewer's writable caches so the (cache_id, …) index narrows it.
 		writable.length === 0
@@ -137,7 +111,6 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 
 	// --- Needs attention: each item names the fix and links straight to it. ---
 	const attention: AttentionItem[] = [];
-	const plural = (n: number, one: string, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 
 	if (isAdmin && pendingUsers > 0) {
 		attention.push({

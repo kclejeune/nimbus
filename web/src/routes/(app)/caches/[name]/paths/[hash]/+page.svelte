@@ -1,5 +1,11 @@
 <script lang="ts">
-	import { formatBytes, formatCount, formatIsoDateTime, shortStorePath } from '$lib/format';
+	import {
+		formatBytes,
+		formatCount,
+		formatIsoDateTime,
+		shortStorePath,
+		splitStorePath
+	} from '$lib/format';
 	import StorePathTable from '$lib/components/store-path-table.svelte';
 	import CopyField from '$lib/components/copy-field.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
@@ -23,13 +29,6 @@
 	let { data } = $props();
 	const o = $derived(data.object);
 	const nar = $derived(data.nar);
-
-	/** Human name of a store path (part after /nix/store/<hash>-). */
-	function pathName(path: string): string {
-		const base = path.replace(/^\/nix\/store\//, '');
-		const dash = base.indexOf('-');
-		return dash >= 0 ? base.slice(dash + 1) : base;
-	}
 
 	// RFC3339 timestamp → "YYYY-MM-DD HH:MM" (UTC), matching the app's style.
 
@@ -113,7 +112,7 @@
 		});
 	const cacheHref = $derived(`/caches/${encodeURIComponent(data.cache.name)}`);
 	// The 32-char store hash, shown muted beside the name.
-	const storeHash = $derived(/^\/nix\/store\/([0-9a-z]{32})-/.exec(o.storePath)?.[1] ?? '');
+	const storeHash = $derived(splitStorePath(o.storePath).hash);
 </script>
 
 {#snippet chunkHeader(key: ChunkSortKey, label: string)}
@@ -148,7 +147,7 @@
 <Page>
 	<header class="mb-8">
 		<h1 class="font-mono text-2xl leading-tight font-semibold tracking-[-0.03em] break-all">
-			{pathName(o.storePath)}
+			{splitStorePath(o.storePath).name}
 		</h1>
 		{#if storeHash}
 			<p class="mt-1 font-mono text-[0.8125rem] break-all text-muted-foreground" title="Store hash">

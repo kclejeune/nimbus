@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { splitStorePath } from '$lib/format';
 	import { cn } from '$lib/utils.js';
 
 	let {
@@ -21,11 +22,7 @@
 
 	// /nix/store/<32-char base32 hash>-<name>. The hash identifies, the name is
 	// what people scan for — so the name carries the weight and the hash recedes.
-	const parts = $derived.by(() => {
-		const base = path.replace(/^\/nix\/store\//, '');
-		const m = /^([0-9a-z]{32})-(.+)$/.exec(base);
-		return m ? { hash: m[1], name: m[2] } : { hash: '', name: base };
-	});
+	const parts = $derived(splitStorePath(path));
 </script>
 
 <svelte:element

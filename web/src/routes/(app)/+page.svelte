@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { formatBytes, formatCount, formatRelativeTime } from '$lib/format';
+	import { formatBytes, formatCount, formatRelativeTime, storageSavings } from '$lib/format';
 	import UnifiedEndpointCard from '$lib/components/unified-endpoint-card.svelte';
 	import CopyField from '$lib/components/copy-field.svelte';
 	import Page from '$lib/components/layout/page.svelte';
@@ -12,15 +12,7 @@
 	let { data } = $props();
 	const s = $derived(data.stats);
 
-	// Bytes the store would hold without NAR- and chunk-level dedup, minus what
-	// it actually holds.
-	const dedupBytes = $derived(Math.max(0, s.logicalBytes - s.storageBytes));
-	const dedupPct = $derived(
-		s.logicalBytes > 0 ? Math.round((dedupBytes / s.logicalBytes) * 100) : 0
-	);
-	const usagePct = $derived(
-		data.globalMaxBytes ? Math.round((s.storageBytes / data.globalMaxBytes) * 100) : null
-	);
+	const { dedupBytes, dedupPct, usagePct } = $derived(storageSavings(s, data.globalMaxBytes));
 	// The storage bar's scale: the global limit when one is set, else the
 	// logical (pre-dedup) size so the saved share is visible against it.
 	const scale = $derived(Math.max(data.globalMaxBytes ?? 0, s.logicalBytes, s.storageBytes, 1));

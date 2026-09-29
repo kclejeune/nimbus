@@ -1,5 +1,6 @@
 // Audit log filtering and target resolution, kept pure so the SQL shape and
 // the action → entity mapping are testable without a database.
+import { escapeLike } from '$lib/utils';
 
 export interface AuditFilters {
 	/** A user id, or SYSTEM_USER for entries with no acting user. */
@@ -27,10 +28,6 @@ export function parseAuditFilters(params: URLSearchParams): AuditFilters {
 
 export function hasFilters(f: AuditFilters): boolean {
 	return f.user !== null || f.action !== null || f.q !== '';
-}
-
-function escapeLike(s: string): string {
-	return s.replace(/[%_\\]/g, (m) => '\\' + m);
 }
 
 /** WHERE clause (with leading `WHERE`, or '') and its positional binds, over

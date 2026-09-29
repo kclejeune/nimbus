@@ -1,3 +1,4 @@
+import { splitStorePath } from '$lib/format';
 // Single source of truth for the app's top-level sections. The sidebar
 // renders these and the header derives the current page title from the same
 // list, so a section can't be navigable but titled "Overview" (or vice versa).
@@ -80,11 +81,6 @@ function sectionFor(pathname: string) {
 	return ALL_SECTIONS.find((item) => item.url !== '/' && inSection(pathname, item));
 }
 
-/** Title of the section owning `pathname`. */
-export function sectionTitle(pathname: string): string {
-	return sectionFor(pathname)?.title ?? 'Overview';
-}
-
 /** Per-cache tab segments under /caches/[name]. */
 const CACHE_TABS: Record<string, string> = {
 	connect: 'Connect',
@@ -141,7 +137,7 @@ export function breadcrumbs(pathname: string, data: Record<string, unknown>): Cr
 			return;
 		} else if (prev === 'paths') {
 			const obj = data.object as { storePath?: string } | undefined;
-			const name = obj?.storePath?.replace(/^\/nix\/store\/[0-9a-z]{32}-/, '');
+			const name = obj?.storePath && splitStorePath(obj.storePath).name;
 			crumbs.push({ label: name ?? seg.slice(0, 8), href, mono: true });
 		} else {
 			crumbs.push({ label: seg, href });

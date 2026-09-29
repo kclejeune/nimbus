@@ -8,7 +8,6 @@
 // next (retention deletes objects -> orphans NARs -> orphans chunks -> R2).
 
 import {
-	TOUCH_GRANULARITY_MS,
 	claimOrphanChunks,
 	chunkKey,
 	dbRun,
@@ -22,6 +21,7 @@ import { PURGE_TAG_LIMIT } from './purge';
 import { instanceStats, type InstanceStats } from './stats';
 import { candidateTag } from './metadata';
 import { narinfoTag } from './store';
+import { retentionCutoff } from './retention-explain';
 
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];
@@ -538,6 +538,27 @@ const CACHE_SIZE_SQL =
 	'JOIN (SELECT cr.nar_id, SUM(ch.file_size) AS bytes FROM chunkref cr ' +
 	'JOIN chunk ch ON ch.id = cr.chunk_id GROUP BY cr.nar_id) sz ON sz.nar_id = o.nar_id';
 
+/**
+ * Deduplicated NAR bytes per cache, CACHE_SIZE_SQL's accounting for many
+ * caches at once: a NAR shared by several paths in one cache counts once;
+ * caches sharing content each count it. `ids` bounds the scan (omit for all).
+ */
+export async function cacheSizes(db: D1, ids?: number[]): Promise<Map<number, number>> {
+	if (ids?.length === 0) return new Map();
+	const { results } = await db
+		.prepare(
+			`SELECT o.cache_id, SUM(ch.file_size) AS bytes
+			 FROM (SELECT DISTINCT cache_id, nar_id FROM object
+			       ${ids ? 'WHERE cache_id IN (SELECT value FROM json_each(?1))' : ''}) o
+			 JOIN chunkref cr ON cr.nar_id = o.nar_id
+			 JOIN chunk ch ON ch.id = cr.chunk_id
+			 GROUP BY o.cache_id`
+		)
+		.bind(...(ids ? [JSON.stringify(ids)] : []))
+		.all<{ cache_id: number; bytes: number }>();
+	return new Map(results.map((r) => [r.cache_id, r.bytes]));
+}
+
 interface DoomedRow {
 	id: number;
 	store_path_hash: string;
@@ -585,11 +606,8 @@ async function retentionPass(
 
 	for (const cache of caches) {
 		try {
-			// Allow for a cached touch decision plus the gateway memo window.
 			if (cache.retention_period != null) {
-				const cutoff = new Date(
-					Date.now() - cache.retention_period * 24 * 60 * 60 * 1000 - 2 * TOUCH_GRANULARITY_MS
-				).toISOString();
+				const cutoff = new Date(retentionCutoff(Date.now(), cache.retention_period)).toISOString();
 				stats.expired_objects_reaped += await reapUnreachable(
 					db,
 					cache.id,
@@ -779,6 +797,16 @@ const REFERENCED_CHUNK_BYTES_SQL =
 	"WHERE ch.state = 'V' AND EXISTS (" +
 	'SELECT 1 FROM chunkref cr JOIN object o ON o.nar_id = cr.nar_id WHERE cr.chunk_id = ch.id)';
 
+/** The global storage ceiling (server_config.global_max_bytes), or null when
+ *  unset or not a positive number — exactly when globalSizePass skips. */
+export async function readGlobalMaxBytes(db: D1): Promise<number | null> {
+	const row = await db
+		.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
+		.first<{ value: string }>();
+	const limit = row ? Number(row.value) : NaN;
+	return Number.isFinite(limit) && limit > 0 ? limit : null;
+}
+
 /**
  * Global physical-storage ceiling (server_config.global_max_bytes): when total
  * deduplicated chunk bytes exceed the limit, evict least-recently-used
@@ -792,11 +820,8 @@ async function globalSizePass(
 	dryRun: boolean,
 	purgeTags: string[]
 ): Promise<void> {
-	const limitRow = await db
-		.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
-		.first<{ value: string }>();
-	const limit = limitRow ? Number(limitRow.value) : NaN;
-	if (!Number.isFinite(limit) || limit <= 0) return;
+	const limit = await readGlobalMaxBytes(db);
+	if (limit === null) return;
 
 	const totalRow = await db
 		.prepare("SELECT COALESCE(SUM(file_size), 0) AS n FROM chunk WHERE state = 'V'")

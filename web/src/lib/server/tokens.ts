@@ -65,12 +65,17 @@ export async function listUserTokens(db: D1Database, userId: string): Promise<Pr
 		scope: t.permissions,
 		createdAt: t.created_at,
 		expiresAt: t.expires_at,
-		status: t.revoked_at
-			? ('revoked' as const)
-			: t.expires_at && t.expires_at < now
-				? ('expired' as const)
-				: ('active' as const)
+		status: tokenStatus(t, now)
 	}));
+}
+
+/** Revoked beats expired beats active; `now` in unix seconds. */
+function tokenStatus(
+	t: { revoked_at: number | null; expires_at: number | null },
+	now: number
+): PresentedToken['status'] {
+	if (t.revoked_at) return 'revoked';
+	return t.expires_at && t.expires_at < now ? 'expired' : 'active';
 }
 
 /** Rows shown per page of the admin all-tokens view. */
@@ -114,11 +119,7 @@ export async function listAllTokens(
 		}>();
 	const now = Math.floor(Date.now() / 1000);
 	const tokens = results.slice(0, limit).map((t) => {
-		const base: PresentedToken['status'] = t.revoked_at
-			? 'revoked'
-			: t.expires_at && t.expires_at < now
-				? 'expired'
-				: 'active';
+		const base = tokenStatus(t, now);
 		const ownerActive = isActiveUser({ role: t.owner_role, status: t.owner_status });
 		return {
 			id: t.id,

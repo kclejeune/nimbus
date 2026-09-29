@@ -1,6 +1,5 @@
 import { error, json } from '@sveltejs/kit';
-import { canBrowseCache } from '$lib/server/auth/permissions';
-import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { browsableCaches } from '$lib/server/cache/cache-page';
 import { readSession } from '$lib/server/cache/db';
 import { likeTerm } from '$lib/server/store-paths';
 import type { SearchResults } from '$lib/search';
@@ -25,15 +24,7 @@ export const GET: RequestHandler = async ({ url, platform, locals }) => {
 	const hashPrefix = /^[0-9a-z]{4,32}$/.test(q) ? `${q}%` : '';
 	const isAdmin = locals.user!.role === 'admin';
 
-	const [{ results: caches }, access] = await Promise.all([
-		read
-			.prepare('SELECT id, name, is_public FROM cache WHERE deleted_at IS NULL ORDER BY name')
-			.all<{ id: number; name: string; is_public: number }>(),
-		effectiveAccessOf(locals, db)
-	]);
-	const inScope = caches.filter((c) =>
-		canBrowseCache(access, { name: c.name, isPublic: c.is_public !== 0 })
-	);
+	const { caches: inScope } = await browsableCaches(locals, db, read);
 	const needle = q.toLowerCase();
 
 	const [paths, users, groups] = await Promise.all([

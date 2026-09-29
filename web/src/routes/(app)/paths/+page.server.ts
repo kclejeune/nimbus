@@ -1,18 +1,11 @@
 import { error } from '@sveltejs/kit';
-import { canBrowseCache } from '$lib/server/auth/permissions';
-import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { browsableCaches } from '$lib/server/cache/cache-page';
 import { readSession } from '$lib/server/cache/db';
 import { likeTerm } from '$lib/server/store-paths';
 import { parsePage } from '$lib/pagination';
 import type { PageServerLoad } from './$types';
 
 const PAGE_SIZE = 50;
-
-interface CacheRow {
-	id: number;
-	name: string;
-	is_public: number;
-}
 
 interface PathRow {
 	store_path: string;
@@ -29,19 +22,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	// keystrokes (debounced client-side) off the write primary.
 	const read = readSession(db);
 
-	const [{ results: caches }, access] = await Promise.all([
-		read
-			.prepare('SELECT id, name, is_public FROM cache WHERE deleted_at IS NULL ORDER BY name')
-			.all<CacheRow>(),
-		effectiveAccessOf(locals, db)
-	]);
-
-	// Cross-cache browsing scope: public caches plus anything the user was
-	// granted (canSeeCache). Every query below is bound to this id set, so a
-	// private cache without a grant is both invisible and unqueryable.
-	const inScope = caches.filter((c) =>
-		canBrowseCache(access, { name: c.name, isPublic: c.is_public !== 0 })
-	);
+	const { caches: inScope } = await browsableCaches(locals, db, read);
 
 	// A cache filter naming anything outside the scope — private without
 	// access or plain nonexistent — is indistinguishable from "no such cache".
