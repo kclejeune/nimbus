@@ -2,7 +2,7 @@
 	import { formatBytes, formatCount } from '$lib/format';
 	import { goto } from '$app/navigation';
 	import { enhance } from '$app/forms';
-	import { toastErrors } from '$lib/enhance';
+	import { confirmFirst, toastErrors } from '$lib/enhance';
 	import EmptyState from '$lib/components/layout/empty-state.svelte';
 	import StatusBadge from '$lib/components/layout/status-badge.svelte';
 	import StorePath from '$lib/components/layout/store-path.svelte';
@@ -222,21 +222,23 @@
 										<form
 											method="POST"
 											action="?/prune"
-											use:enhance={toastErrors(({ cancel }) => {
-												if (
-													!confirm(
-														`Remove "${shortHash(p.storePath)}"? Anything another path still depends on is kept until its last dependent goes; the rest is removed now and storage reclaimed by GC.`
-													)
-												) {
-													cancel();
-													return;
-												}
-												return async ({ update }) => {
-													await update();
-													extra = [];
-													appended = false;
-												};
-											})}
+											use:enhance={toastErrors(
+												confirmFirst(
+													{
+														title: `Remove ${shortHash(p.storePath).replace(/^[0-9a-z]{32}-/, '')}?`,
+														description:
+															'It stops being served from this cache now. Anything another path still depends on is kept until its last dependent goes, and garbage collection reclaims the storage.',
+														confirmLabel: 'Remove path',
+														tone: 'danger'
+													},
+													() =>
+														async ({ update }) => {
+															await update();
+															extra = [];
+															appended = false;
+														}
+												)
+											)}
 										>
 											<input type="hidden" name="hash" value={p.hash} />
 											<button

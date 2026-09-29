@@ -202,7 +202,13 @@
 										method="POST"
 										action="?/deleteUser"
 										use:enhance={toastErrors(
-											confirmFirst(`Delete ${u.email}? This removes their access and tokens.`)
+											confirmFirst({
+												title: `Delete ${u.name || u.email}?`,
+												description:
+													'Their grants and group memberships are removed and every token they issued stops working.',
+												confirmLabel: 'Delete user',
+												tone: 'danger'
+											})
 										)}
 									>
 										<input type="hidden" name="userId" value={u.id} />

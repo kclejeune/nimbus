@@ -256,13 +256,23 @@
 					method="POST"
 					action="?/delete"
 					use:enhance={toastErrors(
-						confirmFirst(`Delete cache "${c.name}"? Clients can no longer pull from it.`, () => {
-							deleting = true;
-							return async ({ update }) => {
-								await update();
-								deleting = false;
-							};
-						})
+						confirmFirst(
+							{
+								title: `Delete ${c.name}?`,
+								description:
+									'Clients can no longer pull from it, its substituter URL stops working, and its access grants are removed. Stored data is kept until garbage collection.',
+								confirmLabel: 'Delete cache',
+								tone: 'danger',
+								typeToConfirm: c.name
+							},
+							() => {
+								deleting = true;
+								return async ({ update }) => {
+									await update();
+									deleting = false;
+								};
+							}
+						)
 					)}
 				>
 					<Button type="submit" variant="destructive" disabled={deleting}>

@@ -72,7 +72,13 @@
 					action="?/deleteUser"
 					use:enhance={toastErrors(
 						confirmFirst(
-							`Delete ${u.email}? This removes their access and tokens.`,
+							{
+								title: `Delete ${u.name || u.email}?`,
+								description:
+									'Their grants and group memberships are removed and every token they issued stops working.',
+								confirmLabel: 'Delete user',
+								tone: 'danger'
+							},
 							() =>
 								async ({ result, update }) => {
 									if (result.type === 'success') await goto('/users');

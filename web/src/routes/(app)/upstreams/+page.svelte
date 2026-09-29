@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { ask } from '$lib/confirm.svelte';
 	import { enhance } from '$app/forms';
 	import { toastErrors } from '$lib/enhance';
 	import { Button } from '$lib/components/ui/button/index.js';
@@ -146,10 +147,19 @@
 					value={String(entry.id)}
 					aria-label="Remove upstream"
 					class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-					onclick={(e: MouseEvent) => {
-						if (!confirm(`Remove upstream ${entry.url}? Cached verdicts are dropped.`)) {
-							e.preventDefault();
-						}
+					onclick={async (e: MouseEvent) => {
+						// Hold the click, confirm, then resubmit with this button as the
+						// submitter so its formaction and id value still apply.
+						e.preventDefault();
+						const button = e.currentTarget as HTMLButtonElement;
+						const ok = await ask({
+							title: `Remove ${entry.url}?`,
+							description:
+								'Caches stop checking it, and its cached presence verdicts are dropped. Paths already persisted from it stay in their caches.',
+							confirmLabel: 'Remove upstream',
+							tone: 'danger'
+						});
+						if (ok) button.form?.requestSubmit(button);
 					}}
 				>
 					<Trash2 />

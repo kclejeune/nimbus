@@ -3,6 +3,7 @@
 	import { ModeWatcher, mode } from 'mode-watcher';
 	import { Toaster } from 'svelte-sonner';
 	import favicon from '$lib/assets/favicon.svg';
+	import ConfirmHost from '$lib/components/confirm-host.svelte';
 
 	let { children } = $props();
 </script>
@@ -16,5 +17,7 @@
      explicit override beat the media query (see layout.css). -->
 <ModeWatcher lightClassNames={['light']} />
 <Toaster theme={mode.current} position="bottom-right" richColors />
+
+<ConfirmHost />
 
 {@render children()}

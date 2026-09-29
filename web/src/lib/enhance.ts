@@ -1,5 +1,25 @@
 import { toast } from 'svelte-sonner';
 import type { SubmitFunction } from '@sveltejs/kit';
+import { ask, type ConfirmOptions } from '$lib/confirm.svelte';
+
+/**
+ * `use:enhance` submit wrapper for destructive forms: asks in the app's
+ * confirmation dialog and cancels the submit on decline. Composes with
+ * toastErrors — `use:enhance={toastErrors(confirmFirst({ … }))}`.
+ */
+export function confirmFirst(
+	options: ConfirmOptions | (() => ConfirmOptions),
+	inner?: SubmitFunction
+): SubmitFunction {
+	return async (input) => {
+		const ok = await ask(typeof options === 'function' ? options() : options);
+		if (!ok) {
+			input.cancel();
+			return;
+		}
+		return inner?.(input);
+	};
+}
 
 /**
  * `use:enhance` wrapper: a thrown action error (403 from a permission guard,
@@ -12,29 +32,12 @@ import type { SubmitFunction } from '@sveltejs/kit';
  * pending state, but with a no-op `update` so the error result is never
  * applied.
  */
-/**
- * `use:enhance` submit wrapper for destructive forms: asks for confirmation
- * and cancels the submit on decline. Composes with toastErrors —
- * `use:enhance={toastErrors(confirmFirst(() => 'Delete X?'))}`.
- */
-export function confirmFirst(
-	message: string | (() => string),
-	inner?: SubmitFunction
-): SubmitFunction {
-	return (input) => {
-		if (!confirm(typeof message === 'function' ? message() : message)) {
-			input.cancel();
-			return;
-		}
-		return inner?.(input);
-	};
-}
-
 export function toastErrors(inner?: SubmitFunction): SubmitFunction {
-	return (input) => {
-		const innerReturn = inner?.(input);
+	// Async so an async inner (confirmFirst) settles — and can cancel() —
+	// before SvelteKit decides whether to submit; it awaits this function.
+	return async (input) => {
+		const innerCallback = await inner?.(input);
 		return async (opts) => {
-			const innerCallback = await innerReturn;
 			if (opts.result.type === 'error') {
 				toast.error(opts.result.error?.message ?? 'Request failed');
 				if (innerCallback) {

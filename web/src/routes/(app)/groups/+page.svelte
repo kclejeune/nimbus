@@ -85,9 +85,13 @@
 									method="POST"
 									action="?/delete"
 									use:enhance={toastErrors(
-										confirmFirst(
-											`Delete group "${group.name}"? Its grants and memberships are removed with it.`
-										)
+										confirmFirst({
+											title: `Delete ${group.name}?`,
+											description:
+												'Its grants and memberships are removed. Members keep access they have through other grants or groups.',
+											confirmLabel: 'Delete group',
+											tone: 'danger'
+										})
 									)}
 								>
 									<input type="hidden" name="id" value={group.id} />
