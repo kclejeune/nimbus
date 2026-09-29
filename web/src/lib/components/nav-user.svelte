@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { CircleUser, EllipsisVertical, LogOut, ShieldCheck } from '@lucide/svelte';
+	import { CircleUser, EllipsisVertical, KeyRound, LogOut } from '@lucide/svelte';
 	import { authClient } from '$lib/auth-client';
 	import * as Avatar from '$lib/components/ui/avatar/index.js';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
@@ -84,15 +84,13 @@
 					</div>
 				</DropdownMenu.Label>
 				<DropdownMenu.Separator />
-				{#if user?.id}
-					<DropdownMenu.Item onclick={() => goto(`/users/${user.id}`)}>
-						<ShieldCheck />
-						My access
-					</DropdownMenu.Item>
-				{/if}
 				<DropdownMenu.Item onclick={() => goto('/account')}>
 					<CircleUser />
-					Account
+					Profile
+				</DropdownMenu.Item>
+				<DropdownMenu.Item onclick={() => goto('/tokens')}>
+					<KeyRound />
+					Tokens
 				</DropdownMenu.Item>
 				<DropdownMenu.Item onclick={signOut}>
 					<LogOut />

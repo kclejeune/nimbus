@@ -5,19 +5,17 @@
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
 	import { Plus, Trash2, UsersRound } from '@lucide/svelte';
-	import Page from '$lib/components/layout/page.svelte';
-	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import Panel from '$lib/components/layout/panel.svelte';
 	import EmptyState from '$lib/components/layout/empty-state.svelte';
 
 	let { data, form } = $props();
 </script>
 
-<Page>
-	<PageHeader
-		title="Groups"
-		description="Groups collect users and carry permission grants. Map an OIDC group claim to sync membership automatically at sign-in."
-	/>
+<div>
+	<p class="mb-6 max-w-2xl text-sm text-muted-foreground">
+		Groups collect users and carry permission grants. Map an OIDC group claim to sync membership
+		automatically at sign-in.
+	</p>
 
 	{#if form?.error}
 		<p role="alert" class="mb-4 text-sm text-destructive">{form.error}</p>
@@ -112,4 +110,4 @@
 			</table>
 		</div>
 	{/if}
-</Page>
+</div>

@@ -10,8 +10,7 @@ import {
 	LayoutDashboard,
 	ScrollText,
 	Settings,
-	Users,
-	UsersRound
+	Users
 } from '@lucide/svelte';
 
 export interface NavItem {
@@ -19,6 +18,8 @@ export interface NavItem {
 	url: string;
 	icon: typeof Boxes;
 	adminOnly?: boolean;
+	/** Other URL prefixes owned by this section (Team spans /users and /groups). */
+	match?: string[];
 }
 
 export interface NavGroup {
@@ -49,8 +50,7 @@ export const NAV_GROUPS: NavGroup[] = [
 		label: 'Admin',
 		items: [
 			{ title: 'Upstreams', url: '/upstreams', icon: CloudDownload, adminOnly: true },
-			{ title: 'Users', url: '/users', icon: Users, adminOnly: true },
-			{ title: 'Groups', url: '/groups', icon: UsersRound, adminOnly: true },
+			{ title: 'Team', url: '/users', icon: Users, adminOnly: true, match: ['/groups'] },
 			{ title: 'Audit', url: '/audit', icon: ScrollText, adminOnly: true },
 			{ title: 'Settings', url: '/settings', icon: Settings, adminOnly: true }
 		]
@@ -58,18 +58,31 @@ export const NAV_GROUPS: NavGroup[] = [
 ];
 
 // Sections reachable only from the user menu still need a header title.
-// (Role-hidden sidebar items need no entry: sectionTitle matches every nav
-// item regardless of adminOnly, so /users/[id] already titles as "Users".)
-const EXTRA_SECTIONS: { title: string; url: string }[] = [{ title: 'Account', url: '/account' }];
+// (Role-hidden sidebar items need no entry: sections match every nav item
+// regardless of adminOnly, so /users/[id] still titles as "Team".)
+const EXTRA_SECTIONS: { title: string; url: string; match?: string[] }[] = [
+	{ title: 'Profile', url: '/account' }
+];
 
 const ALL_SECTIONS = [...NAV_GROUPS.flatMap((g) => g.items), ...EXTRA_SECTIONS];
 
-/** Title of the section owning `pathname`; subpages inherit their section's. */
+const under = (pathname: string, prefix: string) =>
+	pathname === prefix || pathname.startsWith(prefix + '/');
+
+/** Whether `pathname` belongs to the section at `url` (plus its `match` prefixes). */
+export function inSection(pathname: string, item: { url: string; match?: string[] }): boolean {
+	if (item.url === '/') return pathname === '/';
+	return [item.url, ...(item.match ?? [])].some((prefix) => under(pathname, prefix));
+}
+
+/** The section owning `pathname`; subpages inherit their section's. */
+function sectionFor(pathname: string) {
+	return ALL_SECTIONS.find((item) => item.url !== '/' && inSection(pathname, item));
+}
+
+/** Title of the section owning `pathname`. */
 export function sectionTitle(pathname: string): string {
-	const hit = ALL_SECTIONS.find(
-		(item) => item.url !== '/' && (pathname === item.url || pathname.startsWith(item.url + '/'))
-	);
-	return hit?.title ?? 'Overview';
+	return sectionFor(pathname)?.title ?? 'Overview';
 }
 
 /** Per-cache tab segments under /caches/[name]. */
@@ -89,13 +102,29 @@ export interface Crumb {
 /**
  * Header breadcrumbs for `pathname`. Entity segments (a cache, a user) are
  * labeled from the page's own load data when it has them, so the trail reads
- * "Users / Ada Lovelace" rather than an opaque id.
+ * "Team / People / Ada Lovelace" rather than an opaque id.
  */
 export function breadcrumbs(pathname: string, data: Record<string, unknown>): Crumb[] {
-	const section = ALL_SECTIONS.find(
-		(item) => item.url !== '/' && (pathname === item.url || pathname.startsWith(item.url + '/'))
-	);
+	const section = sectionFor(pathname);
 	if (!section) return [{ label: 'Overview', href: '/' }];
+	// Team spans two URL roots, each a tab: Team › People|Groups › entity.
+	if (section.title === 'Team') {
+		const people = under(pathname, '/users');
+		const crumbs: Crumb[] = [
+			{ label: 'Team', href: '/users' },
+			{ label: people ? 'People' : 'Groups', href: people ? '/users' : '/groups' }
+		];
+		if (pathname.split('/').filter(Boolean).length > 1) {
+			if (people) {
+				const subject = data.subject as { name?: string; email?: string } | undefined;
+				crumbs.push({ label: subject?.name || subject?.email || 'User', href: pathname });
+			} else {
+				const group = data.group as { name?: string } | undefined;
+				crumbs.push({ label: group?.name ?? 'Group', href: pathname });
+			}
+		}
+		return crumbs;
+	}
 	const crumbs: Crumb[] = [{ label: section.title, href: section.url }];
 	const rest = pathname.slice(section.url.length).split('/').filter(Boolean);
 	let href = section.url;
@@ -114,12 +143,6 @@ export function breadcrumbs(pathname: string, data: Record<string, unknown>): Cr
 			const obj = data.object as { storePath?: string } | undefined;
 			const name = obj?.storePath?.replace(/^\/nix\/store\/[0-9a-z]{32}-/, '');
 			crumbs.push({ label: name ?? seg.slice(0, 8), href, mono: true });
-		} else if (section.url === '/users') {
-			const subject = data.subject as { name?: string; email?: string } | undefined;
-			crumbs.push({ label: subject?.name || subject?.email || 'User', href });
-		} else if (section.url === '/groups') {
-			const group = data.group as { name?: string } | undefined;
-			crumbs.push({ label: group?.name ?? 'Group', href });
 		} else {
 			crumbs.push({ label: seg, href });
 		}

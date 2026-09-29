@@ -7,8 +7,6 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
-	import Page from '$lib/components/layout/page.svelte';
-	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import Panel from '$lib/components/layout/panel.svelte';
 	import StatusBadge from '$lib/components/layout/status-badge.svelte';
 	import { ShieldCheck, MoreHorizontal, Trash2, UserPlus } from '@lucide/svelte';
@@ -45,12 +43,7 @@
 	}
 </script>
 
-<Page>
-	<PageHeader
-		title="Users"
-		description="Everyone who has signed in, plus anyone you've invited. Roles and activation are managed here."
-	/>
-
+<div>
 	<Panel
 		title="Invite a user"
 		description="Pre-assign a role by email. The account activates the first time they sign in."
@@ -229,4 +222,4 @@
 			</tbody>
 		</table>
 	</div>
-</Page>
+</div>

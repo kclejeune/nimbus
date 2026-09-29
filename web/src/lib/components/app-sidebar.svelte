@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { afterNavigate } from '$app/navigation';
 	import { page } from '$app/state';
-	import { NAV_GROUPS } from '$lib/nav';
+	import { NAV_GROUPS, inSection } from '$lib/nav';
 	import Logo from './logo.svelte';
 	import NavUser from './nav-user.svelte';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
@@ -36,8 +36,8 @@
 		})).filter((group) => group.items.length > 0)
 	);
 
-	function isActive(url: string): boolean {
-		return url === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(url);
+	function isActive(item: { url: string; match?: string[] }): boolean {
+		return inSection(page.url.pathname, item);
 	}
 
 	// On small screens the sidebar is a sheet overlaying the page; client-side
@@ -75,7 +75,7 @@
 					<Sidebar.Menu>
 						{#each group.items as item (item.url)}
 							<Sidebar.MenuItem>
-								<Sidebar.MenuButton tooltipContent={item.title} isActive={isActive(item.url)}>
+								<Sidebar.MenuButton tooltipContent={item.title} isActive={isActive(item)}>
 									{#snippet child({ props })}
 										<a href={item.url} {...props}>
 											<item.icon />

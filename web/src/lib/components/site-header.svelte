@@ -23,7 +23,7 @@
 		<Sidebar.Trigger class="text-muted-foreground" />
 		<nav aria-label="Breadcrumb" class="min-w-0 flex-1">
 			<ol class="flex min-w-0 items-center gap-1 text-sm">
-				{#each crumbs as crumb, i (crumb.href)}
+				{#each crumbs as crumb, i (`${i}:${crumb.href}`)}
 					{@const last = i === crumbs.length - 1}
 					{#if i > 0}
 						<li aria-hidden="true" class="text-muted-foreground/50">
