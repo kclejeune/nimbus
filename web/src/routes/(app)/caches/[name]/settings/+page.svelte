@@ -7,7 +7,11 @@
 	import { Label } from '$lib/components/ui/label/index.js';
 	import GrantBitsPicker from '$lib/components/grant-bits-picker.svelte';
 	import { formatGrantActions } from '$lib/permission-bits';
-	import { ArrowLeft, Check, Pin, Trash2, X } from '@lucide/svelte';
+	import { Check, Globe, Lock, Pin, Trash2, X } from '@lucide/svelte';
+	import Page from '$lib/components/layout/page.svelte';
+	import PageHeader from '$lib/components/layout/page-header.svelte';
+	import Panel from '$lib/components/layout/panel.svelte';
+	import StatusBadge from '$lib/components/layout/status-badge.svelte';
 
 	let { data, form } = $props();
 	const c = $derived(data.cache);
@@ -42,21 +46,11 @@
 	const maxGib = $derived(gibInputValue(c.retentionMaxBytes));
 </script>
 
-<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-	<a
-		href="/caches/{c.name}"
-		class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-	>
-		<ArrowLeft class="size-4" />
-		{c.name}
-	</a>
-
-	<header class="mb-8">
-		<h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
-		<p class="mt-1 text-sm text-muted-foreground">
-			Changing compression affects only newly pushed paths.
-		</p>
-	</header>
+<Page width="narrow">
+	<PageHeader
+		title="Cache settings"
+		description="Configuration, access, pins and lifecycle for this cache. Changing compression only affects paths pushed afterwards."
+	/>
 
 	<form
 		method="POST"
@@ -70,63 +64,76 @@
 		})}
 		class="space-y-6"
 	>
-		<div class="flex items-center gap-3">
-			<input
-				id="is_public"
-				name="is_public"
-				type="checkbox"
-				checked={c.isPublic}
-				disabled={!canConfigure || !data.isAdmin}
-				class="size-4 rounded border-input text-primary focus:ring-ring"
-			/>
-			<Label for="is_public" class="font-normal">
-				Public — anyone can pull without a token
-				{#if !data.isAdmin}
-					<span class="text-xs text-muted-foreground">(admins only)</span>
-				{/if}
-			</Label>
-			{#if !data.isAdmin}
-				<!-- Disabled checkboxes don't submit; preserve the current value. -->
-				{#if c.isPublic}<input type="hidden" name="is_public" value="on" />{/if}
-			{/if}
-		</div>
+		<Panel title="General">
+			<div class="space-y-5">
+				<fieldset>
+					<legend class="mb-2 text-sm font-medium">
+						Visibility
+						{#if !data.isAdmin}
+							<span class="font-normal text-muted-foreground">(admins only)</span>
+						{/if}
+					</legend>
+					<label
+						class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors has-checked:border-primary/50 has-checked:bg-accent/60 has-focus-visible:ring-3 has-focus-visible:ring-ring/50 has-disabled:cursor-not-allowed has-disabled:opacity-60"
+					>
+						<input
+							id="is_public"
+							name="is_public"
+							type="checkbox"
+							checked={c.isPublic}
+							disabled={!canConfigure || !data.isAdmin}
+							class="mt-0.5 size-4 rounded border-input text-primary focus:ring-0 focus:ring-offset-0"
+						/>
+						<span>
+							<span class="flex items-center gap-1.5 text-sm font-medium">
+								{#if c.isPublic}<Globe class="size-3.5" />{:else}<Lock class="size-3.5" />{/if}
+								Public
+							</span>
+							<span class="mt-0.5 block text-xs text-muted-foreground">
+								Anyone can pull without a token. Pushing still needs one.
+							</span>
+						</span>
+					</label>
+					{#if !data.isAdmin}
+						<!-- Disabled checkboxes don't submit; preserve the current value. -->
+						{#if c.isPublic}<input type="hidden" name="is_public" value="on" />{/if}
+					{/if}
+				</fieldset>
 
-		<div class="grid grid-cols-2 gap-4">
-			<div class="space-y-2">
-				<Label for="priority">Priority</Label>
-				<Input
-					id="priority"
-					name="priority"
-					type="number"
-					value={c.priority}
-					disabled={!canConfigure}
-				/>
+				<div class="grid gap-4 sm:grid-cols-2">
+					<div class="space-y-2">
+						<Label for="priority">Priority</Label>
+						<Input
+							id="priority"
+							name="priority"
+							type="number"
+							value={c.priority}
+							disabled={!canConfigure}
+						/>
+					</div>
+					<div class="space-y-2">
+						<Label for="compression">Compression</Label>
+						<select
+							id="compression"
+							name="compression"
+							value={c.compression}
+							disabled={!canConfigure}
+							class="native-select"
+						>
+							<option value="zstd">zstd</option>
+							<option value="gzip">gzip</option>
+							<option value="none">none</option>
+						</select>
+					</div>
+				</div>
 			</div>
-			<div class="space-y-2">
-				<Label for="compression">Compression</Label>
-				<select
-					id="compression"
-					name="compression"
-					value={c.compression}
-					disabled={!canConfigure}
-					class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
-				>
-					<option value="zstd">zstd</option>
-					<option value="gzip">gzip</option>
-					<option value="none">none</option>
-				</select>
-			</div>
-		</div>
+		</Panel>
 
-		<div>
-			<h2 class="text-sm font-medium">Retention</h2>
-			<p class="mt-1 text-sm text-muted-foreground">
-				Retention is closure-aware: a path survives while anything recently pulled (or pinned below)
-				still depends on it. When over the size limit, least-recently-used closures are evicted
-				first. Storage is reclaimed by the nightly garbage collection, or immediately after a push
-				tips the cache over its limit.
-			</p>
-			<div class="mt-4 grid grid-cols-2 gap-4">
+		<Panel
+			title="Retention"
+			description="Closure-aware: a path survives while anything recently pulled, or pinned, still depends on it. Over the size limit, the least recently used closures go first. Space is reclaimed by the nightly garbage collection, or right after a push tips the cache over its limit."
+		>
+			<div class="grid gap-4 sm:grid-cols-2">
 				<div class="space-y-2">
 					<Label for="retention_period">Max age (days)</Label>
 					<Input
@@ -152,29 +159,41 @@
 					/>
 				</div>
 			</div>
-		</div>
+		</Panel>
 
-		<div class="space-y-2">
-			<Label>Upstream caches</Label>
+		<Panel title="Upstream caches" flush>
+			{#snippet description()}
+				Paths already available from an enabled upstream are skipped at push time and served through
+				this cache on pull. Persist copies each hit into this cache in the background, re-signed and
+				safe from upstream garbage collection. Upstream trust is server-wide{#if data.isAdmin};
+					manage it in <a
+						href="/upstreams"
+						class="font-medium text-foreground underline-offset-4 hover:underline">Upstreams</a
+					>{/if}.
+			{/snippet}
 			{#if c.upstreams.length > 0}
-				<ul class="divide-y rounded-lg border">
+				<ul class="divide-y">
 					{#each c.upstreams as upstream (upstream.id)}
-						<li class="flex flex-wrap items-center gap-3 px-4 py-2.5">
+						<li class="flex flex-wrap items-center gap-3 px-5 py-3">
 							<div class="min-w-0 flex-1">
-								<div class="truncate font-mono text-xs">{upstream.url}</div>
-								<div class="mt-0.5 text-xs text-muted-foreground">
-									{upstream.keyName ? `signed by ${upstream.keyName}` : 'no signature check'}
-									· TTL {upstream.ttl}
+								<div class="flex items-center gap-2">
+									<span class="truncate font-mono text-[0.8125rem]">{upstream.url}</span>
 									{#if upstream.enforced}
-										· <span class="text-amber-600 dark:text-amber-400">enforced</span>
+										<StatusBadge tone="warning" title="Enforced upstreams can't be turned off">
+											Enforced
+										</StatusBadge>
 									{/if}
+								</div>
+								<div class="mt-0.5 text-xs text-muted-foreground">
+									{upstream.keyName ? `Signed by ${upstream.keyName}` : 'No signature check'}, TTL
+									<span class="font-mono">{upstream.ttl}</span>
 								</div>
 							</div>
 							<select
 								name="upstream_mode_{upstream.id}"
 								value={upstream.mode}
 								disabled={!canConfigure}
-								class="flex h-8 w-44 rounded-md border border-input bg-transparent px-2 text-xs focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+								class="native-select w-48"
 								aria-label="Mode for {upstream.url}"
 							>
 								<option value="inherit">Default ({upstream.defaultMode})</option>
@@ -188,342 +207,340 @@
 					{/each}
 				</ul>
 			{:else}
-				<p class="text-sm text-muted-foreground">No upstreams are registered on this server.</p>
+				<p class="px-5 py-6 text-sm text-muted-foreground">
+					No upstreams are registered on this server.
+				</p>
 			{/if}
-			<p class="text-xs text-muted-foreground">
-				Upstream trust (URL, public key, TTL) is server-wide{#if data.isAdmin}
-					— manage it on the <a href="/upstreams" class="underline">Upstreams</a> page{/if}. Here
-				you pick how this cache uses each one: paths already available from an enabled upstream are
-				skipped at push time and served through this cache on pull. “Persist” copies each hit path
-				into this cache in the background — re-signed, served locally, immune to upstream garbage
-				collection. Enforced upstreams cannot be turned off.
-			</p>
-		</div>
+		</Panel>
 
 		{#if form?.error}
-			<p class="text-sm text-destructive">{form.error}</p>
+			<p role="alert" class="text-sm text-destructive">{form.error}</p>
 		{/if}
 
-		<div class="flex items-center gap-3">
-			<Button type="submit" disabled={submitting}>
+		<div
+			class="sticky bottom-4 z-10 flex items-center gap-3 rounded-lg border bg-card/95 px-4 py-3 shadow-(--shadow-sheet) backdrop-blur"
+		>
+			<span class="text-sm text-muted-foreground">
+				{#if form?.saved}
+					<span class="inline-flex items-center gap-1.5 text-success">
+						<Check class="size-4" /> Saved
+					</span>
+				{:else}
+					General, retention and upstream settings save together.
+				{/if}
+			</span>
+			<Button type="submit" class="ms-auto" disabled={submitting || !canConfigure}>
 				{submitting ? 'Saving…' : 'Save changes'}
 			</Button>
-			{#if form?.saved}
-				<span class="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
-					<Check class="size-4" /> Saved
-				</span>
-			{/if}
 		</div>
 	</form>
 
-	<hr class="my-10 border-border" />
-
-	<section class="space-y-4">
-		<div>
-			<h2 class="text-sm font-medium">Access</h2>
-			<p class="mt-1 text-sm text-muted-foreground">
+	<div class="mt-10 space-y-6">
+		<Panel title="Access" flush>
+			{#snippet description()}
 				Who can use this cache beyond {c.isPublic ? 'anonymous public pulls' : 'admins'}. Tokens are
-				permission snapshots — changes here don't alter already-minted tokens (revoke instead).
-			</p>
-		</div>
-
-		<div class="overflow-x-auto rounded-lg border">
-			<table class="w-full text-sm">
-				<thead class="border-b bg-muted/40 text-left text-xs text-muted-foreground">
-					<tr>
-						<th class="px-4 py-2.5 font-medium">Subject</th>
-						<th class="px-4 py-2.5 font-medium">Permissions</th>
-						<th class="px-4 py-2.5 font-medium">Source</th>
-						<th class="w-14 px-4 py-2.5"></th>
-					</tr>
-				</thead>
-				<tbody class="divide-y">
-					{#each data.access as grant (grant.id)}
-						<tr class="transition-colors hover:bg-muted/30">
-							<td class="px-4 py-2.5">
-								<a
-									href="/{grant.subjectType === 'group' ? 'groups' : 'users'}/{grant.subjectId}"
-									class="font-medium hover:underline">{grant.subjectLabel}</a
-								>
-							</td>
-							<td class="px-4 py-2.5 text-muted-foreground">{formatGrantActions(grant.actions)}</td>
-							<td class="px-4 py-2.5">
-								{#if grant.direct}
-									<span class="text-muted-foreground">this cache</span>
-								{:else}
-									<code class="rounded bg-muted px-1.5 py-0.5 text-xs">{grant.pattern}</code>
-									<span class="text-xs text-muted-foreground">
-										pattern grant — edit on the subject's page</span
-									>
-								{/if}
-							</td>
-							<td class="px-4 py-1.5 text-right">
-								{#if grant.direct && data.isAdmin}
-									<form method="POST" action="?/accessRemove" use:enhance={toastErrors()}>
-										<input type="hidden" name="id" value={grant.id} />
-										<input type="hidden" name="subject_type" value={grant.subjectType} />
-										<input type="hidden" name="subject_id" value={grant.subjectId} />
-										<Button type="submit" variant="ghost" size="icon" aria-label="Remove access">
-											<Trash2 class="size-4" />
-										</Button>
-									</form>
-								{/if}
-							</td>
-						</tr>
-					{:else}
+				permission snapshots: changes here don't alter tokens already issued, so revoke those
+				instead.
+			{/snippet}
+			<div class="overflow-x-auto">
+				<table class="data-table">
+					<thead>
 						<tr>
-							<td colspan="4" class="px-4 py-3 text-sm text-muted-foreground">
-								No grants apply to this cache.
-							</td>
+							<th>Subject</th>
+							<th>Permissions</th>
+							<th>Source</th>
+							<th class="w-14"><span class="sr-only">Actions</span></th>
 						</tr>
-					{/each}
-				</tbody>
-			</table>
-		</div>
+					</thead>
+					<tbody>
+						{#each data.access as grant (grant.id)}
+							<tr>
+								<td>
+									<a
+										href="/{grant.subjectType === 'group' ? 'groups' : 'users'}/{grant.subjectId}"
+										class="row-link">{grant.subjectLabel}</a
+									>
+								</td>
+								<td class="text-muted-foreground">{formatGrantActions(grant.actions)}</td>
+								<td>
+									{#if grant.direct}
+										<span class="text-muted-foreground">This cache</span>
+									{:else}
+										<code class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs"
+											>{grant.pattern}</code
+										>
+										<span class="ml-1 text-xs text-muted-foreground"
+											>Pattern grant, edit it on the subject's page</span
+										>
+									{/if}
+								</td>
+								<td class="!py-1 text-right">
+									{#if grant.direct && data.isAdmin}
+										<form method="POST" action="?/accessRemove" use:enhance={toastErrors()}>
+											<input type="hidden" name="id" value={grant.id} />
+											<input type="hidden" name="subject_type" value={grant.subjectType} />
+											<input type="hidden" name="subject_id" value={grant.subjectId} />
+											<Button
+												type="submit"
+												variant="ghost"
+												size="icon-sm"
+												class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+												aria-label="Remove access for {grant.subjectLabel}"
+											>
+												<Trash2 />
+											</Button>
+										</form>
+									{/if}
+								</td>
+							</tr>
+						{:else}
+							<tr>
+								<td colspan="4" class="text-muted-foreground">No grants apply to this cache.</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
 
-		{#if data.isAdmin}
-			<form method="POST" action="?/accessAdd" use:enhance={toastErrors()} class="space-y-3">
-				<div class="flex flex-wrap items-end gap-3">
-					<div class="min-w-56 flex-1 space-y-2">
-						<Label for="subject">Add access for</Label>
-						<select
-							id="subject"
-							name="subject"
-							class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-						>
-							{#each data.subjects as subject (subject.value)}
-								<option value={subject.value}>{subject.label}</option>
-							{/each}
-						</select>
-					</div>
-					<Button type="submit" variant="secondary">Add</Button>
-				</div>
-				<GrantBitsPicker />
-				{#if form?.accessError}
-					<p class="text-sm text-destructive">{form.accessError}</p>
+			{#snippet footer()}
+				{#if data.isAdmin}
+					<form
+						method="POST"
+						action="?/accessAdd"
+						use:enhance={toastErrors()}
+						class="w-full space-y-3 text-foreground"
+					>
+						<div class="flex flex-wrap items-end gap-3">
+							<div class="min-w-56 flex-1 space-y-2">
+								<Label for="subject">Grant access to</Label>
+								<select id="subject" name="subject" class="native-select">
+									{#each data.subjects as subject (subject.value)}
+										<option value={subject.value}>{subject.label}</option>
+									{/each}
+								</select>
+							</div>
+							<Button type="submit" variant="outline">Grant access</Button>
+						</div>
+						<GrantBitsPicker />
+						{#if form?.accessError}
+							<p role="alert" class="text-sm text-destructive">{form.accessError}</p>
+						{/if}
+					</form>
+				{:else}
+					<span>Only admins can change who has access.</span>
 				{/if}
-			</form>
-		{/if}
-	</section>
+			{/snippet}
+		</Panel>
 
-	<hr class="my-10 border-border" />
-
-	<section class="space-y-4">
-		<div>
-			<h2 class="inline-flex items-center gap-1.5 text-sm font-medium">
-				<Pin class="size-3.5" /> Pinned paths
-			</h2>
-			<p class="mt-1 text-sm text-muted-foreground">
-				Garbage collection never removes a pinned path or anything in its closure, regardless of age
-				or size limits. Paths can also be pinned from the store path list.
-			</p>
-		</div>
-
-		{#if namedPins.length > 0}
-			<ul class="divide-y rounded-lg border">
-				{#each namedPins as pin (pin.name)}
-					<li class="px-4 py-2.5">
-						<div class="flex items-center gap-3">
+		<Panel
+			title="Pinned paths"
+			description="Garbage collection never removes a pinned path or anything in its closure, regardless of age or size limits. You can also pin paths from the store path list."
+			flush
+		>
+			{#if data.roots.length === 0}
+				<p class="px-5 py-6 text-sm text-muted-foreground">Nothing is pinned.</p>
+			{:else}
+				<ul class="divide-y">
+					{#each namedPins as pin (pin.name)}
+						<li class="px-5 py-3">
+							<div class="flex items-center gap-3">
+								<Pin class="size-3.5 text-primary" />
+								<div class="min-w-0 flex-1">
+									<span class="text-sm font-medium">{pin.name}</span>
+									<span class="ml-1 text-xs text-muted-foreground">
+										{pin.revisions.length}
+										{pin.revisions.length === 1 ? 'revision' : 'revisions'}{pin.keepRevisions
+											? `, keeps the last ${pin.keepRevisions}`
+											: ''}
+									</span>
+								</div>
+								<form method="POST" action="?/removeRoot" use:enhance={toastErrors()}>
+									<input type="hidden" name="pin" value={pin.name} />
+									<button
+										type="submit"
+										title="Remove pin and all revisions"
+										aria-label="Remove pin {pin.name}"
+										class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+									>
+										<X class="size-4" />
+									</button>
+								</form>
+							</div>
+							<ul class="mt-2 ml-6 space-y-1 border-l pl-3">
+								{#each pin.revisions as root, i (root.hash)}
+									<li class="flex flex-wrap items-center gap-x-2 text-xs">
+										<span class="font-mono">{root.hash}</span>
+										{#if i === 0}<StatusBadge tone="primary">Current</StatusBadge>{/if}
+										<span class="text-muted-foreground">
+											{#if root.inCache}
+												{formatCount(root.closureObjects)} paths, {formatBytes(root.closureBytes)}
+											{:else}
+												Not in this cache
+											{/if}
+											{root.note ? `(${root.note})` : ''}
+										</span>
+									</li>
+								{/each}
+							</ul>
+						</li>
+					{/each}
+					{#each anonRoots as root (root.hash)}
+						<li class="flex items-center gap-3 px-5 py-3">
+							<Pin class="size-3.5 text-muted-foreground" />
 							<div class="min-w-0 flex-1">
-								<span class="text-sm font-medium">{pin.name}</span>
-								<span class="text-xs text-muted-foreground">
-									· {pin.revisions.length}
-									{pin.revisions.length === 1 ? 'revision' : 'revisions'}{pin.keepRevisions
-										? ` (keeps last ${pin.keepRevisions})`
-										: ''}
-								</span>
+								<div class="truncate font-mono text-xs">{root.hash}</div>
+								<div class="mt-0.5 text-xs text-muted-foreground">
+									{#if root.inCache}
+										Protects {formatCount(root.closureObjects)} paths ({formatBytes(
+											root.closureBytes
+										)}){root.note ? `: ${root.note}` : ''}
+									{:else}
+										Not in this cache{root.note ? `: ${root.note}` : ''}
+									{/if}
+								</div>
 							</div>
 							<form method="POST" action="?/removeRoot" use:enhance={toastErrors()}>
-								<input type="hidden" name="pin" value={pin.name} />
+								<input type="hidden" name="hash" value={root.hash} />
 								<button
 									type="submit"
-									title="Remove pin and all revisions"
+									title="Unpin"
+									aria-label="Unpin"
 									class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 								>
 									<X class="size-4" />
 								</button>
 							</form>
-						</div>
-						<ul class="mt-1 space-y-0.5">
-							{#each pin.revisions as root, i (root.hash)}
-								<li class="text-xs">
-									<span class="font-mono">{root.hash}</span>
-									<span class="text-muted-foreground">
-										{#if i === 0}· current{/if}
-										{#if root.inCache}
-											· {formatCount(root.closureObjects)} paths ({formatBytes(root.closureBytes)})
-										{:else}
-											· not in this cache
-										{/if}
-										{root.note ? `· ${root.note}` : ''}
-									</span>
-								</li>
-							{/each}
-						</ul>
-					</li>
-				{/each}
-			</ul>
-		{/if}
-
-		{#if anonRoots.length > 0}
-			<ul class="divide-y rounded-lg border">
-				{#each anonRoots as root (root.hash)}
-					<li class="flex items-center gap-3 px-4 py-2.5">
-						<div class="min-w-0 flex-1">
-							<div class="truncate font-mono text-xs">{root.hash}</div>
-							<div class="mt-0.5 text-xs text-muted-foreground">
-								{#if root.inCache}
-									protects {formatCount(root.closureObjects)} paths ({formatBytes(
-										root.closureBytes
-									)}){root.note ? ` — ${root.note}` : ''}
-								{:else}
-									not in this cache{root.note ? ` — ${root.note}` : ''}
-								{/if}
-							</div>
-						</div>
-						<form method="POST" action="?/removeRoot" use:enhance={toastErrors()}>
-							<input type="hidden" name="hash" value={root.hash} />
-							<button
-								type="submit"
-								title="Unpin"
-								class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-							>
-								<X class="size-4" />
-							</button>
-						</form>
-					</li>
-				{/each}
-			</ul>
-		{/if}
-		{#if data.roots.length === 0}
-			<p class="text-sm text-muted-foreground">Nothing pinned.</p>
-		{/if}
-
-		<form
-			method="POST"
-			action="?/addRoot"
-			use:enhance={toastErrors(() => {
-				addingRoot = true;
-				return async ({ update }) => {
-					await update();
-					addingRoot = false;
-				};
-			})}
-			class="flex flex-wrap items-end gap-3"
-		>
-			<div class="min-w-56 flex-1 space-y-2">
-				<Label for="root_path">Store path or hash</Label>
-				<Input
-					id="root_path"
-					name="path"
-					placeholder="/nix/store/xxxx… or 32-char hash"
-					autocomplete="off"
-				/>
-			</div>
-			<div class="w-36 space-y-2">
-				<Label for="pin_name">Name</Label>
-				<Input
-					id="pin_name"
-					name="pin_name"
-					placeholder="e.g. v1.7 (optional)"
-					autocomplete="off"
-				/>
-			</div>
-			<div class="w-28 space-y-2">
-				<Label for="keep_revisions">Keep last</Label>
-				<Input
-					id="keep_revisions"
-					name="keep_revisions"
-					type="number"
-					min="1"
-					placeholder="all"
-					autocomplete="off"
-				/>
-			</div>
-			<div class="w-40 space-y-2">
-				<Label for="root_note">Note</Label>
-				<Input id="root_note" name="note" placeholder="optional" autocomplete="off" />
-			</div>
-			<Button type="submit" variant="outline" disabled={addingRoot}>
-				<Pin class="size-4" />
-				{addingRoot ? 'Pinning…' : 'Pin'}
-			</Button>
-		</form>
-		<p class="text-xs text-muted-foreground">
-			Naming a pin gives it a revision history: re-pinning the same name keeps the old revisions
-			protected too (bounded by “keep last”). Unnamed pins protect a single path's closure.
-		</p>
-		{#if form?.rootError}
-			<p class="text-sm text-destructive">{form.rootError}</p>
-		{/if}
-	</section>
-
-	<hr class="my-10 border-border" />
-
-	{#if canConfigure}
-		<section class="space-y-4">
-			<div>
-				<h2 class="text-sm font-medium">Rename cache</h2>
-				<p class="mt-1 text-sm text-muted-foreground">
-					The signing key is preserved, so already-pushed paths stay trusted. The pull URL changes
-					to the new name.
-				</p>
-			</div>
-			<form
-				method="POST"
-				action="?/rename"
-				use:enhance={toastErrors(() => {
-					renaming = true;
-					return async ({ update }) => {
-						await update({ reset: false });
-						renaming = false;
-					};
-				})}
-				class="flex flex-wrap items-end gap-3"
-			>
-				<div class="min-w-56 flex-1 space-y-2">
-					<Label for="new_name">New name</Label>
-					<Input id="new_name" name="new_name" value={c.name} autocomplete="off" />
-				</div>
-				<Button type="submit" variant="outline" disabled={renaming}>
-					{renaming ? 'Renaming…' : 'Rename'}
-				</Button>
-			</form>
-			{#if form?.renameError}
-				<p class="text-sm text-destructive">{form.renameError}</p>
+						</li>
+					{/each}
+				</ul>
 			{/if}
-		</section>
-	{/if}
 
-	{#if data.permissions.canDestroy}
-		<div class="mt-10 rounded-lg border border-destructive/40 p-5">
-			<h2 class="text-sm font-medium text-destructive">Danger zone</h2>
-			<p class="mt-1 text-sm text-muted-foreground">
-				Deleting removes the cache and hides its paths. Stored data is retained but the cache is no
-				longer reachable.
-			</p>
-			<form
-				method="POST"
-				action="?/delete"
-				class="mt-4"
-				use:enhance={toastErrors(
-					confirmFirst(`Delete cache "${c.name}"? Clients can no longer pull from it.`, () => {
-						deleting = true;
+			{#snippet footer()}
+				<form
+					method="POST"
+					action="?/addRoot"
+					use:enhance={toastErrors(() => {
+						addingRoot = true;
 						return async ({ update }) => {
 							await update();
-							deleting = false;
+							addingRoot = false;
 						};
-					})
-				)}
+					})}
+					class="w-full space-y-3 text-foreground"
+				>
+					<div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem]">
+						<div class="space-y-2">
+							<Label for="root_path">Store path or hash</Label>
+							<Input
+								id="root_path"
+								name="path"
+								placeholder="/nix/store/… or 32-character hash"
+								autocomplete="off"
+								class="font-mono text-[0.8125rem] md:text-[0.8125rem]"
+							/>
+						</div>
+						<div class="space-y-2">
+							<Label for="pin_name">Name</Label>
+							<Input id="pin_name" name="pin_name" placeholder="v1.7" autocomplete="off" />
+						</div>
+					</div>
+					<div class="flex flex-wrap items-end gap-3">
+						<div class="w-28 space-y-2">
+							<Label for="keep_revisions">Keep last</Label>
+							<Input
+								id="keep_revisions"
+								name="keep_revisions"
+								type="number"
+								min="1"
+								placeholder="All"
+								autocomplete="off"
+							/>
+						</div>
+						<div class="min-w-40 flex-1 space-y-2">
+							<Label for="root_note">Note</Label>
+							<Input id="root_note" name="note" placeholder="Optional" autocomplete="off" />
+						</div>
+						<Button type="submit" variant="outline" disabled={addingRoot}>
+							<Pin />
+							{addingRoot ? 'Pinning…' : 'Pin path'}
+						</Button>
+					</div>
+					<p class="text-xs text-muted-foreground">
+						Naming a pin gives it a revision history: pinning the same name again keeps the older
+						revisions protected too, up to “Keep last”. Name and note are optional.
+					</p>
+					{#if form?.rootError}
+						<p role="alert" class="text-sm text-destructive">{form.rootError}</p>
+					{/if}
+				</form>
+			{/snippet}
+		</Panel>
+
+		{#if canConfigure}
+			<Panel
+				title="Rename cache"
+				description="The signing key is kept, so paths already pushed stay trusted. The substituter URL changes to the new name."
 			>
-				<Button type="submit" variant="destructive" disabled={deleting}>
-					<Trash2 class="size-4" />
-					{deleting ? 'Deleting…' : 'Delete cache'}
-				</Button>
-			</form>
-			{#if form?.deleteError}
-				<p class="mt-3 text-sm text-destructive">{form.deleteError}</p>
-			{/if}
-		</div>
-	{/if}
-</div>
+				<form
+					method="POST"
+					action="?/rename"
+					use:enhance={toastErrors(() => {
+						renaming = true;
+						return async ({ update }) => {
+							await update({ reset: false });
+							renaming = false;
+						};
+					})}
+					class="flex flex-wrap items-end gap-3"
+				>
+					<div class="min-w-56 flex-1 space-y-2">
+						<Label for="new_name">New name</Label>
+						<Input
+							id="new_name"
+							name="new_name"
+							value={c.name}
+							autocomplete="off"
+							class="font-mono"
+						/>
+					</div>
+					<Button type="submit" variant="outline" disabled={renaming}>
+						{renaming ? 'Renaming…' : 'Rename cache'}
+					</Button>
+				</form>
+				{#if form?.renameError}
+					<p role="alert" class="mt-3 text-sm text-destructive">{form.renameError}</p>
+				{/if}
+			</Panel>
+		{/if}
+
+		{#if data.permissions.canDestroy}
+			<Panel
+				title="Delete cache"
+				tone="danger"
+				description="Removes the cache and hides its paths. Stored data is kept, but clients can no longer pull from it."
+			>
+				<form
+					method="POST"
+					action="?/delete"
+					use:enhance={toastErrors(
+						confirmFirst(`Delete cache "${c.name}"? Clients can no longer pull from it.`, () => {
+							deleting = true;
+							return async ({ update }) => {
+								await update();
+								deleting = false;
+							};
+						})
+					)}
+				>
+					<Button type="submit" variant="destructive" disabled={deleting}>
+						<Trash2 />
+						{deleting ? 'Deleting…' : 'Delete cache'}
+					</Button>
+				</form>
+				{#if form?.deleteError}
+					<p role="alert" class="mt-3 text-sm text-destructive">{form.deleteError}</p>
+				{/if}
+			</Panel>
+		{/if}
+	</div>
+</Page>

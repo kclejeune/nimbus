@@ -7,15 +7,10 @@
 	let checked = $state<Record<string, boolean>>({});
 </script>
 
-<div class="flex flex-wrap items-center gap-4">
+<div class="flex flex-wrap items-center gap-2">
 	{#each GRANT_BIT_OPTIONS as bit (bit.name)}
-		<label class="flex items-center gap-2 text-sm">
-			<input
-				name={bit.name}
-				type="checkbox"
-				bind:checked={checked[bit.name]}
-				class="size-4 rounded border-input text-primary"
-			/>
+		<label class="check-chip">
+			<input name={bit.name} type="checkbox" bind:checked={checked[bit.name]} />
 			{bit.label}
 		</label>
 	{/each}

@@ -4,7 +4,9 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { formatBits } from '$lib/permission-bits';
 	import { formatDate } from '$lib/format';
-	import { KeyRound, Trash2 } from '@lucide/svelte';
+	import { KeyRound } from '@lucide/svelte';
+	import EmptyState from '$lib/components/layout/empty-state.svelte';
+	import StatusBadge from '$lib/components/layout/status-badge.svelte';
 
 	let {
 		tokens,
@@ -37,71 +39,66 @@
 </script>
 
 {#if tokens.length === 0}
-	<div class="rounded-lg border border-dashed py-12 text-center">
-		<KeyRound class="mx-auto mb-3 size-6 text-muted-foreground" />
-		<p class="text-sm text-muted-foreground">{emptyText}</p>
-	</div>
+	<EmptyState icon={KeyRound} title="No tokens yet" description={emptyText} />
 {:else}
-	<div class="overflow-x-auto rounded-lg border">
-		<table class="w-full text-sm">
-			<thead class="border-b bg-muted/40 text-left text-xs text-muted-foreground">
+	<div class="table-frame">
+		<table class="data-table">
+			<thead>
 				<tr>
-					<th class="px-4 py-2.5 font-medium">Token</th>
-					<th class="px-4 py-2.5 font-medium">Scope</th>
-					<th class="px-4 py-2.5 font-medium">Permissions</th>
-					<th class="px-4 py-2.5 font-medium">Created</th>
-					<th class="px-4 py-2.5 font-medium">Expires</th>
-					<th class="px-4 py-2.5 font-medium">Status</th>
-					<th class="w-24 px-4 py-2.5"></th>
+					<th>Token</th>
+					<th>Scope</th>
+					<th>Permissions</th>
+					<th>Created</th>
+					<th>Expires</th>
+					<th>Status</th>
+					<th class="w-24"><span class="sr-only">Actions</span></th>
 				</tr>
 			</thead>
-			<tbody class="divide-y">
+			<tbody>
 				{#each tokens as t (t.id)}
 					{@const entries = scopeEntries(t.scope)}
-					<tr class="transition-colors hover:bg-muted/30">
-						<td class="px-4 py-2.5 font-medium">{t.name}</td>
-						<td class="px-4 py-2.5">
-							{#each entries as entry, i (entry.cache)}
-								{#if i > 0},{/if}
-								{#if entry.cache === '*'}
-									<span class="text-muted-foreground">all caches</span>
-								{:else}
-									<code class="rounded bg-muted px-1.5 py-0.5 text-xs">{entry.cache}</code>
-								{/if}
-							{/each}
+					{@const inert = t.status === 'revoked' || t.status === 'expired'}
+					<tr class={inert ? 'text-muted-foreground' : ''}>
+						<td class="font-medium whitespace-nowrap">{t.name}</td>
+						<td>
+							<div class="flex flex-wrap gap-1">
+								{#each entries as entry (entry.cache)}
+									{#if entry.cache === '*'}
+										<span class="text-muted-foreground">All caches</span>
+									{:else}
+										<code
+											class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs whitespace-nowrap"
+											>{entry.cache}</code
+										>
+									{/if}
+								{/each}
+							</div>
 						</td>
-						<td class="px-4 py-2.5 text-muted-foreground">
+						<td class="text-muted-foreground">
 							{[...new Set(entries.map((e) => e.perms))].join('; ')}
 						</td>
-						<td class="px-4 py-2.5 text-muted-foreground">{formatDate(t.createdAt)}</td>
-						<td class="px-4 py-2.5 text-muted-foreground">
-							{t.expiresAt ? formatDate(t.expiresAt) : 'never'}
+						<td class="whitespace-nowrap text-muted-foreground">{formatDate(t.createdAt)}</td>
+						<td class="whitespace-nowrap text-muted-foreground">
+							{t.expiresAt ? formatDate(t.expiresAt) : 'Never'}
 						</td>
-						<td class="px-4 py-2.5">
+						<td>
 							{#if t.status === 'revoked'}
-								<span class="rounded bg-destructive/10 px-1.5 py-0.5 text-xs text-destructive">
-									revoked
-								</span>
+								<StatusBadge tone="danger">Revoked</StatusBadge>
 							{:else if t.status === 'expired'}
-								<span class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
-									expired
-								</span>
+								<StatusBadge>Expired</StatusBadge>
 							{:else if t.status === 'suspended'}
-								<span
-									class="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-600 dark:text-amber-400"
+								<StatusBadge
+									tone="warning"
+									dot
 									title="Inert while the account is deactivated; works again on reactivation"
 								>
-									suspended
-								</span>
+									Suspended
+								</StatusBadge>
 							{:else}
-								<span
-									class="rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs text-emerald-600 dark:text-emerald-400"
-								>
-									active
-								</span>
+								<StatusBadge tone="success" dot>Active</StatusBadge>
 							{/if}
 						</td>
-						<td class="px-4 py-1.5 text-right">
+						<td class="!py-1 text-right">
 							{#if t.status === 'active' || t.status === 'suspended'}
 								<form method="POST" action={revokeAction} use:enhance={toastErrors()}>
 									<input type="hidden" name="id" value={t.id} />
@@ -109,9 +106,9 @@
 										type="submit"
 										variant="ghost"
 										size="sm"
-										class="text-muted-foreground hover:text-destructive"
+										class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
 									>
-										<Trash2 class="size-4" /> Revoke
+										Revoke
 									</Button>
 								</form>
 							{/if}

@@ -2,12 +2,15 @@
 	import { enhance } from '$app/forms';
 	import { goto } from '$app/navigation';
 	import { confirmFirst, toastErrors } from '$lib/enhance';
-	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import GrantEditor from '$lib/components/grant-editor.svelte';
 	import TokenTable from '$lib/components/token-table.svelte';
 	import { formatGrantActions } from '$lib/permission-bits';
-	import { ArrowLeft, Trash2 } from '@lucide/svelte';
+	import { ShieldCheck, Trash2 } from '@lucide/svelte';
+	import Page from '$lib/components/layout/page.svelte';
+	import PageHeader from '$lib/components/layout/page-header.svelte';
+	import Panel from '$lib/components/layout/panel.svelte';
+	import StatusBadge from '$lib/components/layout/status-badge.svelte';
 
 	let { data, form } = $props();
 	const u = $derived(data.subject);
@@ -17,51 +20,32 @@
 	const canManage = $derived(data.user.role === 'admin');
 </script>
 
-<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-	{#if canManage}
-		<a
-			href="/users"
-			class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-		>
-			<ArrowLeft class="size-4" />
-			Users
-		</a>
-	{/if}
-
-	<header class="mb-8 flex flex-wrap items-start justify-between gap-4">
-		<div>
-			<h1 class="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-				{u.name}
-				{#if u.isOwner}
-					<span class="rounded bg-muted px-1.5 py-0.5 text-xs font-normal text-muted-foreground">
-						owner
-					</span>
-				{/if}
-				{#if u.status === 'pending'}
-					<span
-						class="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400"
-					>
-						pending
-					</span>
-				{/if}
-			</h1>
-			<p class="mt-1 text-sm text-muted-foreground">
-				{u.email}
-				<Badge variant={u.role === 'admin' ? 'default' : 'secondary'}>
-					{u.role}
-				</Badge>
-			</p>
-		</div>
-
-		{#if canManage}
-			<div class="flex flex-wrap items-center gap-2">
+<Page>
+	<PageHeader title={u.name || u.email}>
+		{#snippet meta()}
+			<span>{u.email}</span>
+			{#if u.role === 'admin'}
+				<span class="inline-flex items-center gap-1.5 font-medium text-foreground">
+					<ShieldCheck class="size-3.5 text-primary" /> Admin
+				</span>
+			{:else}
+				<span>Member</span>
+			{/if}
+			{#if u.isOwner}
+				<StatusBadge>Owner</StatusBadge>
+			{/if}
+			{#if u.status === 'pending'}
+				<StatusBadge tone="warning" dot>Pending</StatusBadge>
+			{/if}
+		{/snippet}
+		{#snippet actions()}
+			{#if canManage}
 				<form method="POST" action="?/setRole" use:enhance={toastErrors()}>
 					<input type="hidden" name="userId" value={u.id} />
 					<input type="hidden" name="role" value={u.role === 'admin' ? 'member' : 'admin'} />
 					<Button
 						type="submit"
 						variant="outline"
-						size="sm"
 						disabled={u.role === 'admin' && (isSelf || u.isOwner)}
 						title={u.role === 'admin' && u.isOwner ? 'Remove owner status first' : undefined}
 					>
@@ -78,7 +62,6 @@
 					<Button
 						type="submit"
 						variant="outline"
-						size="sm"
 						disabled={u.status !== 'pending' && (isSelf || u.isOwner)}
 					>
 						{u.status === 'pending' ? 'Activate' : 'Deactivate'}
@@ -101,9 +84,7 @@
 					<input type="hidden" name="userId" value={u.id} />
 					<Button
 						type="submit"
-						variant="outline"
-						size="sm"
-						class="text-destructive hover:bg-destructive/10"
+						variant="destructive"
 						disabled={isSelf || (u.isOwner && data.lastOwner)}
 						title={isSelf
 							? 'You cannot delete your own account'
@@ -111,74 +92,86 @@
 								? 'Add another owner before deleting the last one'
 								: undefined}
 					>
-						<Trash2 class="size-4" />
-						Delete
+						<Trash2 />
+						Delete user
 					</Button>
 				</form>
-			</div>
-		{/if}
-	</header>
+			{/if}
+		{/snippet}
+	</PageHeader>
 
 	{#if form?.error}
-		<p class="mb-4 text-sm text-destructive">{form.error}</p>
+		<p role="alert" class="mb-4 text-sm text-destructive">{form.error}</p>
 	{/if}
 
 	{#if u.role === 'admin'}
-		<p class="mb-8 rounded-lg border bg-card p-4 text-sm text-muted-foreground">
-			Admins bypass grants and hold every permission; grants below only take effect if this user is
-			demoted to member.
-		</p>
+		<div
+			class="mb-6 flex items-start gap-3 rounded-lg border border-primary/25 bg-accent/60 px-4 py-3 text-sm text-accent-foreground"
+		>
+			<ShieldCheck class="mt-0.5 size-4 shrink-0" />
+			<p>
+				Admins bypass grants and hold every permission. The grants below only take effect if this
+				user becomes a member.
+			</p>
+		</div>
 	{/if}
 
-	<section class="mb-8 rounded-lg border bg-card p-5">
-		<h2 class="mb-4 text-sm font-medium">Groups</h2>
-		<ul class="divide-y">
-			{#each data.memberships as membership (membership.id)}
-				<li class="flex items-center gap-2 py-2 text-sm">
-					{#if canManage}
-						<a href="/groups/{membership.id}" class="hover:underline">{membership.name}</a>
-					{:else}
-						<span>{membership.name}</span>
-					{/if}
-					{#if membership.source === 'sso'}<Badge variant="secondary">sso</Badge>{/if}
-				</li>
+	<div class="grid gap-6">
+		<Panel title="Groups" flush>
+			{#if data.memberships.length === 0}
+				<p class="px-5 py-6 text-center text-sm text-muted-foreground">Not in any groups.</p>
 			{:else}
-				<li class="py-2 text-sm text-muted-foreground">No group memberships.</li>
-			{/each}
-		</ul>
-	</section>
+				<ul class="divide-y">
+					{#each data.memberships as membership (membership.id)}
+						<li class="flex items-center gap-2 px-5 py-3 text-sm">
+							{#if canManage}
+								<a href="/groups/{membership.id}" class="row-link">{membership.name}</a>
+							{:else}
+								<span class="font-medium">{membership.name}</span>
+							{/if}
+							{#if membership.source === 'sso'}
+								<StatusBadge title="Membership synced from the SSO groups claim"
+									>Synced from SSO</StatusBadge
+								>
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</Panel>
 
-	<div class="space-y-8">
 		<GrantEditor grants={data.grants} cacheNames={data.cacheNames} editable={canManage} />
 
-		<section class="rounded-lg border bg-card p-5">
-			<h2 class="mb-1 text-sm font-medium">Access via groups</h2>
-			<p class="mb-4 text-sm text-muted-foreground">
-				{canManage
-					? "Inherited from group membership — edit these on the group's page."
-					: 'Inherited from group membership.'}
-			</p>
-			<div class="overflow-x-auto rounded-lg border">
-				<table class="w-full text-sm">
-					<thead class="border-b bg-muted/40 text-left text-xs text-muted-foreground">
+		<Panel
+			title="Access via groups"
+			description={canManage
+				? "Inherited from group membership. Edit these on the group's page."
+				: 'Inherited from group membership.'}
+			flush
+		>
+			<div class="overflow-x-auto">
+				<table class="data-table">
+					<thead>
 						<tr>
-							<th class="px-4 py-2.5 font-medium">Cache</th>
-							<th class="px-4 py-2.5 font-medium">Permissions</th>
-							<th class="px-4 py-2.5 font-medium">Via group</th>
+							<th>Cache</th>
+							<th>Permissions</th>
+							<th>Via group</th>
 						</tr>
 					</thead>
-					<tbody class="divide-y">
+					<tbody>
 						{#each data.viaGroups as grant (grant.id)}
-							<tr class="transition-colors hover:bg-muted/30">
-								<td class="px-4 py-2.5">
-									<code class="rounded bg-muted px-1.5 py-0.5 text-xs">{grant.pattern}</code>
+							<tr>
+								<td>
+									<code class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs"
+										>{grant.pattern}</code
+									>
 								</td>
-								<td class="px-4 py-2.5 text-muted-foreground">
+								<td class="text-muted-foreground">
 									{formatGrantActions(grant.actions)}
 								</td>
-								<td class="px-4 py-2.5">
+								<td>
 									{#if canManage}
-										<a href="/groups/{grant.group_id}" class="font-medium hover:underline">
+										<a href="/groups/{grant.group_id}" class="row-link">
 											{grant.group_name}
 										</a>
 									{:else}
@@ -188,7 +181,7 @@
 							</tr>
 						{:else}
 							<tr>
-								<td colspan="3" class="px-4 py-3 text-sm text-muted-foreground">
+								<td colspan="3" class="py-6 text-center text-sm text-muted-foreground">
 									No access inherited from groups.
 								</td>
 							</tr>
@@ -196,19 +189,21 @@
 					</tbody>
 				</table>
 			</div>
-		</section>
+		</Panel>
 
-		<section class="rounded-lg border bg-card p-5">
-			<h2 class="mb-1 text-sm font-medium">Tokens</h2>
-			<p class="mb-4 text-sm text-muted-foreground">
-				Tokens are permission snapshots of the holder's grants at mint time. Deactivating the
-				account suspends its tokens (they resume on reactivation); revoking is permanent.
-			</p>
+		<section>
+			<div class="mb-3">
+				<h2 class="text-base font-semibold">Tokens</h2>
+				<p class="mt-0.5 max-w-2xl text-sm text-muted-foreground">
+					Each token keeps the permissions its holder had when it was created. Deactivating the
+					account suspends its tokens until reactivation; revoking is permanent.
+				</p>
+			</div>
 			<TokenTable
 				tokens={data.tokens}
 				revokeAction="?/revokeToken"
-				emptyText="No tokens issued by this user."
+				emptyText="This user hasn't created any tokens."
 			/>
 		</section>
 	</div>
-</div>
+</Page>

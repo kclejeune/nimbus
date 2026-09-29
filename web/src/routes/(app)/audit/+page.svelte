@@ -5,6 +5,10 @@
 	import { page as pageState } from '$app/state';
 	import { PAGE_SIZES } from '$lib/pagination';
 	import { fitPageSize } from './page-size';
+	import { ScrollText } from '@lucide/svelte';
+	import Page from '$lib/components/layout/page.svelte';
+	import PageHeader from '$lib/components/layout/page-header.svelte';
+	import EmptyState from '$lib/components/layout/empty-state.svelte';
 
 	let { data } = $props();
 
@@ -41,48 +45,53 @@
 	});
 </script>
 
-<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-	<header class="mb-8">
-		<h1 class="text-2xl font-semibold tracking-tight">Audit log</h1>
-		<p class="mt-1 text-sm text-muted-foreground">
-			Privileged actions across the instance, newest first.
-		</p>
-	</header>
+<Page>
+	<PageHeader
+		title="Audit log"
+		description="Privileged actions across the instance, newest first."
+	/>
 
 	{#if data.total === 0}
-		<div class="rounded-lg border border-dashed py-16 text-center">
-			<p class="text-sm text-muted-foreground">No audit entries yet.</p>
-		</div>
+		<EmptyState
+			icon={ScrollText}
+			title="No audit entries yet"
+			description="Changes to caches, tokens, users and settings are recorded here as they happen."
+		/>
 	{:else}
-		<div bind:this={tableBox} class="overflow-x-auto rounded-lg border">
-			<table class="w-full text-sm">
-				<thead class="border-b bg-muted/40 text-left text-xs text-muted-foreground">
+		<div bind:this={tableBox} class="table-frame">
+			<table class="data-table">
+				<thead>
 					<tr>
-						<th class="px-4 py-2.5 font-medium">Time</th>
-						<th class="px-4 py-2.5 font-medium">User</th>
-						<th class="px-4 py-2.5 font-medium">Action</th>
-						<th class="px-4 py-2.5 font-medium">Target</th>
-						<th class="px-4 py-2.5 font-medium">Detail</th>
+						<th>Time</th>
+						<th>User</th>
+						<th>Action</th>
+						<th>Target</th>
+						<th>Detail</th>
 					</tr>
 				</thead>
-				<tbody class="divide-y">
+				<tbody>
 					{#each data.entries as entry (entry.id)}
-						<tr class="transition-colors hover:bg-muted/30">
-							<td class="px-4 py-3 font-mono text-xs whitespace-nowrap text-muted-foreground">
+						<tr>
+							<td class="font-mono text-xs whitespace-nowrap text-muted-foreground tabular-nums">
 								{formatIsoDateTime(entry.createdAt)}
 							</td>
-							<td class="px-4 py-3">
+							<td>
 								{#if entry.user}
 									{entry.user}
 								{:else}
-									<span class="text-muted-foreground">system</span>
+									<span class="text-muted-foreground">System</span>
 								{/if}
 							</td>
-							<td class="px-4 py-3 font-mono text-xs">{entry.action}</td>
-							<td class="max-w-48 truncate px-4 py-3 font-mono text-xs" title={entry.target}>
+							<td>
+								<code
+									class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs whitespace-nowrap"
+									>{entry.action}</code
+								>
+							</td>
+							<td class="max-w-48 truncate font-mono text-xs" title={entry.target}>
 								{entry.target ?? '—'}
 							</td>
-							<td class="px-4 py-3">
+							<td>
 								{#if entry.detail}
 									<span
 										class="block max-w-md truncate font-mono text-xs text-muted-foreground"
@@ -101,7 +110,7 @@
 		</div>
 
 		<div class="mt-3 flex flex-wrap items-center justify-between gap-3">
-			<p class="text-xs text-muted-foreground">
+			<p class="text-xs text-muted-foreground tabular-nums">
 				Showing {formatCount(first)}–{formatCount(last)} of {formatCount(data.total)}
 			</p>
 			<div class="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -109,14 +118,16 @@
 					<span class="text-xs text-muted-foreground">Rows</span>
 					<!-- Changing the page size resets to page 1: the old offset is
 					     meaningless under a different stride. -->
-					<div class="flex divide-x overflow-hidden rounded-md border">
+					<div
+						class="flex divide-x overflow-hidden rounded-lg border bg-background shadow-(--shadow-panel)"
+					>
 						{#each PAGE_SIZES as size (size)}
 							<a
 								href={href(1, size)}
 								data-sveltekit-noscroll
 								aria-current={size === data.pageSize ? 'true' : undefined}
 								class="px-2.5 py-1 text-xs transition-colors {size === data.pageSize
-									? 'bg-muted font-medium text-foreground'
+									? 'bg-accent font-medium text-accent-foreground'
 									: 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'}"
 							>
 								{size}
@@ -143,4 +154,4 @@
 			</div>
 		</div>
 	{/if}
-</div>
+</Page>

@@ -71,3 +71,50 @@ export function sectionTitle(pathname: string): string {
 	);
 	return hit?.title ?? 'Overview';
 }
+
+export interface Crumb {
+	label: string;
+	href: string;
+	mono?: boolean;
+}
+
+/**
+ * Header breadcrumbs for `pathname`. Entity segments (a cache, a user) are
+ * labeled from the page's own load data when it has them, so the trail reads
+ * "Users / Ada Lovelace" rather than an opaque id.
+ */
+export function breadcrumbs(pathname: string, data: Record<string, unknown>): Crumb[] {
+	const section = ALL_SECTIONS.find(
+		(item) => item.url !== '/' && (pathname === item.url || pathname.startsWith(item.url + '/'))
+	);
+	if (!section) return [{ label: 'Overview', href: '/' }];
+	const crumbs: Crumb[] = [{ label: section.title, href: section.url }];
+	const rest = pathname.slice(section.url.length).split('/').filter(Boolean);
+	let href = section.url;
+	rest.forEach((raw, i) => {
+		const seg = decodeURIComponent(raw);
+		href += '/' + raw;
+		const prev = rest[i - 1];
+		if (section.url === '/caches' && i === 0) {
+			crumbs.push({ label: seg === 'new' ? 'New cache' : seg, href, mono: seg !== 'new' });
+		} else if (seg === 'settings') {
+			crumbs.push({ label: 'Settings', href });
+		} else if (seg === 'paths') {
+			// /caches/[name]/paths is an API endpoint, not a page: fold it into the next crumb.
+			return;
+		} else if (prev === 'paths') {
+			const obj = data.object as { storePath?: string } | undefined;
+			const name = obj?.storePath?.replace(/^\/nix\/store\/[0-9a-z]{32}-/, '');
+			crumbs.push({ label: name ?? seg.slice(0, 8), href, mono: true });
+		} else if (section.url === '/users') {
+			const subject = data.subject as { name?: string; email?: string } | undefined;
+			crumbs.push({ label: subject?.name || subject?.email || 'User', href });
+		} else if (section.url === '/groups') {
+			const group = data.group as { name?: string } | undefined;
+			crumbs.push({ label: group?.name ?? 'Group', href });
+		} else {
+			crumbs.push({ label: seg, href });
+		}
+	});
+	return crumbs;
+}

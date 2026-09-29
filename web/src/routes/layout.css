@@ -1,4 +1,6 @@
 @import 'tailwindcss';
+@import '@fontsource-variable/instrument-sans';
+@import '@fontsource-variable/jetbrains-mono';
 @plugin '@tailwindcss/forms';
 @plugin '@tailwindcss/typography';
 
@@ -15,110 +17,129 @@
 }
 
 :root {
-	--radius: 0.625rem;
+	--radius: 0.5rem;
+	/* Cool slate neutrals; the logo's Nix blue is the only accent. Status hues
+	   (success/warning/destructive) are reserved for state, never decoration. */
+	--canvas: oklch(0.972 0.005 264);
 	--background: oklch(1 0 0);
-	--foreground: oklch(0.141 0.005 285.823);
+	--foreground: oklch(0.225 0.028 272);
 	--card: oklch(1 0 0);
-	--card-foreground: oklch(0.141 0.005 285.823);
+	--card-foreground: oklch(0.225 0.028 272);
 	--popover: oklch(1 0 0);
-	--popover-foreground: oklch(0.141 0.005 285.823);
-	/* Nix-blue accent over zinc neutrals. */
-	--primary: oklch(0.55 0.13 258);
-	--primary-foreground: oklch(0.985 0 0);
-	--secondary: oklch(0.967 0.001 286.375);
-	--secondary-foreground: oklch(0.21 0.006 285.885);
-	--muted: oklch(0.967 0.001 286.375);
-	--muted-foreground: oklch(0.552 0.016 285.938);
-	--accent: oklch(0.955 0.02 258);
-	--accent-foreground: oklch(0.42 0.13 258);
-	--destructive: oklch(0.577 0.245 27.325);
-	--border: oklch(0.92 0.004 286.32);
-	--input: oklch(0.92 0.004 286.32);
-	--ring: oklch(0.55 0.13 258);
-	--chart-1: oklch(0.646 0.222 41.116);
-	--chart-2: oklch(0.6 0.118 184.704);
-	--chart-3: oklch(0.398 0.07 227.392);
-	--chart-4: oklch(0.828 0.189 84.429);
-	--chart-5: oklch(0.769 0.188 70.08);
-	--sidebar: oklch(0.985 0 0);
-	--sidebar-foreground: oklch(0.141 0.005 285.823);
-	--sidebar-primary: oklch(0.21 0.006 285.885);
-	--sidebar-primary-foreground: oklch(0.985 0 0);
-	--sidebar-accent: oklch(0.967 0.001 286.375);
-	--sidebar-accent-foreground: oklch(0.21 0.006 285.885);
-	--sidebar-border: oklch(0.92 0.004 286.32);
-	--sidebar-ring: oklch(0.705 0.015 286.067);
+	--popover-foreground: oklch(0.225 0.028 272);
+	--primary: oklch(0.52 0.155 264);
+	--primary-foreground: oklch(0.99 0.005 264);
+	--secondary: oklch(0.962 0.007 264);
+	--secondary-foreground: oklch(0.3 0.03 272);
+	--muted: oklch(0.962 0.007 264);
+	--muted-foreground: oklch(0.5 0.024 270);
+	--subtle: oklch(0.982 0.004 264);
+	--accent: oklch(0.95 0.025 264);
+	--accent-foreground: oklch(0.42 0.14 264);
+	--destructive: oklch(0.56 0.2 25);
+	--success: oklch(0.56 0.12 165);
+	--warning: oklch(0.62 0.14 65);
+	--border: oklch(0.915 0.009 264);
+	--input: oklch(0.885 0.011 264);
+	--ring: oklch(0.52 0.155 264);
+	--chart-1: oklch(0.52 0.155 264);
+	--chart-2: oklch(0.7 0.11 220);
+	--chart-3: oklch(0.62 0.12 165);
+	--chart-4: oklch(0.72 0.13 75);
+	--chart-5: oklch(0.6 0.16 310);
+	--sidebar: var(--canvas);
+	--sidebar-foreground: oklch(0.33 0.028 272);
+	--sidebar-primary: oklch(0.52 0.155 264);
+	--sidebar-primary-foreground: oklch(0.99 0 0);
+	--sidebar-accent: oklch(0.925 0.012 264);
+	--sidebar-accent-foreground: oklch(0.2 0.03 272);
+	--sidebar-border: oklch(0.915 0.009 264);
+	--sidebar-ring: oklch(0.52 0.155 264);
+	--shadow-panel: 0 1px 2px oklch(0.3 0.03 264 / 0.05);
+	--shadow-sheet: 0 1px 3px oklch(0.3 0.03 264 / 0.06), 0 0 0 1px oklch(0.3 0.03 264 / 0.06);
 }
 
 /* Same values as the @media block below — CSS has no way to share a declaration
    block between a selector and a media query, so the dark palette lives twice. */
 .dark {
-	--background: oklch(0.141 0.005 285.823);
-	--foreground: oklch(0.985 0 0);
-	--card: oklch(0.21 0.006 285.885);
-	--card-foreground: oklch(0.985 0 0);
-	--popover: oklch(0.21 0.006 285.885);
-	--popover-foreground: oklch(0.985 0 0);
-	--primary: oklch(0.62 0.15 256);
-	--primary-foreground: oklch(0.985 0 0);
-	--secondary: oklch(0.274 0.006 286.033);
-	--secondary-foreground: oklch(0.985 0 0);
-	--muted: oklch(0.274 0.006 286.033);
-	--muted-foreground: oklch(0.705 0.015 286.067);
-	--accent: oklch(0.31 0.04 258);
-	--accent-foreground: oklch(0.9 0.04 258);
-	--destructive: oklch(0.704 0.191 22.216);
-	--border: oklch(1 0 0 / 10%);
-	--input: oklch(1 0 0 / 15%);
-	--ring: oklch(0.62 0.15 256);
-	--chart-1: oklch(0.488 0.243 264.376);
-	--chart-2: oklch(0.696 0.17 162.48);
-	--chart-3: oklch(0.769 0.188 70.08);
-	--chart-4: oklch(0.627 0.265 303.9);
-	--chart-5: oklch(0.645 0.246 16.439);
-	--sidebar: oklch(0.21 0.006 285.885);
-	--sidebar-foreground: oklch(0.985 0 0);
-	--sidebar-primary: oklch(0.488 0.243 264.376);
-	--sidebar-primary-foreground: oklch(0.985 0 0);
-	--sidebar-accent: oklch(0.274 0.006 286.033);
-	--sidebar-accent-foreground: oklch(0.985 0 0);
-	--sidebar-border: oklch(1 0 0 / 10%);
-	--sidebar-ring: oklch(0.552 0.016 285.938);
+	--canvas: oklch(0.175 0.018 268);
+	--background: oklch(0.205 0.02 268);
+	--foreground: oklch(0.94 0.008 264);
+	--card: oklch(0.225 0.021 268);
+	--card-foreground: oklch(0.94 0.008 264);
+	--popover: oklch(0.24 0.022 268);
+	--popover-foreground: oklch(0.94 0.008 264);
+	--primary: oklch(0.7 0.13 262);
+	--primary-foreground: oklch(0.18 0.03 268);
+	--secondary: oklch(0.27 0.022 268);
+	--secondary-foreground: oklch(0.94 0.008 264);
+	--muted: oklch(0.26 0.021 268);
+	--muted-foreground: oklch(0.7 0.02 266);
+	--subtle: oklch(0.225 0.02 268);
+	--accent: oklch(0.3 0.05 264);
+	--accent-foreground: oklch(0.88 0.06 262);
+	--destructive: oklch(0.7 0.17 22);
+	--success: oklch(0.74 0.12 165);
+	--warning: oklch(0.8 0.13 75);
+	--border: oklch(0.3 0.02 268);
+	--input: oklch(0.34 0.022 268);
+	--ring: oklch(0.7 0.13 262);
+	--chart-1: oklch(0.7 0.13 262);
+	--chart-2: oklch(0.78 0.1 220);
+	--chart-3: oklch(0.74 0.12 165);
+	--chart-4: oklch(0.8 0.13 75);
+	--chart-5: oklch(0.72 0.14 310);
+	--sidebar: var(--canvas);
+	--sidebar-foreground: oklch(0.8 0.015 266);
+	--sidebar-primary: oklch(0.7 0.13 262);
+	--sidebar-primary-foreground: oklch(0.18 0.03 268);
+	--sidebar-accent: oklch(0.25 0.022 268);
+	--sidebar-accent-foreground: oklch(0.96 0.006 264);
+	--sidebar-border: oklch(0.27 0.02 268);
+	--sidebar-ring: oklch(0.7 0.13 262);
+	--shadow-panel: 0 1px 2px oklch(0 0 0 / 0.2);
+	--shadow-sheet: 0 0 0 1px oklch(1 0 0 / 0.06), 0 8px 24px oklch(0 0 0 / 0.25);
 }
 
 @media (prefers-color-scheme: dark) {
 	:root:not(.light) {
-		--background: oklch(0.141 0.005 285.823);
-		--foreground: oklch(0.985 0 0);
-		--card: oklch(0.21 0.006 285.885);
-		--card-foreground: oklch(0.985 0 0);
-		--popover: oklch(0.21 0.006 285.885);
-		--popover-foreground: oklch(0.985 0 0);
-		--primary: oklch(0.62 0.15 256);
-		--primary-foreground: oklch(0.985 0 0);
-		--secondary: oklch(0.274 0.006 286.033);
-		--secondary-foreground: oklch(0.985 0 0);
-		--muted: oklch(0.274 0.006 286.033);
-		--muted-foreground: oklch(0.705 0.015 286.067);
-		--accent: oklch(0.31 0.04 258);
-		--accent-foreground: oklch(0.9 0.04 258);
-		--destructive: oklch(0.704 0.191 22.216);
-		--border: oklch(1 0 0 / 10%);
-		--input: oklch(1 0 0 / 15%);
-		--ring: oklch(0.62 0.15 256);
-		--chart-1: oklch(0.488 0.243 264.376);
-		--chart-2: oklch(0.696 0.17 162.48);
-		--chart-3: oklch(0.769 0.188 70.08);
-		--chart-4: oklch(0.627 0.265 303.9);
-		--chart-5: oklch(0.645 0.246 16.439);
-		--sidebar: oklch(0.21 0.006 285.885);
-		--sidebar-foreground: oklch(0.985 0 0);
-		--sidebar-primary: oklch(0.488 0.243 264.376);
-		--sidebar-primary-foreground: oklch(0.985 0 0);
-		--sidebar-accent: oklch(0.274 0.006 286.033);
-		--sidebar-accent-foreground: oklch(0.985 0 0);
-		--sidebar-border: oklch(1 0 0 / 10%);
-		--sidebar-ring: oklch(0.552 0.016 285.938);
+		--canvas: oklch(0.175 0.018 268);
+		--background: oklch(0.205 0.02 268);
+		--foreground: oklch(0.94 0.008 264);
+		--card: oklch(0.225 0.021 268);
+		--card-foreground: oklch(0.94 0.008 264);
+		--popover: oklch(0.24 0.022 268);
+		--popover-foreground: oklch(0.94 0.008 264);
+		--primary: oklch(0.7 0.13 262);
+		--primary-foreground: oklch(0.18 0.03 268);
+		--secondary: oklch(0.27 0.022 268);
+		--secondary-foreground: oklch(0.94 0.008 264);
+		--muted: oklch(0.26 0.021 268);
+		--muted-foreground: oklch(0.7 0.02 266);
+		--subtle: oklch(0.225 0.02 268);
+		--accent: oklch(0.3 0.05 264);
+		--accent-foreground: oklch(0.88 0.06 262);
+		--destructive: oklch(0.7 0.17 22);
+		--success: oklch(0.74 0.12 165);
+		--warning: oklch(0.8 0.13 75);
+		--border: oklch(0.3 0.02 268);
+		--input: oklch(0.34 0.022 268);
+		--ring: oklch(0.7 0.13 262);
+		--chart-1: oklch(0.7 0.13 262);
+		--chart-2: oklch(0.78 0.1 220);
+		--chart-3: oklch(0.74 0.12 165);
+		--chart-4: oklch(0.8 0.13 75);
+		--chart-5: oklch(0.72 0.14 310);
+		--sidebar: var(--canvas);
+		--sidebar-foreground: oklch(0.8 0.015 266);
+		--sidebar-primary: oklch(0.7 0.13 262);
+		--sidebar-primary-foreground: oklch(0.18 0.03 268);
+		--sidebar-accent: oklch(0.25 0.022 268);
+		--sidebar-accent-foreground: oklch(0.96 0.006 264);
+		--sidebar-border: oklch(0.27 0.02 268);
+		--sidebar-ring: oklch(0.7 0.13 262);
+		--shadow-panel: 0 1px 2px oklch(0 0 0 / 0.2);
+		--shadow-sheet: 0 0 0 1px oklch(1 0 0 / 0.06), 0 8px 24px oklch(0 0 0 / 0.25);
 	}
 }
 
@@ -127,6 +148,12 @@
 	--radius-md: calc(var(--radius) - 2px);
 	--radius-lg: var(--radius);
 	--radius-xl: calc(var(--radius) + 4px);
+	--font-sans: 'Instrument Sans Variable', ui-sans-serif, system-ui, sans-serif;
+	--font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+	--color-canvas: var(--canvas);
+	--color-subtle: var(--subtle);
+	--color-success: var(--success);
+	--color-warning: var(--warning);
 	--color-background: var(--background);
 	--color-foreground: var(--foreground);
 	--color-card: var(--card);
@@ -164,7 +191,76 @@
 	* {
 		@apply border-border outline-ring/50;
 	}
+	html {
+		scrollbar-gutter: stable;
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+		text-rendering: optimizeLegibility;
+	}
 	body {
-		@apply bg-background text-foreground;
+		@apply bg-canvas font-sans text-foreground;
+		font-feature-settings: 'ss01', 'cv11';
+	}
+	code,
+	kbd,
+	pre,
+	.font-mono {
+		font-feature-settings:
+			'zero',
+			'calt' 0;
+	}
+	::selection {
+		background: color-mix(in oklch, var(--primary) 22%, transparent);
+	}
+}
+
+/* Shared table treatment. Pages render plain <table class="data-table"> inside a
+   .table-frame so every list in the app reads the same: quiet sentence-case
+   headers on a subtle band, hairline row dividers, numbers in tabular mono. */
+@layer components {
+	.table-frame {
+		@apply overflow-x-auto rounded-lg border bg-card;
+		box-shadow: var(--shadow-panel);
+	}
+	.data-table {
+		@apply w-full text-sm;
+		border-collapse: separate;
+		border-spacing: 0;
+	}
+	.data-table > thead > tr > th {
+		@apply h-9 border-b bg-subtle px-4 text-left text-xs font-medium whitespace-nowrap text-muted-foreground;
+	}
+	.data-table > tbody > tr > td {
+		@apply border-b border-border/70 px-4 py-2.5 align-middle;
+	}
+	.data-table > tbody > tr:last-child > td {
+		@apply border-b-0;
+	}
+	.data-table > tbody > tr {
+		@apply transition-colors hover:bg-subtle;
+	}
+	.data-table .num {
+		@apply text-right font-mono text-[0.8125rem] whitespace-nowrap tabular-nums;
+	}
+	.data-table th.num {
+		@apply font-sans text-xs;
+	}
+	/* Row links: the name cell is the row's primary target. */
+	.row-link {
+		@apply font-medium text-foreground underline-offset-4 hover:text-primary hover:underline;
+	}
+
+	/* Native <select>, matched to the Input primitive. Kept native (not the
+	   bits-ui Select) so it posts with its form and works without JS. */
+	.native-select {
+		@apply h-8 w-full rounded-lg border border-input bg-background py-0 pr-8 pl-2.5 text-sm shadow-(--shadow-panel) transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-50;
+	}
+	/* A checkbox as a toggleable chip: permission bits read as a set of
+	   switches, and the checked state is visible at a glance. */
+	.check-chip {
+		@apply inline-flex h-8 cursor-pointer items-center gap-2 rounded-lg border bg-background px-2.5 text-sm shadow-(--shadow-panel) transition-colors select-none hover:bg-subtle has-checked:border-primary/40 has-checked:bg-accent has-checked:text-accent-foreground has-focus-visible:ring-3 has-focus-visible:ring-ring/50 has-disabled:cursor-not-allowed has-disabled:opacity-50;
+	}
+	.check-chip > input[type='checkbox'] {
+		@apply size-3.5 rounded border-input text-primary focus:ring-0 focus:ring-offset-0;
 	}
 }

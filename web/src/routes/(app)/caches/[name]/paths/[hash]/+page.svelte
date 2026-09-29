@@ -2,9 +2,13 @@
 	import { formatBytes, formatCount, formatIsoDateTime, shortStorePath } from '$lib/format';
 	import StorePathTable from '$lib/components/store-path-table.svelte';
 	import CopyField from '$lib/components/copy-field.svelte';
-	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
-	import { ArrowLeft, ChevronDown, ChevronUp, Pin, Search } from '@lucide/svelte';
+	import { ChevronDown, ChevronUp, Pin } from '@lucide/svelte';
+	import Page from '$lib/components/layout/page.svelte';
+	import Panel from '$lib/components/layout/panel.svelte';
+	import StatusBadge from '$lib/components/layout/status-badge.svelte';
+	import SearchInput from '$lib/components/layout/search-input.svelte';
+	import EmptyState from '$lib/components/layout/empty-state.svelte';
 
 	let { data } = $props();
 	const o = $derived(data.object);
@@ -79,91 +83,129 @@
 
 	const isPinned = $derived(data.pins.anonymous !== null || data.pins.named.length > 0);
 	const cacheHref = $derived(`/caches/${encodeURIComponent(data.cache.name)}`);
+	// The 32-char store hash, shown muted beside the name.
+	const storeHash = $derived(/^\/nix\/store\/([0-9a-z]{32})-/.exec(o.storePath)?.[1] ?? '');
 </script>
 
-<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-	<a
-		href={cacheHref}
-		class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+{#snippet chunkHeader(key: ChunkSortKey, label: string)}
+	<button
+		type="button"
+		class="inline-flex items-center gap-1 font-medium transition-colors hover:text-foreground {chunkSort ===
+		key
+			? 'text-foreground'
+			: ''}"
+		onclick={() => toggleChunkSort(key)}
+		aria-label="Sort by {label}"
 	>
-		<ArrowLeft class="size-4" />
-		{data.cache.name}
-	</a>
+		{label}
+		{#if chunkSort === key}
+			{#if chunkAsc}<ChevronUp class="size-3" />{:else}<ChevronDown class="size-3" />{/if}
+		{/if}
+	</button>
+{/snippet}
 
+{#snippet sectionHeading(title: string, count: number, hint?: string)}
+	<div class="mb-3">
+		<h2 class="text-base font-semibold">
+			{title}
+			<span class="ml-1 font-normal text-muted-foreground tabular-nums">{formatCount(count)}</span>
+		</h2>
+		{#if hint}
+			<p class="mt-0.5 text-sm text-muted-foreground">{hint}</p>
+		{/if}
+	</div>
+{/snippet}
+
+<Page>
 	<header class="mb-8">
-		<h1 class="font-mono text-2xl font-semibold tracking-tight break-all">
+		<h1 class="font-mono text-2xl leading-tight font-semibold tracking-[-0.03em] break-all">
 			{pathName(o.storePath)}
 		</h1>
-		<div class="mt-3 max-w-3xl">
-			<CopyField text={o.storePath} label="Copy store path" />
-		</div>
+		{#if storeHash}
+			<p class="mt-1 font-mono text-[0.8125rem] break-all text-muted-foreground" title="Store hash">
+				{storeHash}
+			</p>
+		{/if}
 		<div class="mt-3 flex flex-wrap items-center gap-2">
 			{#if o.system}
-				<Badge variant="secondary">{o.system}</Badge>
+				<StatusBadge>{o.system}</StatusBadge>
 			{/if}
-			<Badge variant="secondary">{nar.compression}</Badge>
+			<StatusBadge>{nar.compression}</StatusBadge>
 			{#if o.detachedAt}
-				<Badge
-					variant="destructive"
+				<StatusBadge
+					tone="danger"
 					title="Removed {formatIsoDateTime(o.detachedAt)}; kept while other paths reference it"
 				>
-					detached
-				</Badge>
+					Detached
+				</StatusBadge>
 			{/if}
 			{#if isPinned}
-				<Badge variant="outline"><Pin class="size-3" /> pinned</Badge>
+				<StatusBadge tone="primary"><Pin class="size-3" /> Pinned</StatusBadge>
 			{/if}
 			{#if o.source}
-				<Badge variant="outline">{o.source}</Badge>
+				<StatusBadge>{o.source}</StatusBadge>
 			{/if}
+		</div>
+		<div class="mt-4 max-w-3xl">
+			<CopyField text={o.storePath} label="Copy store path" />
 		</div>
 	</header>
 
-	<section class="mb-8 rounded-lg border bg-card p-5">
-		<h2 class="text-sm font-medium">Metadata</h2>
-		<dl class="mt-4 grid gap-x-8 gap-y-3 text-sm sm:grid-cols-2">
-			<div>
-				<dt class="text-xs text-muted-foreground">NAR hash</dt>
-				<dd class="mt-0.5 font-mono text-xs break-all">{nar.narHash}</dd>
+	<Panel title="Details" class="mb-10">
+		<dl class="grid gap-x-10 gap-y-4 text-sm sm:grid-cols-2">
+			<div class="min-w-0">
+				<dt class="text-xs font-medium text-muted-foreground">NAR hash</dt>
+				<dd class="mt-1 font-mono text-[0.8125rem] break-all">{nar.narHash}</dd>
 			</div>
 			<div>
-				<dt class="text-xs text-muted-foreground">NAR size</dt>
-				<dd class="mt-0.5 font-mono text-xs">
+				<dt class="text-xs font-medium text-muted-foreground">NAR size</dt>
+				<dd class="mt-1 font-mono text-[0.8125rem] tabular-nums">
 					{formatBytes(nar.narSize)}
-					<span class="text-muted-foreground">
-						· {formatCount(nar.numChunks)} chunk{nar.numChunks === 1 ? '' : 's'}
+					<span class="font-sans text-muted-foreground">
+						in {formatCount(nar.numChunks)} chunk{nar.numChunks === 1 ? '' : 's'}
 					</span>
 				</dd>
 			</div>
 			<div>
-				<dt class="text-xs text-muted-foreground">Created</dt>
-				<dd class="mt-0.5 font-mono text-xs">{formatIsoDateTime(o.createdAt)}</dd>
+				<dt class="text-xs font-medium text-muted-foreground">Added</dt>
+				<dd class="mt-1 font-mono text-[0.8125rem] tabular-nums">
+					{formatIsoDateTime(o.createdAt)}
+				</dd>
 			</div>
 			<div>
-				<dt class="text-xs text-muted-foreground">Last accessed</dt>
-				<dd class="mt-0.5 font-mono text-xs">{formatIsoDateTime(o.lastAccessedAt)}</dd>
+				<dt class="text-xs font-medium text-muted-foreground">Last accessed</dt>
+				<dd class="mt-1 font-mono text-[0.8125rem] tabular-nums">
+					{formatIsoDateTime(o.lastAccessedAt)}
+				</dd>
+			</div>
+			<div class="min-w-0">
+				<dt class="text-xs font-medium text-muted-foreground">Deriver</dt>
+				<dd class="mt-1 font-mono text-[0.8125rem] break-all">
+					{#if o.deriver}{o.deriver}{:else}<span class="text-muted-foreground">None</span>{/if}
+				</dd>
+			</div>
+			<div class="min-w-0">
+				<dt class="text-xs font-medium text-muted-foreground">Content address</dt>
+				<dd class="mt-1 font-mono text-[0.8125rem] break-all">
+					{#if o.ca}{o.ca}{:else}<span class="text-muted-foreground">None</span>{/if}
+				</dd>
 			</div>
 			<div>
-				<dt class="text-xs text-muted-foreground">Deriver</dt>
-				<dd class="mt-0.5 font-mono text-xs break-all">{o.deriver ?? '—'}</dd>
+				<dt class="text-xs font-medium text-muted-foreground">Pushed by</dt>
+				<dd class="mt-1 font-mono text-[0.8125rem]">
+					{#if o.createdBy}{o.createdBy}{:else}<span class="text-muted-foreground">Unknown</span
+						>{/if}
+				</dd>
 			</div>
-			<div>
-				<dt class="text-xs text-muted-foreground">Content address</dt>
-				<dd class="mt-0.5 font-mono text-xs break-all">{o.ca ?? '—'}</dd>
-			</div>
-			<div>
-				<dt class="text-xs text-muted-foreground">Pushed by</dt>
-				<dd class="mt-0.5 font-mono text-xs">{o.createdBy ?? '—'}</dd>
-			</div>
-			<div>
-				<dt class="text-xs text-muted-foreground">Signatures</dt>
-				<dd class="mt-0.5">
+			<div class="min-w-0">
+				<dt class="text-xs font-medium text-muted-foreground">Signatures</dt>
+				<dd class="mt-1">
 					{#if o.sigs.length === 0}
-						<span class="font-mono text-xs text-muted-foreground">none</span>
+						<span class="text-muted-foreground">None</span>
 					{:else}
 						<ul class="space-y-1">
 							{#each o.sigs as sig (sig)}
-								<li class="font-mono text-xs break-all">{sig}</li>
+								<li class="font-mono text-[0.8125rem] break-all">{sig}</li>
 							{/each}
 						</ul>
 					{/if}
@@ -172,45 +214,48 @@
 		</dl>
 
 		{#if isPinned}
-			<div class="mt-4 border-t pt-4">
-				<h3 class="text-xs text-muted-foreground">Pins</h3>
-				<ul class="mt-1.5 space-y-1 text-sm">
+			<div class="mt-5 border-t pt-4">
+				<h3 class="text-xs font-medium text-muted-foreground">Pins</h3>
+				<ul class="mt-2 space-y-1.5 text-sm">
 					{#if data.pins.anonymous}
 						<li class="flex flex-wrap items-center gap-2">
 							<Pin class="size-3.5 text-primary" />
 							<span>Pinned {formatIsoDateTime(data.pins.anonymous.createdAt)}</span>
 							{#if data.pins.anonymous.note}
-								<span class="text-muted-foreground">— {data.pins.anonymous.note}</span>
+								<span class="text-muted-foreground">{data.pins.anonymous.note}</span>
 							{/if}
 						</li>
 					{/if}
 					{#each data.pins.named as pin (pin.name)}
 						<li class="flex flex-wrap items-center gap-2">
 							<Pin class="size-3.5 text-primary" />
-							<span class="font-mono text-xs">{pin.name}</span>
+							<code class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs"
+								>{pin.name}</code
+							>
 							<span class="text-muted-foreground"
-								>revision of {formatIsoDateTime(pin.createdAt)}</span
+								>Revision from {formatIsoDateTime(pin.createdAt)}</span
 							>
 							{#if pin.note}
-								<span class="text-muted-foreground">— {pin.note}</span>
+								<span class="text-muted-foreground">{pin.note}</span>
 							{/if}
 						</li>
 					{/each}
 				</ul>
 			</div>
 		{/if}
-	</section>
+	</Panel>
 
-	<section class="mb-8">
-		<h2 class="mb-1 text-sm font-medium">
-			References
-			<span class="font-normal text-muted-foreground">({formatCount(data.references.length)})</span>
-		</h2>
-		<p class="mb-3 text-xs text-muted-foreground">Paths this store path depends on.</p>
+	<section class="mb-10">
+		{@render sectionHeading(
+			'References',
+			data.references.length,
+			'Paths this store path depends on.'
+		)}
 		{#if data.references.length === 0}
-			<div class="rounded-lg border border-dashed py-10 text-center">
-				<p class="text-sm text-muted-foreground">No references.</p>
-			</div>
+			<EmptyState
+				title="No references"
+				description="This path doesn't depend on any other store path."
+			/>
 		{:else}
 			<StorePathTable
 				interactive
@@ -244,7 +289,7 @@
 						narSize: null,
 						note:
 							ref.elsewhere?.kind === 'upstream'
-								? `available from ${ref.elsewhere.host}`
+								? `Available from ${ref.elsewhere.host}`
 								: undefined
 					};
 				})}
@@ -252,18 +297,14 @@
 		{/if}
 	</section>
 
-	<section class="mb-8">
-		<h2 class="mb-1 text-sm font-medium">
-			Referrers
-			<span class="font-normal text-muted-foreground">({formatCount(data.referrers.total)})</span>
-		</h2>
-		<p class="mb-3 text-xs text-muted-foreground">
-			Paths in this cache that depend on this store path.
-		</p>
+	<section class="mb-10">
+		{@render sectionHeading(
+			'Referrers',
+			data.referrers.total,
+			'Paths in this cache that depend on this store path.'
+		)}
 		{#if data.referrers.rows.length === 0}
-			<div class="rounded-lg border border-dashed py-10 text-center">
-				<p class="text-sm text-muted-foreground">No referrers.</p>
-			</div>
+			<EmptyState title="No referrers" description="Nothing in this cache depends on this path." />
 		{:else}
 			<StorePathTable
 				interactive
@@ -276,75 +317,65 @@
 				}))}
 			/>
 			{#if data.referrers.total > data.referrers.rows.length}
-				<p class="mt-2 text-xs text-muted-foreground">
-					and {formatCount(data.referrers.total - data.referrers.rows.length)} more…
+				<p class="mt-2 text-xs text-muted-foreground tabular-nums">
+					And {formatCount(data.referrers.total - data.referrers.rows.length)} more not shown.
 				</p>
 			{/if}
 		{/if}
 	</section>
 
-	<section class="mb-8">
-		<h2 class="mb-3 text-sm font-medium">
-			Chunks
-			<span class="font-normal text-muted-foreground">({formatCount(data.chunks.length)})</span>
-		</h2>
+	<section>
+		{@render sectionHeading(
+			'Chunks',
+			data.chunks.length,
+			'How this NAR is split in storage, and which chunks other NARs share.'
+		)}
 		{#if data.chunks.length === 0}
-			<div class="rounded-lg border border-dashed py-10 text-center">
-				<p class="text-sm text-muted-foreground">No chunks recorded for this NAR.</p>
-			</div>
+			<EmptyState title="No chunks recorded" description="This NAR has no chunk records." />
 		{:else}
 			{#if data.chunks.length > CHUNK_PAGE || chunkQ}
-				<div class="relative mb-3 max-w-xs">
-					<Search
-						class="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
-						aria-hidden="true"
-					/>
-					<input
-						type="search"
-						placeholder="Filter by hash…"
-						class="h-8 w-full rounded-md border border-input bg-background pr-3 pl-8 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
-						bind:value={chunkQ}
-						oninput={() => (chunkPage = 1)}
-					/>
-				</div>
+				<SearchInput
+					class="mb-3"
+					placeholder="Filter by hash"
+					bind:value={chunkQ}
+					oninput={() => (chunkPage = 1)}
+				/>
 			{/if}
-			<div class="overflow-x-auto rounded-lg border">
-				<table class="w-full text-sm">
-					<thead class="border-b bg-muted/40 text-left text-xs text-muted-foreground">
+			<div class="table-frame">
+				<table class="data-table">
+					<thead>
 						<tr>
-							<th class="w-14 px-4 py-2.5 font-medium">{@render chunkHeader('seq', '#')}</th>
-							<th class="px-4 py-2.5 font-medium">{@render chunkHeader('hash', 'Chunk hash')}</th>
-							<th class="w-28 px-4 py-2.5 text-right font-medium">
-								{@render chunkHeader('size', 'Size')}
-							</th>
-							<th class="w-28 px-4 py-2.5 text-right font-medium">
-								{@render chunkHeader('stored', 'Stored')}
-							</th>
-							<th class="w-24 px-4 py-2.5 font-medium">{@render chunkHeader('codec', 'Codec')}</th>
-							<th class="w-48 px-4 py-2.5 font-medium">{@render chunkHeader('dedup', 'Dedup')}</th>
+							<th class="w-14">{@render chunkHeader('seq', '#')}</th>
+							<th>{@render chunkHeader('hash', 'Chunk hash')}</th>
+							<th class="num w-28">{@render chunkHeader('size', 'Size')}</th>
+							<th class="num w-28">{@render chunkHeader('stored', 'Stored')}</th>
+							<th class="w-24">{@render chunkHeader('codec', 'Codec')}</th>
+							<th class="w-52">{@render chunkHeader('dedup', 'Dedup')}</th>
 						</tr>
 					</thead>
-					<tbody class="divide-y">
+					<tbody>
 						{#each chunksPaged as chunk (chunk.seq)}
-							<tr class="transition-colors hover:bg-muted/30">
-								<td class="px-4 py-2.5 font-mono text-xs text-muted-foreground">{chunk.seq}</td>
-								<td class="px-4 py-2.5 font-mono text-xs break-all">
-									{chunk.chunkHash}
-								</td>
-								<td class="px-4 py-2.5 text-right font-mono text-xs">
+							<tr>
+								<td class="font-mono text-[0.8125rem] text-muted-foreground tabular-nums"
+									>{chunk.seq}</td
+								>
+								<td class="font-mono text-xs break-all">{chunk.chunkHash}</td>
+								<td class="num">
 									{chunk.chunkSize != null ? formatBytes(chunk.chunkSize) : '—'}
 								</td>
-								<td class="px-4 py-2.5 text-right font-mono text-xs">
+								<td class="num">
 									{chunk.fileSize != null ? formatBytes(chunk.fileSize) : '—'}
 								</td>
-								<td class="px-4 py-2.5 font-mono text-xs">{chunk.compression}</td>
-								<td class="px-4 py-2.5 text-xs text-muted-foreground">
+								<td class="font-mono text-[0.8125rem] text-muted-foreground">{chunk.compression}</td
+								>
+								<td>
 									{#if chunk.sharedNars > 0}
-										shared with {formatCount(chunk.sharedNars)} other NAR{chunk.sharedNars === 1
-											? ''
-											: 's'}
+										<StatusBadge tone="success">
+											Shared with {formatCount(chunk.sharedNars)}
+											{chunk.sharedNars === 1 ? 'NAR' : 'NARs'}
+										</StatusBadge>
 									{:else}
-										unique to this NAR
+										<span class="text-xs text-muted-foreground">Unique to this NAR</span>
 									{/if}
 								</td>
 							</tr>
@@ -361,7 +392,7 @@
 
 			{#if chunksSorted.length > CHUNK_PAGE}
 				<div class="mt-3 flex flex-wrap items-center justify-between gap-3">
-					<p class="text-xs text-muted-foreground">
+					<p class="text-xs text-muted-foreground tabular-nums">
 						Showing {formatCount((chunkCurrent - 1) * CHUNK_PAGE + 1)}–{formatCount(
 							(chunkCurrent - 1) * CHUNK_PAGE + chunksPaged.length
 						)} of {formatCount(chunksSorted.length)}
@@ -388,18 +419,4 @@
 			{/if}
 		{/if}
 	</section>
-
-	{#snippet chunkHeader(key: ChunkSortKey, label: string)}
-		<button
-			type="button"
-			class="inline-flex items-center gap-1 font-medium hover:text-foreground"
-			onclick={() => toggleChunkSort(key)}
-			aria-label="Sort by {label}"
-		>
-			{label}
-			{#if chunkSort === key}
-				{#if chunkAsc}<ChevronUp class="size-3" />{:else}<ChevronDown class="size-3" />{/if}
-			{/if}
-		</button>
-	{/snippet}
-</div>
+</Page>

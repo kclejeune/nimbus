@@ -1,8 +1,6 @@
 <script lang="ts">
 	import { authClient } from '$lib/auth-client';
-	import Logo from '$lib/components/logo.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
-	import * as Card from '$lib/components/ui/card/index.js';
 	import type { ProviderInfo } from '$lib/server/auth/providers';
 
 	let {
@@ -51,37 +49,33 @@
 	}
 </script>
 
-<Card.Root class="mx-auto w-full max-w-sm">
-	<Card.Header class="items-center text-center">
-		<Logo class="mx-auto mb-2 size-10 text-primary" />
-		<Card.Title class="font-mono text-xl tracking-tight">nimbus</Card.Title>
-		<Card.Description>Binary cache administration</Card.Description>
-	</Card.Header>
-	<Card.Content class="flex flex-col gap-3">
-		{#if providers.length > 0}
-			{#each providers as provider, i (provider.id)}
-				<Button
-					variant={i === 0 ? 'default' : 'outline'}
-					class="w-full"
-					onclick={() => signIn(provider)}
-					disabled={loading}
-				>
-					{loading ? 'Redirecting…' : `Sign in with ${provider.label}`}
-				</Button>
-			{/each}
-			{#if displayError}
-				<p class="text-center text-sm text-destructive">{displayError}</p>
-			{/if}
-		{:else if accessConfigured}
-			<p class="text-center text-sm text-muted-foreground">
-				This deployment authenticates through Cloudflare Access. Open the app from your Access
-				dashboard to continue.
-			</p>
-		{:else}
-			<p class="text-center text-sm text-muted-foreground">
-				No sign-in method is configured. Set <span class="font-mono">OIDC_ISSUER</span> or
-				<span class="font-mono">CF_ACCESS_TEAM_DOMAIN</span> for this worker.
-			</p>
+<div class="flex flex-col gap-2.5">
+	{#if providers.length > 0}
+		{#each providers as provider, i (provider.id)}
+			<Button
+				variant={i === 0 ? 'default' : 'outline'}
+				size="lg"
+				class="w-full"
+				onclick={() => signIn(provider)}
+				disabled={loading}
+			>
+				{loading ? 'Redirecting…' : `Continue with ${provider.label}`}
+			</Button>
+		{/each}
+		{#if displayError}
+			<p role="alert" class="mt-1 text-sm text-destructive">{displayError}</p>
 		{/if}
-	</Card.Content>
-</Card.Root>
+	{:else if accessConfigured}
+		<p class="text-sm text-muted-foreground">
+			This deployment signs you in through Cloudflare Access. Open the app from your Access
+			dashboard to continue.
+		</p>
+	{:else}
+		<p class="text-sm text-muted-foreground">
+			No sign-in method is configured. Set <code class="font-mono text-[0.8125rem]"
+				>OIDC_ISSUER</code
+			>
+			or <code class="font-mono text-[0.8125rem]">CF_ACCESS_TEAM_DOMAIN</code> for this worker.
+		</p>
+	{/if}
+</div>

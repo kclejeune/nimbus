@@ -3,6 +3,11 @@
 	import { goto } from '$app/navigation';
 	import AreaChart from '$lib/components/charts/area-chart.svelte';
 	import * as ToggleGroup from '$lib/components/ui/toggle-group/index.js';
+	import Page from '$lib/components/layout/page.svelte';
+	import PageHeader from '$lib/components/layout/page-header.svelte';
+	import Panel from '$lib/components/layout/panel.svelte';
+	import EmptyState from '$lib/components/layout/empty-state.svelte';
+	import { Activity, ChartLine } from '@lucide/svelte';
 
 	let { data } = $props();
 	const b = $derived(data.buckets);
@@ -129,7 +134,12 @@
 	}
 </script>
 
-{#snippet segmented(options: [string, string][], active: string, pick: (v: string) => void)}
+{#snippet segmented(
+	options: [string, string][],
+	active: string,
+	pick: (v: string) => void,
+	label: string
+)}
 	<!-- Single-select toggle groups deselect on a second click; ignore the
 	     resulting empty value so one option is always active. -->
 	<ToggleGroup.Root
@@ -138,6 +148,8 @@
 		onValueChange={(v) => v && pick(v)}
 		variant="outline"
 		size="sm"
+		aria-label={label}
+		class="bg-background shadow-(--shadow-panel)"
 	>
 		{#each options as [val, label] (val)}
 			<ToggleGroup.Item value={val} class="!px-3 text-xs">{label}</ToggleGroup.Item>
@@ -145,84 +157,95 @@
 	</ToggleGroup.Root>
 {/snippet}
 
-{#snippet stat(label: string, value: string, sub?: string, cls?: string)}
-	<div class="rounded-lg border bg-card p-5 {cls ?? ''}">
+<!-- Stats sit in one ruled grid per section (gap-px over the border color draws
+     the dividers) rather than a field of separate cards. -->
+{#snippet stat(label: string, value: string, sub?: string)}
+	<div class="bg-card px-5 py-4">
 		<div class="text-xs text-muted-foreground">{label}</div>
-		<div class="mt-1 font-mono text-2xl font-semibold tracking-tight">{value}</div>
-		{#if sub}<div class="mt-0.5 text-xs text-muted-foreground">{sub}</div>{/if}
+		<div class="mt-1 text-2xl font-semibold tracking-[-0.02em] tabular-nums">{value}</div>
+		{#if sub}<div class="mt-1 text-xs leading-snug text-muted-foreground">{sub}</div>{/if}
 	</div>
 {/snippet}
 
-{#snippet chartCard(title: string, total: string)}
+{#snippet chartPanel(title: string, total: string)}
 	<div class="mb-4 flex items-baseline justify-between gap-3">
-		<h3 class="text-sm font-medium">{title}</h3>
-		<span class="font-mono text-sm whitespace-nowrap text-muted-foreground">{total}</span>
+		<h3 class="text-[0.9375rem] font-semibold">{title}</h3>
+		<span class="text-sm whitespace-nowrap text-muted-foreground tabular-nums">{total}</span>
 	</div>
 {/snippet}
 
-<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-	<header class="mb-8">
-		<h1 class="text-2xl font-semibold tracking-tight">Monitoring</h1>
-		<p class="mt-1 text-sm text-muted-foreground">
-			Storage growth and cache traffic across all caches.
-		</p>
-	</header>
+{#snippet sectionHead(title: string, description: string)}
+	<div>
+		<h2 class="text-lg font-semibold tracking-[-0.01em]">{title}</h2>
+		<p class="mt-0.5 text-sm text-muted-foreground">{description}</p>
+	</div>
+{/snippet}
 
-	<!-- Each section is a header, a stat-card grid, and a chart grid; a new
-	     metric is one more card flowing into its grid, not a longer page. -->
-	<section class="mb-10">
+<Page>
+	<PageHeader
+		title="Monitoring"
+		description="Storage growth and cache traffic across every cache on this instance."
+	/>
+
+	<section class="mb-12">
 		<div class="mb-4 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
-			<div>
-				<h2 class="text-base font-semibold tracking-tight">Storage</h2>
-				<p class="mt-0.5 text-xs text-muted-foreground">Paths pushed and bytes stored over time.</p>
-			</div>
+			{@render sectionHead('Storage', 'Paths pushed and bytes stored over time.')}
 			<!-- Scoped here: these controls window the storage series only. -->
 			<div class="flex flex-wrap items-center gap-2">
-				{@render segmented(RANGES, data.range, (v) => setParam({ range: v }))}
-				{@render segmented(GRANULARITIES, data.granularity, (v) => setParam({ granularity: v }))}
+				{@render segmented(RANGES, data.range, (v) => setParam({ range: v }), 'Time range')}
+				{@render segmented(
+					GRANULARITIES,
+					data.granularity,
+					(v) => setParam({ granularity: v }),
+					'Granularity'
+				)}
 			</div>
 		</div>
 
 		{#if b.length === 0}
-			<div class="rounded-lg border border-dashed py-16 text-center">
-				<p class="text-sm text-muted-foreground">No activity to chart yet.</p>
-			</div>
+			<EmptyState
+				icon={ChartLine}
+				title="No activity to chart yet"
+				description="Storage growth appears here once paths are pushed to a cache."
+			/>
 		{:else}
-			<div class="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-3">
+			<div
+				class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border shadow-(--shadow-panel) lg:grid-cols-3"
+			>
 				{@render stat(
 					'Storage used',
 					formatBytes(stats.storageBytes),
 					data.globalMaxBytes
-						? `physical bytes after dedup · ${usagePct}% of the ${formatBytes(data.globalMaxBytes)} limit`
-						: 'physical bytes after dedup · no global limit set'
+						? `${usagePct}% of the ${formatBytes(data.globalMaxBytes)} global limit`
+						: 'Physical bytes after dedup, no global limit set'
 				)}
-				{@render stat('Store paths', formatCount(stats.objects), 'across all caches')}
-				{@render stat('Caches', formatCount(stats.caches), 'isolated views into shared storage')}
+				{@render stat('Store paths', formatCount(stats.objects), 'Across all caches')}
+				{@render stat('Caches', formatCount(stats.caches), 'Isolated views into shared storage')}
 				{@render stat(
-					'NARs stored',
+					'Unique NARs',
 					formatCount(stats.nars),
-					'store paths with identical content share one NAR'
+					'Store paths with identical content share one NAR'
 				)}
 				{@render stat(
 					'Deduplication',
-					dedupBytes > 0 ? `−${dedupPct}%` : '—',
-					dedupBytes > 0 ? `${formatBytes(dedupBytes)} saved` : 'nothing shared yet'
+					dedupBytes > 0 ? `${dedupPct}%` : '—',
+					dedupBytes > 0 ? `${formatBytes(dedupBytes)} saved` : 'Nothing shared yet'
 				)}
 				{@render stat(
 					`Busiest ${unitWord}`,
 					formatCount(peakBucket.paths),
-					peakBucket.date ? `${peakBucket.date} · paths added` : undefined
+					peakBucket.date ? `Paths added in the ${unitWord} of ${peakBucket.date}` : undefined
 				)}
 			</div>
 			{#if data.statsAt}
-				<p class="mb-4 text-xs text-muted-foreground">
-					Storage totals as of the last GC run, {formatRelativeTime(data.statsAt)}.
+				<p class="mt-2 text-xs text-muted-foreground">
+					Storage totals as of the last garbage collection, {formatRelativeTime(data.statsAt)}.
 				</p>
 			{/if}
 
-			<div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
-				<div class="rounded-lg border bg-card p-5">
-					{@render chartCard('Storage growth', `${formatBytes(totalBytes)} total`)}
+			<div class="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
+				<Panel>
+					{@render chartPanel('Storage growth', `${formatBytes(totalBytes)} total`)}
 					<AreaChart
 						points={storagePoints}
 						format={formatBytes}
@@ -230,9 +253,9 @@
 						deltaLabel={perLabel}
 						ariaLabel="Cumulative storage over time"
 					/>
-				</div>
-				<div class="rounded-lg border bg-card p-5">
-					{@render chartCard('Store paths', `${formatCount(totalPaths)} total`)}
+				</Panel>
+				<Panel>
+					{@render chartPanel('Store paths', `${formatCount(totalPaths)} total`)}
 					<AreaChart
 						points={pathPoints}
 						format={formatCount}
@@ -240,21 +263,23 @@
 						deltaLabel={perLabel}
 						ariaLabel="Cumulative store paths over time"
 					/>
-				</div>
+				</Panel>
 			</div>
 		{/if}
 	</section>
 
 	<section>
 		<div class="mb-4">
-			<h2 class="text-base font-semibold tracking-tight">Traffic</h2>
-			<p class="mt-0.5 text-xs text-muted-foreground">
-				Reads and pushes over the last 30 days, from Workers Analytics Engine.
-			</p>
+			{@render sectionHead(
+				'Traffic',
+				'Reads and pushes over the last 30 days, from Workers Analytics Engine.'
+			)}
 		</div>
 
 		{#if traffic}
-			<div class="mb-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
+			<div
+				class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border shadow-(--shadow-panel) lg:grid-cols-4"
+			>
 				{@render stat(
 					'Local hit rate',
 					hitRate === null ? '—' : `${hitRate}%`,
@@ -263,53 +288,53 @@
 				{@render stat(
 					'Edge cache',
 					edgeHitRate === null ? '—' : `${edgeHitRate}%`,
-					'reads served from the edge cache, skipping D1 and R2'
+					'Reads served from the edge cache, skipping D1 and R2'
 				)}
-				{@render stat('narinfo hits', formatCount(traffic.narinfo.hit), 'last 30 days')}
+				{@render stat('narinfo hits', formatCount(traffic.narinfo.hit), 'Last 30 days')}
 				{@render stat(
 					'Misses',
 					formatCount(traffic.narinfo.miss + traffic.nar.miss),
-					'not local, not upstream'
+					'Not local, not upstream'
 				)}
 				{@render stat(
 					'Upstream',
 					formatCount(traffic.narinfo.upstream + traffic.nar.upstream),
-					'answered via upstream caches'
+					'Answered via upstream caches'
 				)}
-				{@render stat('NARs served', formatCount(traffic.nar.hit), 'downloads from local storage')}
-				{@render stat('Paths pushed', formatCount(pushTotal), 'last 30 days')}
+				{@render stat('NARs served', formatCount(traffic.nar.hit), 'Downloads from local storage')}
+				{@render stat('Paths pushed', formatCount(pushTotal), 'Last 30 days')}
 				{@render stat(
 					'Push dedup',
 					pushDedupPct === null ? '—' : `${pushDedupPct}%`,
-					'pushes reusing an already-stored NAR'
+					'Pushes reusing an already-stored NAR'
 				)}
 				{@render stat('Pushed data', formatBytes(traffic.push.bytes), 'NAR bytes before dedup')}
 				{@render stat(
 					'Data written',
 					writes ? formatBytes(writes.storedBytes) : '—',
 					writes
-						? `${formatCount(writes.stored)} chunks into R2, incl. pull-through`
-						: 'no chunk writes recorded yet'
+						? `${formatCount(writes.stored)} chunks into R2, including pull-through`
+						: 'No chunk writes recorded yet'
 				)}
 				{@render stat(
 					'Chunk dedup',
 					chunkDedupPct === null ? '—' : `${chunkDedupPct}%`,
 					writes && writes.dedupBytes > 0
 						? `${formatBytes(writes.dedupBytes)} avoided by chunk reuse`
-						: 'chunks matching already-stored content'
+						: 'Chunks matching already-stored content'
 				)}
 				{@render stat(
 					'Deflected',
 					formatCount(guardTotal),
 					guardTotal > 0
-						? `abuse-guard refusals: ${formatCount(traffic.guards.probe)} probes · ${formatCount(traffic.guards.verdict)} verdicts · ${formatCount(traffic.guards.ingest)} ingests`
-						: 'abuse-guard refusals (probes, verdict writes, ingests)'
+						? `Abuse-guard refusals: ${formatCount(traffic.guards.probe)} probes, ${formatCount(traffic.guards.verdict)} verdicts, ${formatCount(traffic.guards.ingest)} ingests`
+						: 'Abuse-guard refusals (probes, verdict writes, ingests)'
 				)}
 			</div>
 
-			<div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
-				<div class="rounded-lg border bg-card p-5">
-					{@render chartCard('Read traffic', `${formatCount(trafficRequests)} reads · 30 days`)}
+			<div class="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
+				<Panel>
+					{@render chartPanel('Read traffic', `${formatCount(trafficRequests)} reads in 30 days`)}
 					<AreaChart
 						points={trafficPoints}
 						format={formatCount}
@@ -317,9 +342,12 @@
 						deltaLabel="this day"
 						ariaLabel="Read requests per day"
 					/>
-				</div>
-				<div class="rounded-lg border bg-card p-5">
-					{@render chartCard('Edge cache hits', `${formatCount(traffic.edge.hit)} reads · 30 days`)}
+				</Panel>
+				<Panel>
+					{@render chartPanel(
+						'Edge cache hits',
+						`${formatCount(traffic.edge.hit)} reads in 30 days`
+					)}
 					<AreaChart
 						points={edgePoints}
 						format={formatCount}
@@ -327,9 +355,9 @@
 						deltaLabel="this day"
 						ariaLabel="Edge cache hits per day"
 					/>
-				</div>
-				<div class="rounded-lg border bg-card p-5">
-					{@render chartCard('Push traffic', `${formatCount(pushTotal)} paths · 30 days`)}
+				</Panel>
+				<Panel>
+					{@render chartPanel('Push traffic', `${formatCount(pushTotal)} paths in 30 days`)}
 					<AreaChart
 						points={pushPoints}
 						format={formatCount}
@@ -337,11 +365,11 @@
 						deltaLabel="this day"
 						ariaLabel="Paths pushed per day"
 					/>
-				</div>
-				<div class="rounded-lg border bg-card p-5">
-					{@render chartCard(
+				</Panel>
+				<Panel>
+					{@render chartPanel(
 						'Data written',
-						`${writes ? formatBytes(writes.storedBytes) : '—'} · 30 days`
+						`${writes ? formatBytes(writes.storedBytes) : '—'} in 30 days`
 					)}
 					<AreaChart
 						points={writePoints}
@@ -350,17 +378,14 @@
 						deltaLabel="this day"
 						ariaLabel="Bytes written to storage per day"
 					/>
-				</div>
+				</Panel>
 			</div>
 		{:else}
-			<div class="rounded-lg border border-dashed px-6 py-12 text-center">
-				<p class="text-sm text-muted-foreground">Traffic metrics aren't connected.</p>
-				<p class="mx-auto mt-1 max-w-md text-xs text-muted-foreground">
-					Set the <code class="font-mono">CF_ACCOUNT_ID</code> and
-					<code class="font-mono">CF_ANALYTICS_TOKEN</code> secrets to chart cache reads, pushes, hit
-					rate, and upstream fetches here.
-				</p>
-			</div>
+			<EmptyState
+				icon={Activity}
+				title="Traffic metrics aren't connected"
+				description="Set the CF_ACCOUNT_ID and CF_ANALYTICS_TOKEN secrets to chart cache reads, pushes, hit rate and upstream fetches here."
+			/>
 		{/if}
 	</section>
-</div>
+</Page>

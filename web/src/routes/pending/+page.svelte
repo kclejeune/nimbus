@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { authClient } from '$lib/auth-client';
 	import { Button } from '$lib/components/ui/button/index.js';
-	import Logo from '$lib/components/logo.svelte';
+	import AuthShell from '$lib/components/layout/auth-shell.svelte';
 	import { Hourglass } from '@lucide/svelte';
 
 	let { data } = $props();
@@ -19,16 +19,15 @@
 	}
 </script>
 
-<div class="flex min-h-svh flex-col items-center justify-center gap-6 px-6 text-center">
-	<Logo class="size-10 text-primary" />
-	<div class="space-y-2">
-		<h1 class="inline-flex items-center gap-2 text-xl font-semibold tracking-tight">
-			<Hourglass class="size-5 text-muted-foreground" /> Account awaiting approval
-		</h1>
-		<p class="max-w-md text-sm text-muted-foreground">
-			You're signed in as <span class="font-mono">{data.user.email}</span>, but an administrator
-			needs to activate your account before you can use nimbus.
-		</p>
+<AuthShell title="Waiting for approval">
+	<p class="text-sm leading-relaxed text-muted-foreground">
+		You're signed in as <span class="font-medium text-foreground">{data.user.email}</span>. An
+		administrator needs to activate your account before you can use nimbus. This page doesn't
+		refresh on its own; sign in again once you've been approved.
+	</p>
+	<div class="mt-5 flex items-center gap-2 border-t pt-5">
+		<Hourglass class="size-4 text-warning" />
+		<span class="text-sm">Pending activation</span>
+		<Button variant="outline" size="sm" class="ms-auto" onclick={signOut}>Sign out</Button>
 	</div>
-	<Button variant="outline" onclick={signOut}>Sign out</Button>
-</div>
+</AuthShell>

@@ -28,11 +28,11 @@
 	onclick={copy}
 	title={label}
 	aria-label={label}
-	class="group flex w-full cursor-pointer items-stretch overflow-hidden rounded-md border border-input bg-muted text-left transition-colors hover:bg-accent/40 {className}"
+	class="group flex w-full cursor-pointer items-stretch overflow-hidden rounded-md border bg-subtle text-left transition-colors hover:border-input {className}"
 >
 	<code class="min-w-0 flex-1 truncate px-3 py-2.5 font-mono text-xs leading-5">{text}</code>
 	<span
-		class="flex w-10 shrink-0 items-center justify-center border-l border-input text-muted-foreground transition-colors group-hover:bg-accent group-hover:text-accent-foreground"
+		class="flex w-10 shrink-0 items-center justify-center border-l text-muted-foreground transition-colors group-hover:bg-muted group-hover:text-foreground"
 	>
 		{#if copied}
 			<Check class="size-4 text-primary" />

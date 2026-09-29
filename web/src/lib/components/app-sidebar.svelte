@@ -50,11 +50,13 @@
 	<Sidebar.Header>
 		<Sidebar.Menu>
 			<Sidebar.MenuItem>
-				<Sidebar.MenuButton class="data-[slot=sidebar-menu-button]:!p-1.5">
+				<Sidebar.MenuButton
+					class="h-10 hover:bg-transparent data-[slot=sidebar-menu-button]:!px-1.5 [&_svg]:text-current"
+				>
 					{#snippet child({ props })}
 						<a href="/" {...props}>
-							<Logo class="!size-5 text-primary" />
-							<span class="font-mono text-base font-semibold tracking-tight">nimbus</span>
+							<Logo class="!size-7" />
+							<span class="text-[1.0625rem] font-semibold tracking-[-0.02em]">nimbus</span>
 						</a>
 					{/snippet}
 				</Sidebar.MenuButton>
@@ -65,7 +67,9 @@
 		{#each nav as group (group.label ?? '')}
 			<Sidebar.Group>
 				{#if group.label}
-					<Sidebar.GroupLabel>{group.label}</Sidebar.GroupLabel>
+					<Sidebar.GroupLabel class="text-[0.75rem] font-medium text-muted-foreground/80"
+						>{group.label}</Sidebar.GroupLabel
+					>
 				{/if}
 				<Sidebar.GroupContent>
 					<Sidebar.Menu>
@@ -81,7 +85,7 @@
 								</Sidebar.MenuButton>
 								{#if item.badge}
 									<Sidebar.MenuBadge
-										class="rounded-full bg-amber-500/15 px-1.5 text-xs font-medium text-amber-600 dark:text-amber-400"
+										class="rounded-[5px] bg-warning/15 px-1.5 text-xs font-medium text-warning tabular-nums"
 										title="{item.badge} pending {item.badge === 1 ? 'user' : 'users'}"
 									>
 										{item.badge}

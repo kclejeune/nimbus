@@ -7,7 +7,7 @@
 </script>
 
 <Sidebar.Provider
-	style="--sidebar-width: calc(var(--spacing) * 72); --header-height: calc(var(--spacing) * 12);"
+	style="--sidebar-width: calc(var(--spacing) * 60); --header-height: calc(var(--spacing) * 12);"
 >
 	<AppSidebar variant="inset" user={data.user} pendingUsers={data.pendingUsers} />
 	<Sidebar.Inset>

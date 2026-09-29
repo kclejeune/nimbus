@@ -1,14 +1,18 @@
 <script lang="ts">
 	import LoginForm from '$lib/components/login-form.svelte';
+	import AuthShell from '$lib/components/layout/auth-shell.svelte';
 
 	let { data } = $props();
 </script>
 
-<div class="flex min-h-svh w-full items-center justify-center bg-background px-4">
+<AuthShell
+	title="Sign in"
+	description="Manage caches, tokens and access for your Nix binary cache."
+>
 	<LoginForm
 		providers={data.providers}
 		accessConfigured={data.accessConfigured}
 		redirectTo={data.redirectTo}
 		errorCode={data.errorCode}
 	/>
-</div>
+</AuthShell>

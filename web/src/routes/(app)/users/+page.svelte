@@ -7,6 +7,10 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
+	import Page from '$lib/components/layout/page.svelte';
+	import PageHeader from '$lib/components/layout/page-header.svelte';
+	import Panel from '$lib/components/layout/panel.svelte';
+	import StatusBadge from '$lib/components/layout/status-badge.svelte';
 	import { ShieldCheck, MoreHorizontal, Trash2, UserPlus } from '@lucide/svelte';
 
 	let { data, form } = $props();
@@ -41,19 +45,17 @@
 	}
 </script>
 
-<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-	<header class="mb-8">
-		<h1 class="text-2xl font-semibold tracking-tight">Users</h1>
-		<p class="mt-1 text-sm text-muted-foreground">
-			Everyone who signs in appears here. Admins can invite, manage roles, and remove users.
-		</p>
-	</header>
+<Page>
+	<PageHeader
+		title="Users"
+		description="Everyone who has signed in, plus anyone you've invited. Roles and activation are managed here."
+	/>
 
-	<section class="mb-8 rounded-lg border bg-card p-5">
-		<h2 class="mb-1 text-sm font-medium">Invite a user</h2>
-		<p class="mb-4 text-sm text-muted-foreground">
-			Pre-assign a role by email; the account activates when they first sign in.
-		</p>
+	<Panel
+		title="Invite a user"
+		description="Pre-assign a role by email. The account activates the first time they sign in."
+		class="mb-8"
+	>
 		<form
 			method="POST"
 			action="?/addUser"
@@ -72,77 +74,77 @@
 			</div>
 			<div class="space-y-2">
 				<Label for="role">Role</Label>
-				<select
-					id="role"
-					name="role"
-					class="flex h-9 w-32 rounded-md border border-input bg-transparent px-3 py-1 text-sm focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
-				>
-					<option value="member">member</option>
-					<option value="admin">admin</option>
+				<select id="role" name="role" class="native-select w-32">
+					<option value="member">Member</option>
+					<option value="admin">Admin</option>
 				</select>
 			</div>
 			<Button type="submit" disabled={adding}>
-				<UserPlus class="size-4" />
-				{adding ? 'Adding…' : 'Add user'}
+				<UserPlus />
+				{adding ? 'Inviting…' : 'Invite user'}
 			</Button>
 		</form>
 		{#if form?.error}
-			<p class="mt-3 text-sm text-destructive">{form.error}</p>
+			<p role="alert" class="mt-3 text-sm text-destructive">{form.error}</p>
 		{:else if form?.added}
 			<p class="mt-3 text-sm text-muted-foreground">
-				Invited <span class="font-mono text-foreground">{form.added}</span>.
+				Invited <span class="font-medium text-foreground">{form.added}</span>.
 			</p>
 		{/if}
-	</section>
+	</Panel>
 
-	<div class="overflow-x-auto rounded-lg border">
-		<table class="w-full text-sm">
-			<thead class="border-b bg-muted/40 text-left text-xs text-muted-foreground">
+	<div class="table-frame">
+		<table class="data-table">
+			<thead>
 				<tr>
-					<th class="px-4 py-2.5 font-medium">User</th>
-					<th class="px-4 py-2.5 font-medium">Sign-in</th>
-					<th class="px-4 py-2.5 font-medium">Role</th>
-					<th class="w-20 px-4 py-2.5"></th>
+					<th>User</th>
+					<th>Sign-in method</th>
+					<th>Role</th>
+					<th class="w-20"><span class="sr-only">Actions</span></th>
 				</tr>
 			</thead>
-			<tbody class="divide-y">
+			<tbody>
 				{#each data.users as u (u.id)}
 					{@const locked = protectedReason(u)}
-					<tr class="transition-colors hover:bg-muted/30">
-						<td class="px-4 py-3">
-							<div class="flex items-center gap-2">
-								<a href="/users/{u.id}" class="font-medium hover:underline">{u.name}</a>
-								{#if u.isOwner}
-									<span class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
-										owner
-									</span>
-								{/if}
-								{#if u.status === 'pending'}
-									<span
-										class="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400"
-									>
-										pending
-									</span>
-								{/if}
+					<tr>
+						<td>
+							<div class="flex items-center gap-3">
+								<span
+									aria-hidden="true"
+									class="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-semibold text-accent-foreground"
+								>
+									{(u.name || u.email || '?').slice(0, 1).toUpperCase()}
+								</span>
+								<div class="min-w-0">
+									<div class="flex items-center gap-2">
+										<a href="/users/{u.id}" class="row-link">{u.name || u.email}</a>
+										{#if u.isOwner}
+											<StatusBadge>Owner</StatusBadge>
+										{/if}
+										{#if u.status === 'pending'}
+											<StatusBadge tone="warning" dot>Pending</StatusBadge>
+										{/if}
+									</div>
+									<div class="truncate text-xs text-muted-foreground">{u.email}</div>
+								</div>
 							</div>
-							<div class="font-mono text-xs text-muted-foreground">{u.email}</div>
 						</td>
-						<td class="px-4 py-3 text-muted-foreground">{u.provider}</td>
-						<td class="px-4 py-3">
+						<td class="text-muted-foreground">{u.provider}</td>
+						<td>
 							{#if u.role === 'admin'}
-								<span class="inline-flex items-center gap-1.5 font-medium text-primary">
-									<ShieldCheck class="size-3.5" /> Admin
+								<span class="inline-flex items-center gap-1.5 font-medium">
+									<ShieldCheck class="size-3.5 text-primary" /> Admin
 								</span>
 							{:else}
 								<span class="text-muted-foreground">Member</span>
 							{/if}
 						</td>
-						<td class="px-4 py-3">
+						<td>
 							<div class="flex items-center justify-end gap-1">
 								<DropdownMenu.Root>
 									<DropdownMenu.Trigger
-										class="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-										aria-label="Change role"
+										class="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+										aria-label="Manage user"
 									>
 										<MoreHorizontal class="size-4" />
 									</DropdownMenu.Trigger>
@@ -208,7 +210,7 @@
 											type="submit"
 											title="Delete user"
 											aria-label="Delete user"
-											class="inline-flex size-8 items-center justify-center rounded-md text-destructive transition-colors hover:bg-destructive/10"
+											class="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
 										>
 											<Trash2 class="size-4" />
 										</button>
@@ -221,4 +223,4 @@
 			</tbody>
 		</table>
 	</div>
-</div>
+</Page>

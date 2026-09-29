@@ -4,6 +4,9 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { formatDate } from '$lib/format';
 	import { Link2, Unlink } from '@lucide/svelte';
+	import Page from '$lib/components/layout/page.svelte';
+	import PageHeader from '$lib/components/layout/page-header.svelte';
+	import Panel from '$lib/components/layout/panel.svelte';
 	import type { ProviderInfo } from '$lib/server/auth/providers';
 
 	let { data } = $props();
@@ -51,68 +54,78 @@
 	}
 </script>
 
-<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-	<header class="mb-8">
-		<h1 class="text-2xl font-semibold tracking-tight">Account</h1>
-		<p class="mt-1 text-sm text-muted-foreground">
-			Sign-in providers linked to your account. Any linked provider signs in to the same user,
-			tokens, and role — even when the providers report different emails.
-		</p>
-	</header>
-
-	<h2 class="mb-3 text-sm font-medium">Linked accounts</h2>
+<Page width="narrow">
+	<PageHeader
+		title="Account"
+		description="Any linked provider signs in to the same user, tokens and role, even when the providers report different emails."
+	/>
 
 	{#if cfAccessSession}
-		<div class="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-			You're signed in through Cloudflare Access, which authenticates per-request and doesn't
-			participate in account linking. Sign in with SSO to manage linked providers.
-		</div>
+		<Panel title="Sign-in methods">
+			<p class="text-sm text-muted-foreground">
+				You're signed in through Cloudflare Access, which authenticates each request and doesn't
+				take part in account linking. Sign in with SSO to manage linked providers.
+			</p>
+		</Panel>
 	{:else}
-		{#if data.accounts.length === 0}
-			<div class="rounded-lg border border-dashed py-12 text-center">
-				<Link2 class="mx-auto mb-3 size-6 text-muted-foreground" />
-				<p class="text-sm text-muted-foreground">No linked providers.</p>
-			</div>
-		{:else}
-			<div class="divide-y rounded-lg border">
-				{#each data.accounts as account (account.id)}
-					<div class="flex items-center gap-4 px-4 py-3">
-						<div class="min-w-0 flex-1">
-							<span class="font-medium">
-								{providerLabels.get(account.providerId) ?? account.providerId}
-							</span>
-							<div class="mt-0.5 text-xs text-muted-foreground">
-								linked {formatDate(account.createdAt)}
+		<Panel title="Sign-in methods" flush>
+			{#if data.accounts.length === 0}
+				<p class="px-5 py-8 text-center text-sm text-muted-foreground">No linked providers.</p>
+			{:else}
+				<ul class="divide-y">
+					{#each data.accounts as account (account.id)}
+						<li class="flex items-center gap-4 px-5 py-3.5">
+							<div
+								class="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-subtle"
+							>
+								<Link2 class="size-4 text-muted-foreground" />
 							</div>
-						</div>
-						<Button
-							variant="ghost"
-							size="sm"
-							class="text-muted-foreground hover:text-destructive"
-							disabled={!unlinkable || busy !== ''}
-							title={unlinkable ? undefined : 'You can’t unlink your only sign-in method.'}
-							onclick={() => unlink(account.providerId, account.accountId)}
-						>
-							<Unlink class="size-4" /> Unlink
-						</Button>
-					</div>
-				{/each}
-			</div>
-		{/if}
+							<div class="min-w-0 flex-1">
+								<div class="text-sm font-medium">
+									{providerLabels.get(account.providerId) ?? account.providerId}
+								</div>
+								<div class="mt-0.5 text-xs text-muted-foreground">
+									Linked {formatDate(account.createdAt)}
+								</div>
+							</div>
+							<Button
+								variant="ghost"
+								size="sm"
+								class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+								disabled={!unlinkable || busy !== ''}
+								title={unlinkable ? undefined : 'You can’t unlink your only sign-in method.'}
+								onclick={() => unlink(account.providerId, account.accountId)}
+							>
+								<Unlink /> Unlink
+							</Button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
 
-		{#if linkableProviders.length > 0}
-			<div class="mt-4 flex flex-wrap gap-2">
-				{#each linkableProviders as provider (provider.id)}
-					<Button variant="outline" size="sm" disabled={busy !== ''} onclick={() => link(provider)}>
-						<Link2 class="size-4" />
-						{busy === provider.id ? 'Redirecting…' : `Link ${provider.label}`}
-					</Button>
-				{/each}
-			</div>
-		{/if}
+			{#snippet footer()}
+				{#if linkableProviders.length > 0}
+					<span>Link another provider to sign in with it.</span>
+					<div class="flex flex-wrap gap-2">
+						{#each linkableProviders as provider (provider.id)}
+							<Button
+								variant="outline"
+								size="sm"
+								disabled={busy !== ''}
+								onclick={() => link(provider)}
+							>
+								{busy === provider.id ? 'Redirecting…' : `Link ${provider.label}`}
+							</Button>
+						{/each}
+					</div>
+				{:else}
+					<span>Every configured provider is linked.</span>
+				{/if}
+			{/snippet}
+		</Panel>
 
 		{#if errorMessage}
-			<p class="mt-3 text-sm text-destructive">{errorMessage}</p>
+			<p role="alert" class="mt-3 text-sm text-destructive">{errorMessage}</p>
 		{/if}
 	{/if}
-</div>
+</Page>

@@ -21,7 +21,9 @@
 <script lang="ts">
 	import { formatBytes, formatCount, formatIsoDate, shortStorePath } from '$lib/format';
 	import { Button } from '$lib/components/ui/button/index.js';
-	import { ChevronDown, ChevronUp, Search } from '@lucide/svelte';
+	import { ChevronDown, ChevronUp } from '@lucide/svelte';
+	import StorePath from '$lib/components/layout/store-path.svelte';
+	import SearchInput from '$lib/components/layout/search-input.svelte';
 
 	let {
 		rows,
@@ -123,64 +125,58 @@
 {/snippet}
 
 {#if interactive && (rows.length > pageSize || q)}
-	<div class="relative mb-3 max-w-xs">
-		<Search
-			class="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
-			aria-hidden="true"
-		/>
-		<input
-			type="search"
-			placeholder="Filter by name…"
-			class="h-8 w-full rounded-md border border-input bg-background pr-3 pl-8 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
-			bind:value={q}
-			oninput={() => (page = 1)}
-		/>
-	</div>
+	<SearchInput class="mb-3" bind:value={q} oninput={() => (page = 1)} />
 {/if}
 
-<div class="overflow-x-auto rounded-lg border">
-	<table class="w-full text-sm">
-		<thead class="border-b bg-muted/40 text-left text-xs text-muted-foreground">
+<div class="table-frame">
+	<table class="data-table">
+		<thead>
 			<tr>
-				<th class="px-4 py-2.5 font-medium">{@render sortableHeader('path', 'Store path')}</th>
+				<th>{@render sortableHeader('path', 'Store path')}</th>
 				{#if showCache}
-					<th class="w-28 px-4 py-2.5 font-medium">{@render sortableHeader('cache', 'Cache')}</th>
+					<th class="w-32">{@render sortableHeader('cache', 'Cache')}</th>
 				{/if}
-				<th class="w-32 px-4 py-2.5 font-medium">{@render sortableHeader('added', 'Added')}</th>
-				<th class="w-28 px-4 py-2.5 text-right font-medium">
+				<th class="w-32">{@render sortableHeader('added', 'Added')}</th>
+				<th class="num w-28">
 					{@render sortableHeader('size', 'NAR size', true)}
 				</th>
 			</tr>
 		</thead>
-		<tbody class="divide-y">
+		<tbody>
 			{#each paged as row (`${row.cache?.name ?? ''}/${row.hash}`)}
-				<tr class="transition-colors hover:bg-muted/30">
+				<tr>
 					{#if row.href && row.storePath}
-						<td class="px-4 py-2.5 font-mono text-xs break-all">
-							<a href={row.href} class="hover:text-primary hover:underline">
-								{shortStorePath(row.storePath)}
-							</a>
-							{#if row.note}
-								<span class="ml-1 font-sans text-muted-foreground">{row.note}</span>
-							{/if}
+						<td class="w-full max-w-0">
+							<div class="flex min-w-0 items-baseline gap-2">
+								<StorePath path={row.storePath} href={row.href} />
+								{#if row.note}
+									<span class="shrink-0 text-xs text-muted-foreground">{row.note}</span>
+								{/if}
+							</div>
 						</td>
 					{:else}
-						<td class="px-4 py-2.5 font-mono text-xs break-all text-muted-foreground">
-							{row.storePath ? shortStorePath(row.storePath) : row.hash}
-							<span class="ml-1 font-sans">{row.note ?? 'not in this cache'}</span>
+						<td class="w-full max-w-0 text-muted-foreground">
+							<div class="flex min-w-0 items-baseline gap-2 opacity-70">
+								<StorePath path={row.storePath ?? row.hash} />
+								<span class="shrink-0 text-xs">{row.note ?? 'Not in this cache'}</span>
+							</div>
 						</td>
 					{/if}
 					{#if showCache}
-						<td class="px-4 py-2.5 font-mono text-xs">
+						<td class="whitespace-nowrap">
 							{#if row.cache}
-								<a href={row.cache.href} class="hover:underline">{row.cache.name}</a>
+								<a
+									href={row.cache.href}
+									class="font-mono text-[0.8125rem] text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+									>{row.cache.name}</a
+								>
 							{/if}
 						</td>
 					{/if}
-					<td class="px-4 py-2.5 font-mono text-xs text-muted-foreground">
+					<td class="font-mono text-[0.8125rem] whitespace-nowrap text-muted-foreground">
 						{formatIsoDate(row.createdAt)}
 					</td>
-					<td class="px-4 py-2.5 text-right font-mono">
+					<td class="num">
 						{row.narSize == null ? '—' : formatBytes(row.narSize)}
 					</td>
 				</tr>
@@ -195,7 +191,7 @@
 
 {#if interactive && sorted.length > pageSize}
 	<div class="mt-3 flex flex-wrap items-center justify-between gap-3">
-		<p class="text-xs text-muted-foreground">
+		<p class="text-xs text-muted-foreground tabular-nums">
 			Showing {formatCount(first)}–{formatCount(last)} of {formatCount(sorted.length)}
 		</p>
 		<div class="flex items-center gap-2">

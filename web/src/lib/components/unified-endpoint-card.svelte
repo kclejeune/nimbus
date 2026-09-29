@@ -1,13 +1,14 @@
 <script lang="ts">
 	import CopyField from '$lib/components/copy-field.svelte';
 	import CopyBlock from '$lib/components/copy-block.svelte';
-	import * as Card from '$lib/components/ui/card/index.js';
+	import Panel from '$lib/components/layout/panel.svelte';
 	import { nixConfSnippet, type UpstreamRef } from '$lib/nix-conf';
 
 	let {
 		url,
 		publicKey,
 		upstreams = [],
+		bare = false,
 		class: className = ''
 	}: {
 		url: string;
@@ -15,6 +16,8 @@
 		/** Enabled upstreams: their keys always ride the snippet (redirected
 		 * paths keep their upstream signatures); URLs are opt-in. */
 		upstreams?: UpstreamRef[];
+		/** Render just the fields, for embedding in another panel. */
+		bare?: boolean;
 		class?: string;
 	} = $props();
 
@@ -25,29 +28,23 @@
 	const relevant = $derived(upstreams.filter((u) => !u.nixDefault));
 </script>
 
-<Card.Root class={className}>
-	<Card.Header>
-		<Card.Title>Unified cache endpoint</Card.Title>
-		<Card.Description>
-			One substituter for every cache you can read — private caches need a pull token in netrc.
-		</Card.Description>
-	</Card.Header>
-	<Card.Content>
-		<dl class="space-y-3">
-			<div>
-				<dt class="mb-1 text-xs text-muted-foreground">Substituter URL</dt>
-				<dd><CopyField text={url} label="Copy URL" /></dd>
-			</div>
-			<div>
-				<dt class="mb-1 text-xs text-muted-foreground">Trusted public key</dt>
-				<dd><CopyField text={publicKey} label="Copy public key" /></dd>
-			</div>
-		</dl>
-		<div class="mt-4">
-			<span class="mb-1 block text-xs text-muted-foreground">nix.conf</span>
-			<CopyBlock text={nixConf} label="Copy nix.conf snippet" />
-			{#if relevant.length > 0}
-				<label class="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+{#snippet body()}
+	<dl class="grid gap-4 md:grid-cols-2">
+		<div class="min-w-0">
+			<dt class="mb-1.5 text-xs font-medium text-muted-foreground">Substituter URL</dt>
+			<dd><CopyField text={url} label="Copy URL" /></dd>
+		</div>
+		<div class="min-w-0">
+			<dt class="mb-1.5 text-xs font-medium text-muted-foreground">Trusted public key</dt>
+			<dd><CopyField text={publicKey} label="Copy public key" /></dd>
+		</div>
+	</dl>
+	<div class="mt-5">
+		<span class="mb-1.5 block text-xs font-medium text-muted-foreground">nix.conf</span>
+		<CopyBlock text={nixConf} label="Copy nix.conf snippet" />
+		{#if relevant.length > 0}
+			<div class="mt-3 space-y-1.5">
+				<label class="flex items-center gap-2 text-xs text-muted-foreground">
 					<input
 						type="checkbox"
 						bind:checked={includeKeys}
@@ -55,7 +52,7 @@
 					/>
 					Include upstream signing keys (redirected paths keep their upstream signatures)
 				</label>
-				<label class="mt-1.5 flex items-center gap-2 text-xs text-muted-foreground">
+				<label class="flex items-center gap-2 text-xs text-muted-foreground">
 					<input
 						type="checkbox"
 						bind:checked={includeUrls}
@@ -63,7 +60,19 @@
 					/>
 					Include upstream substituters (queried after this endpoint; redirects usually make this unnecessary)
 				</label>
-			{/if}
-		</div>
-	</Card.Content>
-</Card.Root>
+			</div>
+		{/if}
+	</div>
+{/snippet}
+
+{#if bare}
+	{@render body()}
+{:else}
+	<Panel
+		title="Unified cache endpoint"
+		description="One substituter for every cache you can read. Private caches need a pull token in netrc."
+		class={className}
+	>
+		{@render body()}
+	</Panel>
+{/if}

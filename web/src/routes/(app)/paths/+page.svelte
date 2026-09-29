@@ -4,7 +4,11 @@
 	import { goto } from '$app/navigation';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Select from '$lib/components/ui/select/index.js';
-	import { Search } from '@lucide/svelte';
+	import { FolderSearch, Search } from '@lucide/svelte';
+	import Page from '$lib/components/layout/page.svelte';
+	import PageHeader from '$lib/components/layout/page-header.svelte';
+	import EmptyState from '$lib/components/layout/empty-state.svelte';
+	import SearchInput from '$lib/components/layout/search-input.svelte';
 
 	let { data } = $props();
 
@@ -42,59 +46,53 @@
 	}
 </script>
 
-<div class="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-	<header class="mb-8">
-		<h1 class="text-2xl font-semibold tracking-tight">Paths</h1>
-		<p class="mt-1 text-sm text-muted-foreground">
-			Store paths across every cache you can see, newest first.
-		</p>
-	</header>
+<Page>
+	<PageHeader
+		title="Paths"
+		description="Store paths across every cache you can read, newest first."
+	/>
 
-	<div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+	<div class="mb-3 flex flex-wrap items-center gap-3">
 		<Select.Root
 			type="single"
 			value={selectedCache}
 			onValueChange={(v) => applyFilters({ cache: v === ALL ? null : v })}
 		>
-			<Select.Trigger size="sm" class="w-44" aria-label="Filter by cache">
-				<span data-slot="select-value" class={data.cacheFilter ? 'font-mono text-xs' : ''}>
+			<Select.Trigger
+				size="default"
+				class="w-48 bg-background shadow-(--shadow-panel)"
+				aria-label="Filter by cache"
+			>
+				<span data-slot="select-value" class={data.cacheFilter ? 'font-mono text-[0.8125rem]' : ''}>
 					{data.cacheFilter ?? 'All caches'}
 				</span>
 			</Select.Trigger>
 			<Select.Content>
 				<Select.Item value={ALL}>All caches</Select.Item>
 				{#each data.caches as name (name)}
-					<Select.Item value={name} class="font-mono text-xs">{name}</Select.Item>
+					<Select.Item value={name} class="font-mono text-[0.8125rem]">{name}</Select.Item>
 				{/each}
 			</Select.Content>
 		</Select.Root>
-		<div class="flex items-center gap-3">
-			<div class="relative">
-				<Search class="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-				<input
-					value={data.q}
-					oninput={onSearchInput}
-					placeholder="Filter by name…"
-					class="h-8 w-64 rounded-md border border-input bg-transparent pr-3 pl-8 text-xs focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
-				/>
-			</div>
-			<span class="text-sm whitespace-nowrap text-muted-foreground">
-				{formatCount(data.total)}{data.q ? ' matching' : ' total'}
-			</span>
-		</div>
+		<SearchInput value={data.q} oninput={onSearchInput} aria-label="Filter paths by name" />
+		<span class="ms-auto text-sm whitespace-nowrap text-muted-foreground tabular-nums">
+			{formatCount(data.total)}{data.q ? ' matching' : ' paths'}
+		</span>
 	</div>
 
 	{#if data.total === 0 && !data.q}
-		<div class="rounded-lg border border-dashed py-16 text-center">
-			<p class="text-sm text-muted-foreground">
-				No store paths {data.cacheFilter ? 'in this cache' : 'in any visible cache'} yet.
-			</p>
-		</div>
+		<EmptyState
+			icon={FolderSearch}
+			title={data.cacheFilter ? 'This cache is empty' : 'No store paths yet'}
+			description="Paths pushed with the nimbus CLI or attic appear here."
+		/>
 	{:else}
 		{#if data.paths.length === 0}
-			<div class="rounded-lg border py-12 text-center">
-				<p class="text-sm text-muted-foreground">No paths match “{data.q}”.</p>
-			</div>
+			<EmptyState
+				icon={Search}
+				title="No paths match “{data.q}”"
+				description="Try a shorter name, or a different cache."
+			/>
 		{:else}
 			<StorePathTable
 				showCache
@@ -110,7 +108,7 @@
 		{/if}
 
 		<div class="mt-3 flex flex-wrap items-center justify-between gap-3">
-			<p class="text-xs text-muted-foreground">
+			<p class="text-xs text-muted-foreground tabular-nums">
 				{#if data.paths.length > 0}
 					Showing {formatCount(first)}–{formatCount(last)} of {formatCount(data.total)}
 				{/if}
@@ -129,4 +127,4 @@
 			</div>
 		</div>
 	{/if}
-</div>
+</Page>

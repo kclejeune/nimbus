@@ -26,15 +26,10 @@
 	const ADVANCED = PERMISSION_BIT_FIELDS.filter((f) => f.bit !== 'r' && f.bit !== 'w');
 </script>
 
-<div class="grid grid-cols-2 gap-4">
+<div class="grid gap-4 sm:grid-cols-2">
 	<div class="space-y-2">
 		<Label for="cache">Scope</Label>
-		<select
-			id="cache"
-			name="cache"
-			bind:value={selected}
-			class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
-		>
+		<select id="cache" name="cache" bind:value={selected} class="native-select">
 			{#each scopeOptions as option (option.value)}
 				<option value={option.value}>{option.value === '*' ? 'All caches' : option.value}</option>
 			{/each}
@@ -49,46 +44,43 @@
 	</div>
 </div>
 
-<div class="flex flex-wrap gap-6">
-	{#each BASIC as p (p.field)}
-		<label class="flex items-center gap-2 text-sm" class:opacity-50={!bits[p.bit]}>
-			<input
-				name={p.field}
-				type="checkbox"
-				checked={bits[p.bit] === 1 && (p.bit === 'r' || defaultPush)}
-				disabled={!bits[p.bit]}
-				class="size-4 rounded border-input text-primary"
-			/>
-			{p.label}
-		</label>
-	{/each}
-	{#if advanced}
-		{#each ADVANCED as p (p.field)}
-			<label class="flex items-center gap-2 text-sm" class:opacity-50={!bits[p.bit]}>
+<fieldset class="space-y-2">
+	<legend class="mb-2 text-sm font-medium">Permissions</legend>
+	<div class="flex flex-wrap gap-2">
+		{#each BASIC as p (p.field)}
+			<label class="check-chip">
 				<input
 					name={p.field}
 					type="checkbox"
+					checked={bits[p.bit] === 1 && (p.bit === 'r' || defaultPush)}
 					disabled={!bits[p.bit]}
-					class="size-4 rounded border-input text-primary"
 				/>
 				{p.label}
 			</label>
 		{/each}
-	{/if}
-	{#if allowGc}
-		<label
-			class="flex items-center gap-2 text-sm"
-			title="Storage-wide: lets the token trigger garbage collection via the API, independent of the cache scope"
-		>
-			<input name="gc" type="checkbox" class="size-4 rounded border-input text-primary" />
-			Garbage collection
-		</label>
-		<label
-			class="flex items-center gap-2 text-sm"
-			title="Trust admin: lets the token change trust-affecting cache settings via the API (signing keypair, visibility)"
-		>
-			<input name="ct" type="checkbox" class="size-4 rounded border-input text-primary" />
-			Trust admin
-		</label>
-	{/if}
-</div>
+		{#if advanced}
+			{#each ADVANCED as p (p.field)}
+				<label class="check-chip">
+					<input name={p.field} type="checkbox" disabled={!bits[p.bit]} />
+					{p.label}
+				</label>
+			{/each}
+		{/if}
+		{#if allowGc}
+			<label
+				class="check-chip"
+				title="Storage-wide: lets the token trigger garbage collection via the API, independent of the cache scope"
+			>
+				<input name="gc" type="checkbox" />
+				Garbage collection
+			</label>
+			<label
+				class="check-chip"
+				title="Trust admin: lets the token change trust-affecting cache settings via the API (signing keypair, visibility)"
+			>
+				<input name="ct" type="checkbox" />
+				Trust admin
+			</label>
+		{/if}
+	</div>
+</fieldset>

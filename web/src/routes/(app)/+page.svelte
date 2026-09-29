@@ -2,18 +2,15 @@
 	import { formatBytes, formatCount, formatRelativeTime } from '$lib/format';
 	import IngestChart from '$lib/components/ingest-chart.svelte';
 	import UnifiedEndpointCard from '$lib/components/unified-endpoint-card.svelte';
-	import { Badge } from '$lib/components/ui/badge/index.js';
-	import * as Card from '$lib/components/ui/card/index.js';
-	import { TriangleAlert } from '@lucide/svelte';
+	import Page from '$lib/components/layout/page.svelte';
+	import PageHeader from '$lib/components/layout/page-header.svelte';
+	import { Button } from '$lib/components/ui/button/index.js';
+	import { Recycle, TriangleAlert } from '@lucide/svelte';
 
 	let { data } = $props();
 	const s = $derived(data.stats);
 	// GC status is admin-only; the controls themselves live on /settings.
 	const isAdmin = $derived(data.user?.role === 'admin');
-
-	const usagePct = $derived(
-		data.globalMaxBytes ? Math.round((s.storageBytes / data.globalMaxBytes) * 100) : null
-	);
 
 	// Bytes the store would hold without NAR- and chunk-level dedup, minus what
 	// it actually holds.
@@ -21,99 +18,157 @@
 	const dedupPct = $derived(
 		s.logicalBytes > 0 ? Math.round((dedupBytes / s.logicalBytes) * 100) : 0
 	);
+	const usagePct = $derived(
+		data.globalMaxBytes ? Math.round((s.storageBytes / data.globalMaxBytes) * 100) : null
+	);
+	// The storage bar's scale: the global limit when one is set, else the
+	// logical (pre-dedup) size so the saved share is visible against it.
+	const scale = $derived(Math.max(data.globalMaxBytes ?? 0, s.logicalBytes, s.storageBytes, 1));
+	const storedW = $derived((s.storageBytes / scale) * 100);
+	const savedW = $derived((dedupBytes / scale) * 100);
 
-	const tiles = $derived([
-		{
-			label: 'Caches',
-			value: formatCount(s.caches),
-			foot: 'Isolated views into shared storage'
-		},
-		{
-			label: 'Store paths',
-			value: formatCount(s.objects),
-			foot: 'Across all caches'
-		},
-		{
-			label: 'NARs stored',
-			value: formatCount(s.nars),
-			foot:
-				dedupBytes > 0
-					? `${formatBytes(dedupBytes)} saved by deduplication`
-					: 'Store paths with identical content share one NAR',
-			badge: dedupBytes > 0 ? `−${dedupPct}%` : null
-		},
-		{
-			label: 'Storage used',
-			value: formatBytes(s.storageBytes),
-			foot: data.globalMaxBytes
-				? `Physical bytes after dedup, of a ${formatBytes(data.globalMaxBytes)} global limit`
-				: 'Physical bytes after dedup · no global limit set',
-			badge: usagePct != null ? `${usagePct}%` : null
-		}
+	const facts = $derived([
+		{ label: 'Caches', value: formatCount(s.caches), href: '/caches' },
+		{ label: 'Store paths', value: formatCount(s.objects), href: '/paths' },
+		{ label: 'Unique NARs', value: formatCount(s.nars) },
+		{ label: 'Pushed before dedup', value: formatBytes(s.logicalBytes) }
 	]);
 
 	const lastRun = $derived(data.gcLastRun);
 	const gcIntegrityIssues = $derived(lastRun?.integrity?.incompleteObjects ?? 0);
 </script>
 
-<div
-	class="@container/main mx-auto flex w-full max-w-6xl flex-1 flex-col gap-4 px-4 py-6 sm:px-6 md:gap-6 lg:px-8 lg:py-8"
->
-	<div
-		class="grid grid-cols-1 gap-4 *:data-[slot=card]:bg-gradient-to-t *:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card *:data-[slot=card]:shadow-xs @xl/main:grid-cols-2 @5xl/main:grid-cols-4 dark:*:data-[slot=card]:bg-card"
+<Page>
+	<PageHeader title="Overview">
+		{#snippet description()}
+			Storage and ingest across every cache on this instance{#if data.statsAt}, as of the last
+				garbage collection <span title={data.statsAt}>{formatRelativeTime(data.statsAt)}</span
+				>{/if}.
+		{/snippet}
+	</PageHeader>
+
+	<!-- Storage: the number people come here for, with dedup shown as the gap
+	     between what was pushed and what is actually stored. -->
+	<section
+		aria-labelledby="storage-heading"
+		class="overflow-hidden rounded-lg border bg-card shadow-(--shadow-panel)"
 	>
-		{#each tiles as tile (tile.label)}
-			<Card.Root class="@container/card">
-				<Card.Header>
-					<Card.Description>{tile.label}</Card.Description>
-					<Card.Title class="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-						{tile.value}
-					</Card.Title>
-					{#if tile.badge}
-						<Card.Action>
-							<Badge variant="outline">{tile.badge}</Badge>
-						</Card.Action>
+		<div class="flex flex-wrap items-end justify-between gap-x-10 gap-y-4 px-6 pt-6">
+			<div>
+				<h2 id="storage-heading" class="text-sm text-muted-foreground">Storage used</h2>
+				<p class="mt-1 flex items-baseline gap-2">
+					<span class="text-4xl font-semibold tracking-[-0.03em] tabular-nums">
+						{formatBytes(s.storageBytes)}
+					</span>
+					{#if data.globalMaxBytes}
+						<span class="text-sm text-muted-foreground">
+							of {formatBytes(data.globalMaxBytes)} limit
+						</span>
 					{/if}
-				</Card.Header>
-				<Card.Footer class="text-sm text-muted-foreground">
-					{tile.foot}
-				</Card.Footer>
-			</Card.Root>
-		{/each}
-	</div>
-	{#if data.statsAt}
-		<p class="-mt-2 text-xs text-muted-foreground">
-			Totals as of the last GC run, {formatRelativeTime(data.statsAt)}.
-		</p>
-	{/if}
+				</p>
+			</div>
+			{#if dedupBytes > 0}
+				<div class="sm:text-right">
+					<p class="text-sm text-muted-foreground">Saved by deduplication</p>
+					<p class="mt-1 text-xl font-semibold tracking-[-0.02em] tabular-nums">
+						{formatBytes(dedupBytes)}
+						<span class="ml-1 text-sm font-medium text-success">{dedupPct}%</span>
+					</p>
+				</div>
+			{/if}
+		</div>
 
-	{#if data.proxyPublicKey && data.cacheBaseUrl}
-		<UnifiedEndpointCard
-			url={data.cacheBaseUrl}
-			publicKey={data.proxyPublicKey}
-			upstreams={data.proxyUpstreams}
-		/>
-	{/if}
+		<div class="px-6 pt-5 pb-6">
+			<div
+				class="flex h-2.5 overflow-hidden rounded-full bg-muted"
+				role="img"
+				aria-label="{formatBytes(s.storageBytes)} stored, {formatBytes(
+					dedupBytes
+				)} saved by deduplication"
+			>
+				<div
+					class="h-full {usagePct != null && usagePct >= 90 ? 'bg-warning' : 'bg-primary'}"
+					style="width: {storedW}%"
+				></div>
+				{#if savedW > 0}
+					<div
+						class="h-full border-l-2 border-card bg-[repeating-linear-gradient(135deg,var(--success)_0_2px,transparent_2px_6px)] opacity-60"
+						style="width: {savedW}%"
+					></div>
+				{/if}
+			</div>
+			<div class="mt-2.5 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground">
+				<span class="inline-flex items-center gap-1.5">
+					<span class="size-2 rounded-sm bg-primary"></span> Stored after dedup
+				</span>
+				{#if savedW > 0}
+					<span class="inline-flex items-center gap-1.5">
+						<span
+							class="size-2 rounded-sm bg-[repeating-linear-gradient(135deg,var(--success)_0_1px,transparent_1px_3px)]"
+						></span>
+						Shared content, stored once
+					</span>
+				{/if}
+				{#if usagePct != null}
+					<span class="ms-auto tabular-nums">{usagePct}% of global limit</span>
+				{/if}
+			</div>
+		</div>
 
-	<IngestChart buckets={data.buckets} />
+		<dl class="grid grid-cols-2 border-t bg-subtle md:grid-cols-4">
+			{#each facts as fact, i (fact.label)}
+				<div
+					class="border-border px-6 py-4 {i % 2 === 1 ? 'border-l' : ''} {i >= 2
+						? 'border-t md:border-t-0'
+						: ''} {i === 2 ? 'md:border-l' : ''}"
+				>
+					<dt class="text-xs text-muted-foreground">{fact.label}</dt>
+					<dd class="mt-1 text-lg font-semibold tracking-[-0.01em] tabular-nums">
+						{#if fact.href}
+							<a href={fact.href} class="hover:text-primary">{fact.value}</a>
+						{:else}
+							{fact.value}
+						{/if}
+					</dd>
+				</div>
+			{/each}
+		</dl>
+	</section>
 
 	{#if isAdmin}
 		<!-- Status only; the GC and storage-limit controls live on /settings. -->
-		<p class="flex flex-wrap items-center gap-x-1.5 text-sm text-muted-foreground">
-			{#if lastRun}
-				Garbage collection last ran
-				<span title={lastRun.at}>{formatRelativeTime(lastRun.at)}</span>
-				{#if gcIntegrityIssues > 0}
-					<span class="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
-						<TriangleAlert class="size-3.5" />
-						{formatCount(gcIntegrityIssues)} incomplete
-						{gcIntegrityIssues === 1 ? 'closure' : 'closures'}
-					</span>
+		<div
+			class="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border bg-card px-4 py-2.5 text-sm shadow-(--shadow-panel)"
+		>
+			<Recycle class="size-4 text-muted-foreground" />
+			<span class="text-muted-foreground">
+				{#if lastRun}
+					Garbage collection last ran
+					<span class="text-foreground" title={lastRun.at}>{formatRelativeTime(lastRun.at)}</span>
+				{:else}
+					Garbage collection hasn't run yet
 				{/if}
-			{:else}
-				Garbage collection hasn't run yet
+			</span>
+			{#if gcIntegrityIssues > 0}
+				<span class="inline-flex items-center gap-1 text-warning">
+					<TriangleAlert class="size-3.5" />
+					{formatCount(gcIntegrityIssues)} incomplete
+					{gcIntegrityIssues === 1 ? 'closure' : 'closures'}
+				</span>
 			{/if}
-			· <a href="/settings" class="text-foreground hover:underline">manage in Settings</a>
-		</p>
+			<Button variant="ghost" size="sm" href="/settings" class="ms-auto">Manage</Button>
+		</div>
 	{/if}
-</div>
+
+	<div class="mt-8 grid gap-6">
+		<IngestChart buckets={data.buckets} />
+
+		{#if data.proxyPublicKey && data.cacheBaseUrl}
+			<UnifiedEndpointCard
+				url={data.cacheBaseUrl}
+				publicKey={data.proxyPublicKey}
+				upstreams={data.proxyUpstreams}
+			/>
+		{/if}
+	</div>
+</Page>
