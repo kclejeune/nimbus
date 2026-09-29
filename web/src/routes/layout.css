@@ -219,13 +219,22 @@
    headers on a subtle band, hairline row dividers, numbers in tabular mono. */
 @layer components {
 	.table-frame {
-		@apply overflow-x-auto rounded-lg border bg-card;
+		/* relative: absolutely positioned descendants (sr-only header labels)
+		   otherwise escape the overflow clip and widen the whole page. */
+		@apply relative overflow-x-auto rounded-lg border bg-card;
 		box-shadow: var(--shadow-panel);
 	}
 	.data-table {
 		@apply w-full text-sm;
 		border-collapse: separate;
 		border-spacing: 0;
+	}
+	/* On phones, scroll a table sideways inside its frame rather than
+	   squeezing every column into a tall, word-per-line stack. */
+	@media (width < 40rem) {
+		.data-table {
+			min-width: 36rem;
+		}
 	}
 	.data-table > thead > tr > th {
 		@apply h-9 border-b bg-subtle px-4 text-left text-xs font-medium whitespace-nowrap text-muted-foreground;

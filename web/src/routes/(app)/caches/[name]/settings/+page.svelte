@@ -151,7 +151,7 @@
 				<ul class="divide-y">
 					{#each c.upstreams as upstream (upstream.id)}
 						<li class="flex flex-wrap items-center gap-3 px-5 py-3">
-							<div class="min-w-0 flex-1">
+							<div class="min-w-48 flex-1">
 								<div class="flex items-center gap-2">
 									<span class="truncate font-mono text-[0.8125rem]">{upstream.url}</span>
 									{#if upstream.enforced}
@@ -169,7 +169,7 @@
 								name="upstream_mode_{upstream.id}"
 								value={upstream.mode}
 								disabled={!canConfigure}
-								class="native-select w-48"
+								class="native-select w-full sm:w-48"
 								aria-label="Mode for {upstream.url}"
 							>
 								<option value="inherit">Default ({upstream.defaultMode})</option>

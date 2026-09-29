@@ -46,7 +46,7 @@
 	]);
 </script>
 
-<div class="grid gap-6">
+<div class="grid grid-cols-1 gap-6">
 	<Panel
 		title="With the nimbus CLI"
 		description="The quickest setup: the CLI writes nix.conf and netrc for you, and handles pushing."

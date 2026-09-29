@@ -41,7 +41,7 @@
 		<p role="alert" class="mb-4 text-sm text-destructive">{form.error}</p>
 	{/if}
 
-	<div class="grid gap-6">
+	<div class="grid grid-cols-1 gap-6">
 		<Panel title="Members" flush>
 			{#if data.members.length === 0}
 				<p class="px-5 py-6 text-center text-sm text-muted-foreground">No members yet.</p>

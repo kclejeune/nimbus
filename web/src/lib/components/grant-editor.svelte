@@ -30,7 +30,7 @@
 	description="Direct grants. Patterns like ci-* cover every matching cache, including ones created later."
 	flush
 >
-	<div class="overflow-x-auto">
+	<div class="relative overflow-x-auto">
 		<table class="data-table">
 			<thead>
 				<tr>

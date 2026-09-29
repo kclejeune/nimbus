@@ -278,7 +278,7 @@
 		</dl>
 	</section>
 
-	<div class="mt-8 grid gap-6">
+	<div class="mt-8 grid grid-cols-1 gap-6">
 		<Panel title="Recent pushes" flush>
 			{#snippet actions()}
 				<Button variant="ghost" size="sm" href="/paths">View all paths</Button>

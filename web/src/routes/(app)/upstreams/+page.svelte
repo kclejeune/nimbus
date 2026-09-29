@@ -115,7 +115,7 @@
 					/>
 				</div>
 			</div>
-			<div class="flex items-center gap-0.5 pt-6">
+			<div class="flex flex-col items-center gap-0.5 pt-6 sm:flex-row">
 				<Button
 					type="button"
 					variant="ghost"

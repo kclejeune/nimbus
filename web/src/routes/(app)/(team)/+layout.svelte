@@ -26,7 +26,7 @@
 			class="mb-5"
 		/>
 		<nav aria-label="Team sections" class="mb-8 border-b">
-			<ul class="-mb-px flex gap-1">
+			<ul class="-mb-px flex sm:gap-1">
 				{#each tabs as tab (tab.href)}
 					{@const active = tab.route === page.route.id}
 					<li>
@@ -34,7 +34,7 @@
 							href={tab.href}
 							aria-current={active ? 'page' : undefined}
 							data-sveltekit-noscroll
-							class="inline-flex h-10 items-center gap-2 border-b-2 px-3 text-sm font-medium whitespace-nowrap transition-colors {active
+							class="inline-flex h-10 items-center gap-2 border-b-2 px-2.5 text-sm font-medium whitespace-nowrap transition-colors sm:px-3 {active
 								? 'border-primary text-foreground'
 								: 'border-transparent text-muted-foreground hover:border-border hover:text-foreground'}"
 						>

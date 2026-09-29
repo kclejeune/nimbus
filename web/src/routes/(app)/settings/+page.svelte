@@ -42,7 +42,7 @@
 <Page width="narrow">
 	<PageHeader title="Settings" description="Instance-wide storage policy and maintenance." />
 
-	<div class="grid gap-6">
+	<div class="grid grid-cols-1 gap-6">
 		<form
 			method="POST"
 			action="?/saveLimit"

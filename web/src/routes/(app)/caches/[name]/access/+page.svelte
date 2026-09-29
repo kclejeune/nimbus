@@ -17,7 +17,7 @@
 		Who can use this cache beyond {c.isPublic ? 'anonymous public pulls' : 'admins'}. Tokens are
 		permission snapshots: changes here don't alter tokens already issued, so revoke those instead.
 	{/snippet}
-	<div class="overflow-x-auto">
+	<div class="relative overflow-x-auto">
 		<table class="data-table">
 			<thead>
 				<tr>

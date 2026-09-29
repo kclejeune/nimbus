@@ -17,7 +17,7 @@
 <!-- Where you are, not what the page is called: the page's own header owns the
      title, so this bar carries the trail back up. -->
 <header
-	class="sticky top-0 z-20 flex h-(--header-height) shrink-0 items-center gap-2 border-b bg-background/85 backdrop-blur-md md:rounded-t-xl"
+	class="sticky top-0 z-20 flex h-(--header-height) shrink-0 items-center gap-2 border-b bg-background/85 backdrop-blur-md lg:rounded-t-xl"
 >
 	<div class="flex w-full min-w-0 items-center gap-2 px-3 lg:px-5">
 		<Sidebar.Trigger class="text-muted-foreground" />

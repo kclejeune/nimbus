@@ -122,7 +122,7 @@
 		</div>
 	{/if}
 
-	<div class="grid gap-6">
+	<div class="grid grid-cols-1 gap-6">
 		<Panel title="Groups" flush>
 			{#if data.memberships.length === 0}
 				<p class="px-5 py-6 text-center text-sm text-muted-foreground">Not in any groups.</p>
@@ -155,7 +155,7 @@
 				: 'Inherited from group membership.'}
 			flush
 		>
-			<div class="overflow-x-auto">
+			<div class="relative overflow-x-auto">
 				<table class="data-table">
 					<thead>
 						<tr>
