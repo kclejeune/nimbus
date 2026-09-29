@@ -2,6 +2,7 @@
 	import AppSidebar from '$lib/components/app-sidebar.svelte';
 	import SiteHeader from '$lib/components/site-header.svelte';
 	import CommandPalette from '$lib/components/command-palette.svelte';
+	import NavProgress from '$lib/components/layout/nav-progress.svelte';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 
 	let { children, data } = $props();
@@ -22,4 +23,5 @@
 	</Sidebar.Inset>
 </Sidebar.Provider>
 
+<NavProgress />
 <CommandPalette role={data.user?.role} />
