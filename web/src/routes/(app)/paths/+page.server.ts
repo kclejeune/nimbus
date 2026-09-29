@@ -1,19 +1,22 @@
 import { error } from '@sveltejs/kit';
-import { browsableCaches } from '$lib/server/cache/cache-page';
 import { readSession } from '$lib/server/cache/db';
-import { likeTerm } from '$lib/server/store-paths';
+import { AsyncMemo } from '$lib/server/cache/async-memo';
+import {
+	countAcrossCaches,
+	likeTerm,
+	newestAcrossCaches,
+	toCrossCachePath,
+	type CrossCachePath
+} from '$lib/server/store-paths';
+import { browsableCaches, IN_IDS } from '$lib/server/cache/cache-page';
 import { parsePage } from '$lib/pagination';
 import type { PageServerLoad } from './$types';
 
 const PAGE_SIZE = 50;
 
-interface PathRow {
-	store_path: string;
-	store_path_hash: string;
-	created_at: string;
-	nar_size: number;
-	cache_name: string;
-}
+/** The unfiltered pager's "of N": an index scan of every object in scope, so
+ *  paging and revisits reuse it for a minute rather than recounting. */
+const totals = new AsyncMemo<number>(60_000, 64);
 
 export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	const db = platform?.env.ATTIC_DB;
@@ -36,16 +39,14 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	const page = parsePage(url.searchParams.get('page'));
 	const cacheNames = inScope.map((c) => c.name);
 
-	// The total rides on the rows as a window aggregate (computed before
-	// LIMIT), so the footer costs no second scan. An empty IN () is invalid
-	// SQL, so an empty scope skips the query outright.
-	let results: (PathRow & { total: number })[] = [];
-	if (selected.length > 0) {
-		const ids = selected.map((c) => c.id);
-		const inList = ids.map(() => '?').join(', ');
-		const hasQ = q.length > 0;
-		const where = `WHERE o.cache_id IN (${inList})${hasQ ? ` AND o.store_path LIKE ? ESCAPE '\\'` : ''}`;
-		const filterBinds = hasQ ? [...ids, likeTerm(q)] : ids;
+	// One row past the page detects "next".
+	const ids = selected.map((c) => c.id);
+	const offset = (page - 1) * PAGE_SIZE;
+	let results: (CrossCachePath & { total?: number })[];
+	let total: number;
+	if (q) {
+		// A name search scans the scope anyway, so the total rides on the rows
+		// as a window aggregate (computed before LIMIT) at no extra cost.
 		({ results } = await read
 			.prepare(
 				`SELECT o.store_path, o.store_path_hash, o.created_at, n.nar_size,
@@ -53,12 +54,19 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 				 FROM object o
 				 JOIN cache c ON c.id = o.cache_id
 				 JOIN nar n ON n.id = o.nar_id
-				 ${where}
+				 WHERE o.cache_id ${IN_IDS} AND o.store_path LIKE ?2 ESCAPE '\\'
 				 ORDER BY o.created_at DESC, o.store_path ASC
-				 LIMIT ? OFFSET ?`
+				 LIMIT ?3 OFFSET ?4`
 			)
-			.bind(...filterBinds, PAGE_SIZE + 1, (page - 1) * PAGE_SIZE)
-			.all<PathRow & { total: number }>());
+			.bind(JSON.stringify(ids), likeTerm(q), PAGE_SIZE + 1, offset)
+			.all<CrossCachePath & { total: number }>());
+		total = results[0]?.total ?? 0;
+	} else {
+		// Unfiltered: per-cache index walks, not a sort of the whole scope.
+		[results, total] = await Promise.all([
+			newestAcrossCaches(read, ids, PAGE_SIZE + 1, offset),
+			totals.get(JSON.stringify(ids), () => countAcrossCaches(read, ids))
+		]);
 	}
 
 	return {
@@ -67,14 +75,8 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 		q,
 		page,
 		pageSize: PAGE_SIZE,
-		total: results[0]?.total ?? 0,
+		total,
 		hasMore: results.length > PAGE_SIZE,
-		paths: results.slice(0, PAGE_SIZE).map((r) => ({
-			storePath: r.store_path,
-			hash: r.store_path_hash,
-			createdAt: r.created_at,
-			narSize: r.nar_size,
-			cache: r.cache_name
-		}))
+		paths: results.slice(0, PAGE_SIZE).map(toCrossCachePath)
 	};
 };

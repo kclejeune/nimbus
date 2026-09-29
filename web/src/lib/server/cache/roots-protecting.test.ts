@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { testDatabase } from './test-db';
+import { mulberry32, testDatabase } from './test-db';
 
 vi.mock('./compression', async () => (await import('./test-db')).fakeCompression());
 
@@ -22,16 +22,6 @@ const FORWARD_SQL = `WITH RECURSIVE prot(root, id) AS (
  JOIN object o ON o.cache_id = ?1 AND o.store_path_hash = d.root
  JOIN gc_root g ON g.cache_id = ?1 AND g.store_path_hash = d.root
  LEFT JOIN pin pn ON pn.id = g.pin_id`;
-
-/** Deterministic PRNG so a failure reproduces. */
-function mulberry32(seed: number) {
-	return () => {
-		seed = (seed + 0x6d2b79f5) | 0;
-		let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-	};
-}
 
 const hashOf = (cache: number, i: number) => `c${cache}-${String(i).padStart(29, '0')}`;
 

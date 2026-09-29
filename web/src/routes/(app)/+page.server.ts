@@ -4,6 +4,7 @@ import { allLiveUpstreams } from '$lib/server/cache/missing-paths';
 import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { readSession } from '$lib/server/cache/db';
+import { newestAcrossCaches, toCrossCachePath } from '$lib/server/store-paths';
 import { instanceStatsSnapshot } from '$lib/server/cache/stats';
 import { canOnCache } from '$lib/server/auth/permissions';
 import { browsableCaches } from '$lib/server/cache/cache-page';
@@ -68,36 +69,20 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 	const writable = inScope.filter((c) => canOnCache(access, 'w', c.name));
 
 	// Recent pushes and budget usage are scoped to caches this viewer can
-	// browse; an empty IN () is invalid SQL, so empty scopes skip the query.
+	// browse.
 	const [recent, budgetBytes, pushed] = await Promise.all([
-		ids.length === 0
-			? []
-			: read
-					.prepare(
-						`SELECT o.store_path, o.store_path_hash, o.created_at, n.nar_size, c.name AS cache_name
-						 FROM object o
-						 JOIN cache c ON c.id = o.cache_id
-						 JOIN nar n ON n.id = o.nar_id
-						 WHERE o.cache_id IN (SELECT value FROM json_each(?))
-						 ORDER BY o.created_at DESC LIMIT 6`
-					)
-					.bind(JSON.stringify(ids))
-					.all<{
-						store_path: string;
-						store_path_hash: string;
-						created_at: string;
-						nar_size: number;
-						cache_name: string;
-					}>()
-					.then((r) => r.results),
+		newestAcrossCaches(read, ids, 6),
 		// Same accounting as /caches; only caches with a budget are scanned.
 		cacheSizes(
 			read,
 			budgeted.map((c) => c.id)
 		),
-		// created_by is the pushing token's subject (the user id). Bounded to
-		// the viewer's writable caches so the (cache_id, …) index narrows it.
-		writable.length === 0
+		// created_by is the pushing token's subject (the user id). Unindexed,
+		// so a viewer who never pushed scans every object in their writable
+		// caches — skipped when they hold no token, since then the push step
+		// can't be next anyway. (An index would bill a row per pushed path to
+		// save this; not worth it.)
+		writable.length === 0 || tokens.length === 0
 			? false
 			: read
 					.prepare(
@@ -200,13 +185,7 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 			hasPush: pushed,
 			firstCache: writable[0]?.name ?? null
 		},
-		recent: recent.map((r) => ({
-			storePath: r.store_path,
-			hash: r.store_path_hash,
-			createdAt: r.created_at,
-			narSize: r.nar_size,
-			cache: r.cache_name
-		})),
+		recent: recent.map(toCrossCachePath),
 		cacheBaseUrl: platform?.env.CACHE_BASE_URL ?? null,
 		appUrl: platform?.env.APP_URL ?? null,
 		proxyPublicKey,

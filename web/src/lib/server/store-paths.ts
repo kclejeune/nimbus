@@ -1,5 +1,6 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import { escapeLike } from '$lib/utils';
+import { IN_IDS } from '$lib/server/cache/cache-page';
 
 /** Rows fetched per page for the store-paths list (initial load + each scroll). */
 export const PATHS_PAGE_SIZE = 25;
@@ -101,5 +102,55 @@ export async function countStorePaths(
 	const row = await (hasQ ? stmt.bind(cacheName, likeTerm(q)) : stmt.bind(cacheName)).first<{
 		n: number;
 	}>();
+	return row?.n ?? 0;
+}
+
+export interface CrossCachePath extends PathRow {
+	cache_name: string;
+}
+
+/** A cross-cache row as the pages render it. */
+export const toCrossCachePath = (p: CrossCachePath) => ({ ...toStorePath(p), cache: p.cache_name });
+
+/**
+ * Newest store paths across several caches, one page at a time (the /paths
+ * explorer and the overview's recent pushes). Sorting the union directly
+ * reads and joins every object in scope before LIMIT applies — 171k rows
+ * for six rows on prod. Instead each cache yields its own newest
+ * `offset + limit` from idx_object_cache_created, so the merge only ever
+ * sees `caches × (offset + limit)` candidates. Ties break on store_path, so
+ * pages stay stable.
+ */
+export async function newestAcrossCaches(
+	db: D1Database,
+	cacheIds: number[],
+	limit: number,
+	offset = 0
+): Promise<CrossCachePath[]> {
+	if (cacheIds.length === 0) return [];
+	const { results } = await db
+		.prepare(
+			`SELECT o.store_path, o.store_path_hash, o.created_at, n.nar_size, c.name AS cache_name
+			 FROM json_each(?1) j
+			 JOIN object o ON o.id IN (
+			   SELECT id FROM object WHERE cache_id = j.value
+			   ORDER BY created_at DESC, store_path ASC LIMIT ?2)
+			 JOIN cache c ON c.id = o.cache_id
+			 JOIN nar n ON n.id = o.nar_id
+			 ORDER BY o.created_at DESC, o.store_path ASC
+			 LIMIT ?3 OFFSET ?4`
+		)
+		.bind(JSON.stringify(cacheIds), offset + limit, limit, offset)
+		.all<CrossCachePath>();
+	return results;
+}
+
+/** Store paths in the given caches, for a pager's "of N". Index-only. */
+export async function countAcrossCaches(db: D1Database, cacheIds: number[]): Promise<number> {
+	if (cacheIds.length === 0) return 0;
+	const row = await db
+		.prepare(`SELECT COUNT(*) AS n FROM object WHERE cache_id ${IN_IDS}`)
+		.bind(JSON.stringify(cacheIds))
+		.first<{ n: number }>();
 	return row?.n ?? 0;
 }
