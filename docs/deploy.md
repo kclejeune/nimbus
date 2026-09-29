@@ -199,7 +199,7 @@ hash must not let another cache claim its bytes.
 
 ### Monitoring
 
-The monitoring page's traffic, edge-cache, and write charts query Workers
+The Usage page's traffic, edge-cache, and write charts query Workers
 Analytics Engine (dataset `nimbus_cache_metrics`). Set `vars.CF_ACCOUNT_ID`
 and a `CF_ANALYTICS_TOKEN` secret (API token with **Account Analytics:
 Read**). Without them those sections are hidden, but metrics are still

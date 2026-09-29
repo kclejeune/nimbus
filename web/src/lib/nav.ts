@@ -31,7 +31,7 @@ export const NAV_GROUPS: NavGroup[] = [
 	{
 		items: [
 			{ title: 'Overview', url: '/', icon: LayoutDashboard },
-			{ title: 'Monitoring', url: '/monitoring', icon: ChartLine }
+			{ title: 'Usage', url: '/usage', icon: ChartLine }
 		]
 	},
 	{

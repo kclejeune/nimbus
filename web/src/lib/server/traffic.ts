@@ -1,4 +1,4 @@
-// Read-path traffic summary for the monitoring page, queried from the
+// Read-path traffic summary for the usage page, queried from the
 // Analytics Engine SQL API (the worker-side writer is cache/metrics.ts).
 // Querying needs an account-scoped API token, so this whole feature is
 // config-gated: loadTraffic returns null — and the UI hides the section —

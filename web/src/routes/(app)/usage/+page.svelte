@@ -183,7 +183,7 @@
 
 <Page>
 	<PageHeader
-		title="Monitoring"
+		title="Usage"
 		description="Storage growth and cache traffic across every cache on this instance."
 	/>
 

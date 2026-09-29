@@ -96,7 +96,7 @@ declare global {
 				CACHE_METRICS_SAMPLE?: string;
 				/** Account id + API token (Account Analytics read) for querying
 				 * CACHE_METRICS from the dashboard via the Analytics Engine SQL
-				 * API; the monitoring traffic section hides when either is unset. */
+				 * API; the usage page's traffic section hides when either is unset. */
 				CF_ACCOUNT_ID?: string;
 				CF_ANALYTICS_TOKEN?: string;
 			};

@@ -183,7 +183,7 @@ export function recordLimit(env: Env, route: LimitRoute, outcome: LimitOutcome):
 }
 
 /** Record one abuse-guard refusal, so deflected abuse is visible on the
- *  monitoring page instead of only as absent load. */
+ *  usage page instead of only as absent load. */
 export function recordGuard(env: Env, event: GuardEvent): void {
 	try {
 		const sample = readSampleRate(env);
