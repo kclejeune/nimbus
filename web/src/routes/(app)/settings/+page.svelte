@@ -192,7 +192,7 @@
 							</summary>
 							<ul class="mt-2 space-y-1 ps-6 text-foreground">
 								{#each lastRun.integrity.examples as example (example)}
-									<li><StorePath path={example} /></li>
+									<li><StorePath path={example} full /></li>
 								{/each}
 							</ul>
 						</details>
