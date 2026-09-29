@@ -148,7 +148,7 @@
 					{#if row.href && row.storePath}
 						<td class="w-full max-w-0">
 							<div class="flex min-w-0 items-baseline gap-2">
-								<StorePath path={row.storePath} href={row.href} />
+								<StorePath path={row.storePath} href={row.href} wide />
 								{#if row.note}
 									<span class="shrink-0 text-xs text-muted-foreground">{row.note}</span>
 								{/if}
@@ -157,7 +157,7 @@
 					{:else}
 						<td class="w-full max-w-0 text-muted-foreground">
 							<div class="flex min-w-0 items-baseline gap-2 opacity-70">
-								<StorePath path={row.storePath ?? row.hash} />
+								<StorePath path={row.storePath ?? row.hash} wide />
 								<span class="shrink-0 text-xs">{row.note ?? 'Not in this cache'}</span>
 							</div>
 						</td>

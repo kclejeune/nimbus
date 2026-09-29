@@ -281,6 +281,7 @@
 									<StorePath
 										path={p.storePath}
 										href="/caches/{encodeURIComponent(c.name)}/paths/{p.hash}"
+										wide
 									/>
 									{#if isPinned}
 										<StatusBadge tone="primary" title="Pinned: protected from garbage collection">

@@ -5,6 +5,7 @@
 		path,
 		href,
 		full = false,
+		wide = false,
 		class: className
 	}: {
 		/** A full /nix/store path, or just `<hash>-<name>`. */
@@ -12,6 +13,9 @@
 		href?: string;
 		/** Show the whole hash instead of its first 8 characters. */
 		full?: boolean;
+		/** Show the whole hash on wide screens (xl+), 8 characters below. For
+		 *  full-width tables, where there's room to match `nix path-info` output. */
+		wide?: boolean;
 		class?: string;
 	} = $props();
 
@@ -22,7 +26,6 @@
 		const m = /^([0-9a-z]{32})-(.+)$/.exec(base);
 		return m ? { hash: m[1], name: m[2] } : { hash: '', name: base };
 	});
-	const hash = $derived(full ? parts.hash : parts.hash.slice(0, 8));
 </script>
 
 <svelte:element
@@ -36,7 +39,11 @@
 	)}
 >
 	{#if parts.hash}
-		<span class="shrink-0 text-muted-foreground/70">{hash}{full ? '' : '…'}-</span>
+		<span class="shrink-0 text-muted-foreground/70"
+			>{parts.hash.slice(0, 8)}{#if full}{parts.hash.slice(8)}{:else if wide}<span
+					class="hidden xl:inline">{parts.hash.slice(8)}</span
+				><span class="xl:hidden">…</span>{:else}…{/if}-</span
+		>
 	{/if}
 	<span
 		class={cn(

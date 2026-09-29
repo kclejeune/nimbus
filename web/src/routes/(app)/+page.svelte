@@ -295,6 +295,7 @@
 								<StorePath
 									path={p.storePath}
 									href="/caches/{encodeURIComponent(p.cache)}/paths/{p.hash}"
+									wide
 								/>
 							</div>
 							<a
