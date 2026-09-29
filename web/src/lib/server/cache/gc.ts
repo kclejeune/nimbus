@@ -406,17 +406,22 @@ export async function syncObjectRefs(db: D1, stats?: GcStats): Promise<void> {
 				)
 				.bind(start, end),
 			// Objects in this window may be the missing children of older
-			// dangling edges (pushes arrive in any order).
+			// dangling edges (pushes arrive in any order). Driven from the
+			// window's objects through idx_object_ref_ref_hash: scanning every
+			// dangling edge instead read 1.5M rows per window on prod, where
+			// most edges dangle for good (upstream-served references). The
+			// unary + keeps the planner off idx_object_ref_child for the NULL
+			// test, which would be that same scan.
 			db
 				.prepare(
 					'UPDATE object_ref SET child_id = (' +
 						'SELECT o2.id FROM object o2 WHERE o2.store_path_hash = object_ref.ref_hash ' +
-						'AND o2.id > ?1 AND o2.id <= ?2 ' +
 						'AND o2.cache_id = (SELECT p.cache_id FROM object p WHERE p.id = object_ref.object_id)' +
-						') WHERE child_id IS NULL AND EXISTS (' +
-						'SELECT 1 FROM object o2 WHERE o2.store_path_hash = object_ref.ref_hash ' +
-						'AND o2.id > ?1 AND o2.id <= ?2 ' +
-						'AND o2.cache_id = (SELECT p.cache_id FROM object p WHERE p.id = object_ref.object_id))'
+						') WHERE rowid IN (' +
+						'SELECT r.rowid FROM object o2 ' +
+						'JOIN object_ref r ON r.ref_hash = o2.store_path_hash AND +r.child_id IS NULL ' +
+						'JOIN object p ON p.id = r.object_id AND p.cache_id = o2.cache_id ' +
+						'WHERE o2.id > ?1 AND o2.id <= ?2)'
 				)
 				.bind(start, end),
 			db
