@@ -30,28 +30,32 @@
 		q ? pages.filter((p) => p.title.toLowerCase().includes(q)) : pages
 	);
 
-	// Debounced server search; a response for a stale query is dropped.
-	let seq = 0;
-	let timer: ReturnType<typeof setTimeout>;
+	// Debounced server search. The next keystroke cancels this one outright —
+	// its timer if pending, its request if in flight — so a stale response
+	// never lands and an abandoned query stops costing the server.
 	$effect(() => {
 		const term = query.trim();
-		clearTimeout(timer);
 		if (term.length < 2) {
 			results = null;
 			loading = false;
 			return;
 		}
 		loading = true;
-		const mine = ++seq;
-		timer = setTimeout(async () => {
+		const ctrl = new AbortController();
+		const timer = setTimeout(async () => {
 			try {
-				const res = await fetch(`/search?q=${encodeURIComponent(term)}`);
-				if (mine === seq && res.ok) results = (await res.json()) as SearchResults;
+				const res = await fetch(`/search?q=${encodeURIComponent(term)}`, { signal: ctrl.signal });
+				if (res.ok) results = (await res.json()) as SearchResults;
+			} catch {
+				// Aborted (a newer query owns `loading`) or offline.
 			} finally {
-				if (mine === seq) loading = false;
+				if (!ctrl.signal.aborted) loading = false;
 			}
 		}, 180);
-		return () => clearTimeout(timer);
+		return () => {
+			clearTimeout(timer);
+			ctrl.abort();
+		};
 	});
 
 	// Fresh palette each time it opens.

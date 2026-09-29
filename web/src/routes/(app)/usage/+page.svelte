@@ -2,15 +2,16 @@
 	import { goto } from '$app/navigation';
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
+	import TabNav from '$lib/components/layout/tab-nav.svelte';
 	import PerformanceView from './performance-view.svelte';
 	import StorageView from './storage-view.svelte';
 
 	let { data } = $props();
 
-	const tabs = [
-		{ key: 'performance', label: 'Performance', href: '?' },
-		{ key: 'storage', label: 'Storage', href: '?view=storage' }
-	] as const;
+	const tabs = $derived([
+		{ label: 'Performance', href: '?', active: data.view === 'performance' },
+		{ label: 'Storage', href: '?view=storage', active: data.view === 'storage' }
+	]);
 
 	function pickWindow(key: string) {
 		const params = new URLSearchParams();
@@ -43,25 +44,7 @@
 		{/snippet}
 	</PageHeader>
 
-	<nav aria-label="Usage views" class="mb-8 border-b">
-		<ul class="-mb-px flex sm:gap-1">
-			{#each tabs as tab (tab.key)}
-				{@const active = data.view === tab.key}
-				<li>
-					<a
-						href={tab.href}
-						aria-current={active ? 'page' : undefined}
-						data-sveltekit-noscroll
-						class="inline-flex h-10 items-center border-b-2 px-2.5 text-sm font-medium whitespace-nowrap transition-colors sm:px-3 {active
-							? 'border-primary text-foreground'
-							: 'border-transparent text-muted-foreground hover:border-border hover:text-foreground'}"
-					>
-						{tab.label}
-					</a>
-				</li>
-			{/each}
-		</ul>
-	</nav>
+	<TabNav label="Usage views" {tabs} />
 
 	{#if data.view === 'performance'}
 		<PerformanceView result={data.observability} />

@@ -6,14 +6,14 @@
 	import { TriangleAlert } from '@lucide/svelte';
 
 	const p = $derived(confirmState.pending);
-	let typed = $state('');
+	// Fresh text field for every request: a writable derived that the input
+	// binds to, reset to '' whenever `p` changes.
+	let typed = $derived.by(() => {
+		void p;
+		return '';
+	});
 	const unlocked = $derived(!p?.typeToConfirm || typed === p.typeToConfirm);
 	const inputId = $props.id();
-
-	// Fresh text field for every request.
-	$effect(() => {
-		if (p) typed = '';
-	});
 </script>
 
 <AlertDialog.Root

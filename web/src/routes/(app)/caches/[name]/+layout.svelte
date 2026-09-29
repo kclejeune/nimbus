@@ -3,6 +3,7 @@
 	import { formatBytes } from '$lib/format';
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
+	import TabNav from '$lib/components/layout/tab-nav.svelte';
 	import StatusBadge from '$lib/components/layout/status-badge.svelte';
 	import { Globe, Lock } from '@lucide/svelte';
 
@@ -10,19 +11,21 @@
 	const c = $derived(data.cacheHeader);
 	const base = $derived(`/caches/${encodeURIComponent(c.name)}`);
 
-	const tabs = $derived([
-		{ label: 'Paths', href: base, route: '/(app)/caches/[name]' },
-		{ label: 'Connect', href: `${base}/connect`, route: '/(app)/caches/[name]/connect' },
-		...(data.cacheViewer.canManage
-			? [
-					{ label: 'Pins', href: `${base}/pins`, route: '/(app)/caches/[name]/pins' },
-					{ label: 'Access', href: `${base}/access`, route: '/(app)/caches/[name]/access' },
-					{ label: 'Settings', href: `${base}/settings`, route: '/(app)/caches/[name]/settings' }
-				]
-			: [])
-	]);
+	const tabs = $derived(
+		[
+			{ label: 'Paths', href: base, route: '/(app)/caches/[name]' },
+			{ label: 'Connect', href: `${base}/connect`, route: '/(app)/caches/[name]/connect' },
+			...(data.cacheViewer.canManage
+				? [
+						{ label: 'Pins', href: `${base}/pins`, route: '/(app)/caches/[name]/pins' },
+						{ label: 'Access', href: `${base}/access`, route: '/(app)/caches/[name]/access' },
+						{ label: 'Settings', href: `${base}/settings`, route: '/(app)/caches/[name]/settings' }
+					]
+				: [])
+		].map((t) => ({ ...t, active: t.route === page.route.id }))
+	);
 	// A store path's detail page is a drill-down with its own header, not a tab.
-	const isTab = $derived(tabs.some((t) => t.route === page.route.id));
+	const isTab = $derived(tabs.some((t) => t.active));
 </script>
 
 {#if isTab}
@@ -51,25 +54,7 @@
 			{/snippet}
 		</PageHeader>
 
-		<nav aria-label="Cache sections" class="mb-8 border-b">
-			<ul class="-mb-px flex overflow-x-auto sm:gap-1">
-				{#each tabs as tab (tab.href)}
-					{@const active = tab.route === page.route.id}
-					<li>
-						<a
-							href={tab.href}
-							aria-current={active ? 'page' : undefined}
-							data-sveltekit-noscroll
-							class="inline-flex h-10 items-center border-b-2 px-2.5 text-sm font-medium whitespace-nowrap transition-colors sm:px-3 {active
-								? 'border-primary text-foreground'
-								: 'border-transparent text-muted-foreground hover:border-border hover:text-foreground'}"
-						>
-							{tab.label}
-						</a>
-					</li>
-				{/each}
-			</ul>
-		</nav>
+		<TabNav label="Cache sections" {tabs} />
 
 		{@render children()}
 	</Page>

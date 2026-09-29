@@ -1,4 +1,7 @@
 <script lang="ts">
+	import Segmented from './segmented.svelte';
+	import StatTile from './stat-tile.svelte';
+	import SectionHead from './section-head.svelte';
 	import { formatBytes, formatCompact, formatMs, formatPct, formatRate } from '$lib/format';
 	import type { ObservabilityResult } from '$lib/server/observability/load';
 	import TimeSeries from '$lib/components/charts/time-series.svelte';
@@ -43,51 +46,6 @@
 	);
 </script>
 
-{#snippet stat(label: string, value: string, sub: string, alert = false)}
-	<div class="bg-card px-5 py-4">
-		<div class="flex items-center gap-1.5 text-xs text-muted-foreground">
-			{label}
-			{#if alert}<CircleAlert class="size-3.5 text-destructive" aria-label="Above 1%" />{/if}
-		</div>
-		<div class="mt-1 text-2xl font-semibold tracking-[-0.02em]">{value}</div>
-		<div class="mt-1 text-xs leading-snug text-muted-foreground">{sub}</div>
-	</div>
-{/snippet}
-
-{#snippet segmented<T extends string>(
-	options: [T, string][],
-	active: T,
-	pick: (v: T) => void,
-	label: string
-)}
-	<div
-		role="radiogroup"
-		aria-label={label}
-		class="inline-flex rounded-lg border bg-subtle p-0.5 text-xs"
-	>
-		{#each options as [value, text] (value)}
-			<button
-				type="button"
-				role="radio"
-				aria-checked={active === value}
-				onclick={() => pick(value)}
-				class="rounded-md px-2.5 py-1 font-medium transition-colors {active === value
-					? 'bg-background text-foreground shadow-(--shadow-sheet)'
-					: 'text-muted-foreground hover:text-foreground'}"
-			>
-				{text}
-			</button>
-		{/each}
-	</div>
-{/snippet}
-
-{#snippet sectionHead(title: string, description: string)}
-	<div class="mb-4">
-		<h2 class="text-lg font-semibold tracking-[-0.01em]">{title}</h2>
-		<p class="mt-0.5 text-sm text-muted-foreground">{description}</p>
-	</div>
-{/snippet}
-
 {#if result.status === 'unconfigured'}
 	<EmptyState
 		icon={Activity}
@@ -115,32 +73,40 @@
 	<div
 		class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border shadow-(--shadow-panel) lg:grid-cols-5 [&>*:last-child]:col-span-2 lg:[&>*:last-child]:col-span-1"
 	>
-		{@render stat('Requests', formatCompact(tot.requests), `${formatRate(tot.rps)} on average`)}
-		{@render stat(
-			'Server errors',
-			formatPct(errorRate5),
-			`5xx responses; ${formatPct(tot.requests > 0 ? tot.errors4xx / tot.requests : 0)} were 4xx`,
-			errorRate5 > 0.01
-		)}
-		{@render stat(
-			'p95 latency',
-			formatMs(tot.p95),
-			`p50 ${formatMs(tot.p50)}, p99 ${formatMs(tot.p99)}`
-		)}
-		{@render stat(
-			'Edge cache hits',
-			formatPct(ratio(tot.edgeHit, cacheable)),
-			`${formatCompact(tot.edgeHit)} of ${formatCompact(cacheable)} cacheable responses`
-		)}
-		{@render stat(
-			'D1 on replicas',
-			formatPct(ratio(tot.d1 - tot.d1Primary, tot.d1)),
-			`${formatCompact(tot.d1Primary)} of ${formatCompact(tot.d1)} statements hit the primary`
-		)}
+		<StatTile
+			label="Requests"
+			value={formatCompact(tot.requests)}
+			sub={`${formatRate(tot.rps)} on average`}
+		/>
+		<StatTile
+			label="Server errors"
+			value={formatPct(errorRate5)}
+			sub={`5xx responses; ${formatPct(tot.requests > 0 ? tot.errors4xx / tot.requests : 0)} were 4xx`}
+			alert={errorRate5 > 0.01 ? 'Above 1%' : undefined}
+		/>
+		<StatTile
+			label="p95 latency"
+			value={formatMs(tot.p95)}
+			sub={`p50 ${formatMs(tot.p50)}, p99 ${formatMs(tot.p99)}`}
+		/>
+		<StatTile
+			label="Edge cache hits"
+			value={formatPct(ratio(tot.edgeHit, cacheable))}
+			sub={`${formatCompact(tot.edgeHit)} of ${formatCompact(cacheable)} cacheable responses`}
+		/>
+		<StatTile
+			label="D1 on replicas"
+			value={formatPct(ratio(tot.d1 - tot.d1Primary, tot.d1))}
+			sub={`${formatCompact(tot.d1Primary)} of ${formatCompact(tot.d1)} statements hit the primary`}
+		/>
 	</div>
 
 	<section class="mt-10">
-		{@render sectionHead('Traffic', 'Client requests at the gateway, including edge cache hits.')}
+		<SectionHead
+			title="Traffic"
+			description="Client requests at the gateway, including edge cache hits."
+			class="mb-4"
+		/>
 		<div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
 			<Panel title="Request rate">
 				<TimeSeries
@@ -184,10 +150,11 @@
 	</section>
 
 	<section class="mt-10">
-		{@render sectionHead(
-			'Latency',
-			'Time to response headers. Gateway is what clients see; store is the origin work behind an edge miss.'
-		)}
+		<SectionHead
+			title="Latency"
+			description="Time to response headers. Gateway is what clients see; store is the origin work behind an edge miss."
+			class="mb-4"
+		/>
 		<Panel>
 			<div class="mb-3 flex flex-wrap items-center justify-between gap-3">
 				<div>
@@ -196,15 +163,15 @@
 						Log scale, so a tail spike doesn't flatten the median.
 					</p>
 				</div>
-				{@render segmented(
-					[
+				<Segmented
+					options={[
 						['gateway', 'Gateway'],
 						['store', 'Store']
-					],
-					latencyLayer,
-					(v) => (latencyLayer = v),
-					'Layer'
-				)}
+					]}
+					value={latencyLayer}
+					onpick={(v) => (latencyLayer = v)}
+					label="Layer"
+				/>
 			</div>
 			<TimeSeries
 				{t}
@@ -265,10 +232,11 @@
 	</section>
 
 	<section class="mt-10">
-		{@render sectionHead(
-			'Edge cache',
-			'Of responses the edge could cache, how many it answered without running D1 or R2.'
-		)}
+		<SectionHead
+			title="Edge cache"
+			description="Of responses the edge could cache, how many it answered without running D1 or R2."
+			class="mb-4"
+		/>
 		<div class="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
 			<Panel title="Hit rate">
 				<TimeSeries
@@ -317,10 +285,11 @@
 	</section>
 
 	<section class="mt-10">
-		{@render sectionHead(
-			'Database',
-			'D1 statements from both layers. Reads should land on replicas; writes and read-your-write checks go to the primary.'
-		)}
+		<SectionHead
+			title="Database"
+			description="D1 statements from both layers. Reads should land on replicas; writes and read-your-write checks go to the primary."
+			class="mb-4"
+		/>
 		<div class="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
 			<Panel title="Statements">
 				<TimeSeries
@@ -368,38 +337,44 @@
 		<div
 			class="mt-6 grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border shadow-(--shadow-panel) lg:grid-cols-4"
 		>
-			{@render stat(
-				'Rows read',
-				formatCompact(tot.rowsRead),
-				`${(tot.requests > 0 ? tot.rowsRead / tot.requests : 0).toFixed(1)} per request`
-			)}
-			{@render stat('Rows written', formatCompact(tot.rowsWritten), 'Billed per indexed column')}
-			{@render stat(
-				'SQL time',
-				formatMs(tot.d1 > 0 ? tot.d1SqlMs / tot.d1 : 0),
-				'Mean per statement, as reported by D1'
-			)}
-			{@render stat('R2 operations', formatCompact(tot.r2), 'Chunk and object reads and writes')}
+			<StatTile
+				label="Rows read"
+				value={formatCompact(tot.rowsRead)}
+				sub={`${(tot.requests > 0 ? tot.rowsRead / tot.requests : 0).toFixed(1)} per request`}
+			/>
+			<StatTile
+				label="Rows written"
+				value={formatCompact(tot.rowsWritten)}
+				sub="Billed per indexed column"
+			/>
+			<StatTile
+				label="SQL time"
+				value={formatMs(tot.d1 > 0 ? tot.d1SqlMs / tot.d1 : 0)}
+				sub="Mean per statement, as reported by D1"
+			/>
+			<StatTile
+				label="R2 operations"
+				value={formatCompact(tot.r2)}
+				sub="Chunk and object reads and writes"
+			/>
 		</div>
 	</section>
 
 	<section class="mt-10">
 		<div class="mb-4 flex flex-wrap items-end justify-between gap-3">
-			<div>
-				<h2 class="text-lg font-semibold tracking-[-0.01em]">Routes</h2>
-				<p class="mt-0.5 text-sm text-muted-foreground">
-					Busiest first. The bar shows where a request's time goes, by stage.
-				</p>
-			</div>
-			{@render segmented(
-				[
+			<SectionHead
+				title="Routes"
+				description="Busiest first. The bar shows where a request's time goes, by stage."
+			/>
+			<Segmented
+				options={[
 					['gateway', 'Client-facing'],
 					['store', 'Origin (store)']
-				],
-				routeLayer,
-				(v) => (routeLayer = v),
-				'Layer'
-			)}
+				]}
+				value={routeLayer}
+				onpick={(v) => (routeLayer = v)}
+				label="Layer"
+			/>
 		</div>
 		<ul class="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
 			{#each Object.values(STAGE_STYLE) as s (s.label)}
