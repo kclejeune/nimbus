@@ -10,10 +10,9 @@ import {
 	revokeUserToken,
 	parseTokenForm
 } from '$lib/server/tokens';
-import { listCacheNames } from '$lib/server/db/queries';
-import { effectiveAccessOf, requireAdmin, tokenMinter } from '$lib/server/auth/guard';
+import { requireAdmin, tokenMinter } from '$lib/server/auth/guard';
 import { parsePage } from '$lib/pagination';
-import { tokenScopeOptions } from '$lib/server/auth/permissions';
+import { hasTokenFilters, parseTokenFilters } from '$lib/token-filters';
 import type { PageServerLoad, Actions } from './$types';
 
 export const load: PageServerLoad = async ({ platform, locals, url }) => {
@@ -23,29 +22,26 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 
 	// ?view=all is the admin-only everyone view; for members the parameter is
 	// ignored and they get their own tokens, same as before.
-	const isAdmin = locals.user.role === 'admin';
-	const viewAll = isAdmin && url.searchParams.get('view') === 'all';
+	const viewAll = locals.user.role === 'admin' && url.searchParams.get('view') === 'all';
 	const page = parsePage(url.searchParams.get('page'));
+	const filters = parseTokenFilters(url.searchParams, viewAll);
 
-	const [own, all, cacheNames, access] = await Promise.all([
-		viewAll ? null : listUserTokens(db, locals.user.id),
-		viewAll
-			? listAllTokens(db, {
-					limit: ALL_TOKENS_PAGE_SIZE,
-					offset: (page - 1) * ALL_TOKENS_PAGE_SIZE
-				})
-			: null,
-		listCacheNames(db),
-		effectiveAccessOf(locals, db)
-	]);
+	// Read on the primary: this reloads right after a mint or revoke.
+	const { tokens, hasMore } = viewAll
+		? await listAllTokens(db, {
+				limit: ALL_TOKENS_PAGE_SIZE,
+				offset: (page - 1) * ALL_TOKENS_PAGE_SIZE,
+				filters
+			})
+		: { tokens: await listUserTokens(db, locals.user.id, filters), hasMore: false };
 
 	return {
-		scopeOptions: tokenScopeOptions(access, cacheNames),
-		isAdmin,
 		view: viewAll ? ('all' as const) : ('mine' as const),
-		tokens: all ? all.tokens : own!,
+		tokens,
+		filters,
+		filtered: hasTokenFilters(filters),
 		page,
-		hasMore: all?.hasMore ?? false
+		hasMore
 	};
 };
 

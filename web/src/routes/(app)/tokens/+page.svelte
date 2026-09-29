@@ -10,11 +10,74 @@
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import * as Sheet from '$lib/components/ui/sheet/index.js';
+	import { goto } from '$app/navigation';
+	import {
+		TOKEN_STATUSES,
+		tokenFilterParams,
+		type TokenFilters,
+		type TokenStatus
+	} from '$lib/token-filters';
 
 	let { data, form } = $props();
 	let issuing = $state(false);
 	let sheetOpen = $state(false);
+
+	/** This view's URL with the filters (optionally patched) and a page. */
+	function href(page: number, patch: Partial<TokenFilters> = {}): string {
+		const params = tokenFilterParams({ ...data.filters, ...patch });
+		if (data.view === 'all') params.set('view', 'all');
+		if (page > 1) params.set('page', String(page));
+		return `?${params}`;
+	}
+
+	/** A filter change starts over at page 1. */
+	function applyFilter(patch: Partial<TokenFilters>) {
+		goto(href(1, patch), { replaceState: true, keepFocus: true, noScroll: true });
+	}
+
+	// A date input reports every valid intermediate value while a year is
+	// typed (0002, 0020, …), so dates apply once the input settles.
+	let dateTimer: ReturnType<typeof setTimeout>;
+	function applyDate(patch: Partial<TokenFilters>) {
+		clearTimeout(dateTimer);
+		dateTimer = setTimeout(() => applyFilter(patch), 400);
+	}
+
+	const cleared = $derived(data.view === 'all' ? '?view=all' : '?');
+	// Suspended means the owner is deactivated, which your own tokens never are.
+	const statuses = $derived(
+		data.view === 'all' ? TOKEN_STATUSES : TOKEN_STATUSES.filter((s) => s !== 'suspended')
+	);
+	// An owner from a shared link who isn't in the list still gets an option,
+	// so the select reflects the active filter.
+	const ownerOptions = $derived(
+		data.filters.user && !data.owners.some((o) => o.id === data.filters.user)
+			? [...data.owners, { id: data.filters.user, label: data.filters.user }]
+			: data.owners
+	);
 </script>
+
+{#snippet dateRange(label: string, from: keyof TokenFilters, to: keyof TokenFilters)}
+	<fieldset class="flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
+		<legend class="sr-only">{label}</legend>
+		<span aria-hidden="true">{label}</span>
+		<Input
+			type="date"
+			aria-label="{label} from"
+			class="h-8 w-36"
+			value={data.filters[from] ?? ''}
+			onchange={(e) => applyDate({ [from]: e.currentTarget.value || null })}
+		/>
+		<span aria-hidden="true">–</span>
+		<Input
+			type="date"
+			aria-label="{label} to"
+			class="h-8 w-36"
+			value={data.filters[to] ?? ''}
+			onchange={(e) => applyDate({ [to]: e.currentTarget.value || null })}
+		/>
+	</fieldset>
+{/snippet}
 
 <Page>
 	<PageHeader
@@ -59,9 +122,47 @@
 		</div>
 	{/if}
 
+	<div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+		<select
+			aria-label="Filter by status"
+			class="native-select w-36"
+			value={data.filters.status ?? ''}
+			onchange={(e) =>
+				applyFilter({ status: (e.currentTarget.value || null) as TokenStatus | null })}
+		>
+			<option value="">Any status</option>
+			{#each statuses as status (status)}
+				<option value={status}>{status[0].toUpperCase() + status.slice(1)}</option>
+			{/each}
+		</select>
+		{#if data.view === 'all'}
+			<select
+				aria-label="Filter by owner"
+				class="native-select w-48"
+				value={data.filters.user ?? ''}
+				onchange={(e) => applyFilter({ user: e.currentTarget.value || null })}
+			>
+				<option value="">Any owner</option>
+				{#each ownerOptions as owner (owner.id)}
+					<option value={owner.id}>{owner.label}</option>
+				{/each}
+			</select>
+		{/if}
+		{@render dateRange('Created', 'createdFrom', 'createdTo')}
+		{@render dateRange('Expires', 'expiresFrom', 'expiresTo')}
+		{#if data.filtered}
+			<Button variant="ghost" size="sm" href={cleared} data-sveltekit-noscroll>Clear filters</Button
+			>
+		{/if}
+	</div>
+
 	<TokenTable
 		tokens={data.tokens}
-		emptyText={data.view === 'all' ? 'Nobody has a token.' : 'Create one for CI or scripts.'}
+		emptyText={data.filtered
+			? 'No tokens match.'
+			: data.view === 'all'
+				? 'Nobody has a token.'
+				: 'Create one for CI or scripts.'}
 	/>
 
 	{#if data.view === 'all' && (data.page > 1 || data.hasMore)}
@@ -69,13 +170,12 @@
 			<p class="text-xs text-muted-foreground tabular-nums">Page {data.page}, newest first</p>
 			<div class="flex items-center gap-2">
 				{#if data.page > 1}
-					<Button variant="outline" size="sm" href="?view=all&page={data.page - 1}">Previous</Button
-					>
+					<Button variant="outline" size="sm" href={href(data.page - 1)}>Previous</Button>
 				{:else}
 					<Button variant="outline" size="sm" disabled>Previous</Button>
 				{/if}
 				{#if data.hasMore}
-					<Button variant="outline" size="sm" href="?view=all&page={data.page + 1}">Next</Button>
+					<Button variant="outline" size="sm" href={href(data.page + 1)}>Next</Button>
 				{:else}
 					<Button variant="outline" size="sm" disabled>Next</Button>
 				{/if}

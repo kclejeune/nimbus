@@ -2,8 +2,14 @@ import type { D1Database } from '@cloudflare/workers-types';
 import { mintAtticToken, type CacheAccess, type CachePermission } from './attic-token';
 import { parseTokenBits, scopeDenial, type EffectiveAccess } from './auth/permissions';
 import { writeAudit } from './audit';
-import { isActiveUser } from './auth/types';
 import { assertMaxLength } from './request-body';
+import {
+	NO_TOKEN_FILTERS,
+	TOKEN_STATUS_SQL,
+	tokenWhere,
+	type TokenFilters,
+	type TokenStatus
+} from '$lib/token-filters';
 
 export const TOKEN_NAME_MAX_CHARS = 100;
 export const TOKEN_SCOPE_MAX_CHARS = 128;
@@ -38,100 +44,97 @@ export interface PresentedToken {
 	scope: string;
 	createdAt: number;
 	expiresAt: number | null;
-	status: 'active' | 'expired' | 'revoked';
+	/** 'suspended': valid but inert while the owner is deactivated (mirrors
+	 *  isTokenDisabled in cache/db.ts). */
+	status: TokenStatus;
 }
 
-/** A user's issued tokens, presented for the token table (own-tokens page and
- *  the admin view on the user detail page). */
-export async function listUserTokens(db: D1Database, userId: string): Promise<PresentedToken[]> {
-	const { results } = await db
-		.prepare(
-			`SELECT id, name, permissions, expires_at, revoked_at, created_at
-			 FROM api_token WHERE user_id = ?1 ORDER BY created_at DESC`
-		)
-		.bind(userId)
-		.all<{
-			id: string;
-			name: string;
-			permissions: string;
-			expires_at: number | null;
-			revoked_at: number | null;
-			created_at: number;
-		}>();
-	const now = Math.floor(Date.now() / 1000);
-	return results.map((t) => ({
-		id: t.id,
-		name: t.name,
-		scope: t.permissions,
-		createdAt: t.created_at,
-		expiresAt: t.expires_at,
-		status: tokenStatus(t, now)
-	}));
-}
-
-/** Revoked beats expired beats active; `now` in unix seconds. */
-function tokenStatus(
-	t: { revoked_at: number | null; expires_at: number | null },
-	now: number
-): PresentedToken['status'] {
-	if (t.revoked_at) return 'revoked';
-	return t.expires_at && t.expires_at < now ? 'expired' : 'active';
+export interface OwnedToken extends PresentedToken {
+	owner: { id: string; name: string; email: string };
 }
 
 /** Rows shown per page of the admin all-tokens view. */
 export const ALL_TOKENS_PAGE_SIZE = 50;
 
-export interface OwnedToken extends Omit<PresentedToken, 'status'> {
-	/** 'suspended': valid but inert while the owner is deactivated (mirrors
-	 *  isTokenDisabled in cache/db.ts). */
-	status: PresentedToken['status'] | 'suspended';
-	owner: { id: string; name: string; email: string };
-}
-
-/** Every user's tokens, newest first, one page at a time (admin view). Fetches
- *  one extra row to report `hasMore` without a COUNT scan. */
-export async function listAllTokens(
+/** Tokens newest first, filtered (filters.user scopes to one owner). With a
+ *  limit, fetches one extra row to report `hasMore` without a COUNT scan. */
+async function queryTokens(
 	db: D1Database,
-	{ limit = ALL_TOKENS_PAGE_SIZE, offset = 0 }: { limit?: number; offset?: number } = {}
+	filters: TokenFilters,
+	page?: { limit: number; offset: number }
 ): Promise<{ tokens: OwnedToken[]; hasMore: boolean }> {
+	const where = tokenWhere(filters, Math.floor(Date.now() / 1000));
+	const n = where.binds.length;
 	const { results } = await db
 		.prepare(
-			`SELECT t.id, t.name, t.permissions, t.expires_at, t.revoked_at, t.created_at,
-			        u.id AS owner_id, u.name AS owner_name, u.email AS owner_email,
-			        u.role AS owner_role, u.status AS owner_status
+			`SELECT t.id, t.name, t.permissions, t.expires_at, t.created_at,
+			        ${TOKEN_STATUS_SQL} AS status,
+			        u.id AS owner_id, u.name AS owner_name, u.email AS owner_email
 			 FROM api_token t JOIN user u ON u.id = t.user_id
+			 ${where.sql}
 			 ORDER BY t.created_at DESC, t.id
-			 LIMIT ?1 OFFSET ?2`
+			 ${page ? `LIMIT ?${n + 1} OFFSET ?${n + 2}` : ''}`
 		)
-		.bind(limit + 1, offset)
+		.bind(...where.binds, ...(page ? [page.limit + 1, page.offset] : []))
 		.all<{
 			id: string;
 			name: string;
 			permissions: string;
 			expires_at: number | null;
-			revoked_at: number | null;
 			created_at: number;
+			status: TokenStatus;
 			owner_id: string;
 			owner_name: string;
 			owner_email: string;
-			owner_role: string;
-			owner_status: string;
 		}>();
-	const now = Math.floor(Date.now() / 1000);
-	const tokens = results.slice(0, limit).map((t) => {
-		const base = tokenStatus(t, now);
-		const ownerActive = isActiveUser({ role: t.owner_role, status: t.owner_status });
-		return {
+	const rows = page ? results.slice(0, page.limit) : results;
+	return {
+		tokens: rows.map((t) => ({
 			id: t.id,
 			name: t.name,
 			scope: t.permissions,
 			createdAt: t.created_at,
 			expiresAt: t.expires_at,
-			status: base === 'active' && !ownerActive ? ('suspended' as const) : base,
+			status: t.status,
 			owner: { id: t.owner_id, name: t.owner_name, email: t.owner_email }
-		};
-	});
-	return { tokens, hasMore: results.length > limit };
+		})),
+		hasMore: page ? results.length > page.limit : false
+	};
+}
+
+/** A user's issued tokens, presented for the token table (own-tokens page,
+ *  the admin view on the user detail page, and the CLI's token list). */
+export async function listUserTokens(
+	db: D1Database,
+	userId: string,
+	filters: TokenFilters = NO_TOKEN_FILTERS
+): Promise<PresentedToken[]> {
+	const { tokens } = await queryTokens(db, { ...filters, user: userId });
+	return tokens.map(({ owner: _, ...t }) => t);
+}
+
+/** Every user's tokens, one page at a time (admin view). */
+export async function listAllTokens(
+	db: D1Database,
+	{
+		limit = ALL_TOKENS_PAGE_SIZE,
+		offset = 0,
+		filters = NO_TOKEN_FILTERS
+	}: { limit?: number; offset?: number; filters?: TokenFilters } = {}
+): Promise<{ tokens: OwnedToken[]; hasMore: boolean }> {
+	return queryTokens(db, filters, { limit, offset });
+}
+
+/** Users who own at least one token, for the everyone view's owner filter. */
+export async function listTokenOwners(db: D1Database): Promise<{ id: string; label: string }[]> {
+	const { results } = await db
+		.prepare(
+			`SELECT u.id, u.name, u.email FROM user u
+			 WHERE EXISTS (SELECT 1 FROM api_token t WHERE t.user_id = u.id)
+			 ORDER BY u.name`
+		)
+		.all<{ id: string; name: string | null; email: string | null }>();
+	return results.map((u) => ({ id: u.id, label: u.name || u.email || u.id }));
 }
 
 /** Revoke a token, scoped to its owner (self-service and the admin view on
