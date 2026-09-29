@@ -4,6 +4,7 @@ import { allLiveUpstreams } from '$lib/server/cache/missing-paths';
 import { getProxyKeypair } from '$lib/server/cache/proxy';
 import { extractPublicKey } from '$lib/server/attic/signing';
 import { readSession } from '$lib/server/cache/db';
+import { AsyncMemo } from '$lib/server/cache/async-memo';
 import { newestAcrossCaches, toCrossCachePath } from '$lib/server/store-paths';
 import { instanceStatsSnapshot } from '$lib/server/cache/stats';
 import { canOnCache } from '$lib/server/auth/permissions';
@@ -24,6 +25,9 @@ const DAY_S = 86400;
 /** GC runs nightly (03:00 UTC); a gap past this means a missed run. */
 const GC_OVERDUE_MS = 36 * 3600_000;
 const TOKEN_WARN_DAYS = 14;
+
+/** Whether each user has pushed anything (see the onboarding query below). */
+const hasPushed = new AsyncMemo<boolean>(60_000, 1_000);
 const BUDGET_WARN = 0.9;
 
 export const load: PageServerLoad = async ({ platform, locals, parent }) => {
@@ -80,18 +84,24 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 		// created_by is the pushing token's subject (the user id). Unindexed,
 		// so a viewer who never pushed scans every object in their writable
 		// caches — skipped when they hold no token, since then the push step
-		// can't be next anyway. (An index would bill a row per pushed path to
-		// save this; not worth it.)
+		// can't be next anyway, and remembered: a yes for a day (it doesn't
+		// go back), a no for a minute. (An index would bill a row per pushed
+		// path to save this; not worth it.)
 		writable.length === 0 || tokens.length === 0
 			? false
-			: read
-					.prepare(
-						`SELECT EXISTS (SELECT 1 FROM object
-						 WHERE cache_id IN (SELECT value FROM json_each(?)) AND created_by = ?) AS pushed`
-					)
-					.bind(JSON.stringify(writable.map((c) => c.id)), user.id)
-					.first<{ pushed: number }>()
-					.then((r) => Boolean(r?.pushed))
+			: hasPushed.get(
+					user.id,
+					() =>
+						read
+							.prepare(
+								`SELECT EXISTS (SELECT 1 FROM object
+								 WHERE cache_id IN (SELECT value FROM json_each(?)) AND created_by = ?) AS pushed`
+							)
+							.bind(JSON.stringify(writable.map((c) => c.id)), user.id)
+							.first<{ pushed: number }>()
+							.then((r) => Boolean(r?.pushed)),
+					(pushed) => (pushed ? 86_400_000 : 60_000)
+				)
 	]);
 
 	// --- Needs attention: each item names the fix and links straight to it. ---
