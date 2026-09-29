@@ -1,7 +1,6 @@
 import { json, error } from '@sveltejs/kit';
 import { PATHS_PAGE_SIZE, parseSort, parseDir, queryStorePaths } from '$lib/server/store-paths';
-import { canSeeCache } from '$lib/server/auth/permissions';
-import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { requireCacheBrowse } from '$lib/server/cache/cache-page';
 import { readSession } from '$lib/server/cache/db';
 import type { RequestHandler } from './$types';
 
@@ -13,15 +12,7 @@ export const GET: RequestHandler = async ({ platform, params, url, locals }) => 
 	// lag-tolerant, so they stay off the primary.
 	const read = readSession(db);
 
-	const cache = await read
-		.prepare('SELECT 1 AS x FROM cache WHERE name = ?1 AND deleted_at IS NULL')
-		.bind(params.name)
-		.first();
-	if (!cache) throw error(404, `Cache "${params.name}" not found`);
-	const access = await effectiveAccessOf(locals, db);
-	if (!canSeeCache(access, params.name)) {
-		throw error(403, 'Permission denied');
-	}
+	await requireCacheBrowse(locals, read, params.name);
 
 	const sort = parseSort(url.searchParams.get('sort'));
 	const dir = parseDir(url.searchParams.get('dir'));

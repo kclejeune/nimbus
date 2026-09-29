@@ -4,6 +4,7 @@
 import type { D1Database, R2Bucket, RateLimit } from '@cloudflare/workers-types';
 import type { SessionUser } from '$lib/server/auth/types';
 import type { EffectiveAccess } from '$lib/server/auth/permissions';
+import type { CacheRow } from '$lib/server/cache/db';
 
 declare global {
 	namespace App {
@@ -12,8 +13,11 @@ declare global {
 		interface Locals {
 			/** The authenticated user, or null for anonymous requests. */
 			user: SessionUser | null;
-			/** Memoized per-request effective access (see guard.ts). */
-			effectiveAccess?: EffectiveAccess;
+			/** Memoized per-request effective access (see guard.ts). The promise,
+			 *  so concurrent layout and page loads share one query. */
+			effectiveAccess?: Promise<EffectiveAccess>;
+			/** Memoized per-request cache rows by name (see cache-page.ts). */
+			cacheRows?: Map<string, Promise<CacheRow>>;
 		}
 
 		// interface PageData {}

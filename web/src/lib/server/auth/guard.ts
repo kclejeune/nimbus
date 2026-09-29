@@ -29,7 +29,7 @@ export async function effectiveAccessOf(
 	db: D1Database
 ): Promise<EffectiveAccess> {
 	if (!locals.user) throw error(401, 'Not signed in');
-	locals.effectiveAccess ??= await loadEffectiveAccess(db, locals.user);
+	locals.effectiveAccess ??= loadEffectiveAccess(db, locals.user);
 	return locals.effectiveAccess;
 }
 

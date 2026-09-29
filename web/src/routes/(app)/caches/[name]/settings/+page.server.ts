@@ -5,8 +5,7 @@ import {
 	destroyCache,
 	renameCache
 } from '$lib/server/cache/cache-config';
-import { canOnCache } from '$lib/server/auth/permissions';
-import { effectiveAccessOf, requireCachePermission } from '$lib/server/auth/guard';
+import { requireCachePermission } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
 import { formatDuration } from '$lib/duration';
 import { gibFieldToBytes } from '$lib/format';
@@ -17,7 +16,7 @@ import {
 	setCacheUpstreamModes
 } from '$lib/server/cache/upstream-registry';
 import { CACHE_NAME_HINT, CACHE_NAME_RE } from '$lib/utils';
-import { getCache } from '$lib/server/cache/cache-page';
+import { getCache, requireCacheManage } from '$lib/server/cache/cache-page';
 import type { PageServerLoad, Actions } from './$types';
 
 /** The form's per-upstream mode selection: an override or 'inherit'. */
@@ -33,14 +32,11 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	const env = platform?.env;
 	if (!env) throw error(500, 'Platform bindings unavailable');
 
-	const [cache, access] = await Promise.all([
-		getCache(env.ATTIC_DB, params.name),
-		effectiveAccessOf(locals, env.ATTIC_DB)
-	]);
-	const canConfigure = canOnCache(access, 'cr', params.name);
-	const canDestroy = canOnCache(access, 'cd', params.name);
-	// Settings is a management surface: pull-only users have nothing to do here.
-	if (!canConfigure && !canDestroy) throw error(403, 'Permission denied');
+	const { cache, canConfigure, canDestroy } = await requireCacheManage(
+		locals,
+		env.ATTIC_DB,
+		params.name
+	);
 
 	const isAdmin = locals.user!.role === 'admin';
 	const [registry, overrides] = await Promise.all([

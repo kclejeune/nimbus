@@ -7,8 +7,10 @@ import {
 	countStorePaths
 } from '$lib/server/store-paths';
 import { detachClosure } from '$lib/server/cache/gc';
-import { canOnCache, canSeeCache } from '$lib/server/auth/permissions';
-import { effectiveAccessOf, requireCachePermission } from '$lib/server/auth/guard';
+import { STORE_PATH_HASH_RE } from '$lib/server/cache/db';
+import { canOnCache } from '$lib/server/auth/permissions';
+import { requireCachePermission } from '$lib/server/auth/guard';
+import { cacheViewer, getCache, requireCacheBrowse } from '$lib/server/cache/cache-page';
 import type { PageServerLoad, Actions } from './$types';
 
 export const load: PageServerLoad = async ({ platform, params, url, locals }) => {
@@ -19,23 +21,12 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 	const dir = parseDir(url.searchParams.get('dir'));
 	const q = (url.searchParams.get('q') ?? '').trim();
 
-	const [cache, access] = await Promise.all([
-		db
-			.prepare('SELECT id, name FROM cache WHERE name = ?1 AND deleted_at IS NULL')
-			.bind(params.name)
-			.first<{ id: number; name: string }>(),
-		effectiveAccessOf(locals, db)
-	]);
-
-	if (!cache) throw error(404, `Cache "${params.name}" not found`);
-	if (!canSeeCache(access, params.name)) {
-		throw error(403, 'Permission denied');
-	}
-	const canRetention = canOnCache(access, 'cr', params.name);
+	const { cache, access } = await requireCacheBrowse(locals, db, params.name);
+	const { canConfigure, canManage } = cacheViewer(access, params.name);
 	const viewer = {
-		canRetention,
+		canRetention: canConfigure,
 		canDelete: canOnCache(access, 'd', params.name),
-		canManage: canRetention || canOnCache(access, 'cd', params.name)
+		canManage
 	};
 
 	const [{ paths, hasMore }, total, pinned] = await Promise.all([
@@ -62,15 +53,8 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 };
 
 async function cacheIdByName(db: App.Platform['env']['ATTIC_DB'], name: string): Promise<number> {
-	const row = await db
-		.prepare('SELECT id FROM cache WHERE name = ?1 AND deleted_at IS NULL')
-		.bind(name)
-		.first<{ id: number }>();
-	if (!row) throw error(404, `Cache "${name}" not found`);
-	return row.id;
+	return (await getCache(db, name)).id;
 }
-
-const HASH_RE = /^[0-9a-z]{32}$/;
 
 /** Most paths one bulk action takes: removal runs a closure-safe detach and
  *  edge purges per path, so batches stay small enough to finish in a request. */
@@ -83,7 +67,7 @@ function parseHashes(form: FormData): { hashes: string[] } | { error: string } {
 	if (hashes.length > BULK_MAX) {
 		return { error: `Select at most ${BULK_MAX} paths at a time.` };
 	}
-	if (!hashes.every((h) => HASH_RE.test(h))) return { error: 'Invalid path hash.' };
+	if (!hashes.every((h) => STORE_PATH_HASH_RE.test(h))) return { error: 'Invalid path hash.' };
 	return { hashes };
 }
 
@@ -97,7 +81,7 @@ export const actions: Actions = {
 		await requireCachePermission(locals, db, 'cr', params.name, 'configure cache retention');
 
 		const hash = String((await request.formData()).get('hash') ?? '');
-		if (!HASH_RE.test(hash)) return fail(400, { actionError: 'Invalid path hash.' });
+		if (!STORE_PATH_HASH_RE.test(hash)) return fail(400, { actionError: 'Invalid path hash.' });
 
 		const cacheId = await cacheIdByName(db, params.name);
 		await db
@@ -133,7 +117,7 @@ export const actions: Actions = {
 		await requireCachePermission(locals, platform.env.ATTIC_DB, 'd', params.name, 'delete');
 
 		const hash = String((await request.formData()).get('hash') ?? '');
-		if (!HASH_RE.test(hash)) return fail(400, { actionError: 'Invalid path hash.' });
+		if (!STORE_PATH_HASH_RE.test(hash)) return fail(400, { actionError: 'Invalid path hash.' });
 
 		// Detach, not delete: anything still referenced by another path keeps
 		// serving (a removal must never break someone else's closure) and is

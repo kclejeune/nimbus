@@ -1,7 +1,6 @@
 import { error, fail } from '@sveltejs/kit';
 import { listGcRoots } from '$lib/server/cache/gc';
-import { canOnCache } from '$lib/server/auth/permissions';
-import { effectiveAccessOf, requireCachePermission } from '$lib/server/auth/guard';
+import { requireCachePermission } from '$lib/server/auth/guard';
 import {
 	addGcRoot,
 	GC_ROOT_NOTE_MAX_CHARS,
@@ -11,21 +10,14 @@ import {
 	removePin,
 	upsertPin
 } from '$lib/server/cache/db';
-import { getCache, parseStorePathHash } from '$lib/server/cache/cache-page';
+import { getCache, parseStorePathHash, requireCacheManage } from '$lib/server/cache/cache-page';
 import type { PageServerLoad, Actions } from './$types';
 
 export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	const env = platform?.env;
 	if (!env) throw error(500, 'Platform bindings unavailable');
 
-	const [cache, access] = await Promise.all([
-		getCache(env.ATTIC_DB, params.name),
-		effectiveAccessOf(locals, env.ATTIC_DB)
-	]);
-	const canConfigure = canOnCache(access, 'cr', params.name);
-	const canDestroy = canOnCache(access, 'cd', params.name);
-	// A management surface: pull-only users have nothing to do here.
-	if (!canConfigure && !canDestroy) throw error(403, 'Permission denied');
+	const { cache, canConfigure } = await requireCacheManage(locals, env.ATTIC_DB, params.name);
 
 	return { roots: await listGcRoots(env, cache.id), canPin: canConfigure };
 };
