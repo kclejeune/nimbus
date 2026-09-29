@@ -1,10 +1,15 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { mode, toggleMode } from 'mode-watcher';
-	import { ChevronRight, Moon, Sun } from '@lucide/svelte';
+	import { ChevronRight, Moon, Search, Sun } from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 	import { breadcrumbs } from '$lib/nav';
+	import { palette } from '$lib/command-palette.svelte';
+	import { browser } from '$app/environment';
+
+	// Show the platform's modifier in the shortcut hint.
+	const mod = $derived(browser && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl ');
 
 	const crumbs = $derived(breadcrumbs(page.url.pathname, page.data));
 </script>
@@ -47,6 +52,19 @@
 				{/each}
 			</ol>
 		</nav>
+		<button
+			type="button"
+			onclick={() => (palette.open = true)}
+			class="inline-flex h-8 items-center gap-2 rounded-lg border bg-background px-2.5 text-sm text-muted-foreground shadow-(--shadow-panel) transition-colors hover:text-foreground sm:w-56"
+		>
+			<Search class="size-3.5" />
+			<span class="hidden sm:inline">Search</span>
+			<kbd
+				class="ms-auto hidden rounded border bg-subtle px-1.5 font-sans text-[0.6875rem] sm:inline"
+				>{mod}K</kbd
+			>
+			<span class="sr-only sm:hidden">Search</span>
+		</button>
 		<Button
 			variant="ghost"
 			size="icon-sm"

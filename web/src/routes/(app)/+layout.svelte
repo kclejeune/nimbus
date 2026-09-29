@@ -1,6 +1,7 @@
 <script lang="ts">
 	import AppSidebar from '$lib/components/app-sidebar.svelte';
 	import SiteHeader from '$lib/components/site-header.svelte';
+	import CommandPalette from '$lib/components/command-palette.svelte';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 
 	let { children, data } = $props();
@@ -20,3 +21,5 @@
 		</div>
 	</Sidebar.Inset>
 </Sidebar.Provider>
+
+<CommandPalette role={data.user?.role} />
