@@ -4,15 +4,10 @@ import { readSession } from '$lib/server/cache/db';
 import { instanceStatsSnapshot, type InstanceStats } from '$lib/server/cache/stats';
 import { readGcLastRun } from '$lib/server/cache/gc';
 import { loadTraffic } from '$lib/server/traffic';
+import { ingestBaseline, ingestSeries, type Granularity } from '$lib/server/cache/ingest';
 import type { PageServerLoad } from './$types';
 
-interface BucketRow {
-	bucket: string;
-	paths: number;
-	bytes: number;
-}
-
-export type Granularity = 'day' | 'week' | 'month';
+export type { Granularity };
 export type RangeKey = '30d' | '90d' | '6m' | '1y' | 'all';
 
 export interface Bucket {
@@ -71,18 +66,6 @@ function rangeStart(range: RangeKey, nowMs: number): number | null {
 	}
 }
 
-/** SQL expression that maps o.created_at to its bucket-start date string. */
-function bucketExpr(g: Granularity): string {
-	if (g === 'day') return 'date(o.created_at)';
-	if (g === 'month') return "strftime('%Y-%m-01', o.created_at)";
-	return "date(o.created_at, '-' || ((cast(strftime('%w', o.created_at) AS INTEGER) + 6) % 7) || ' days')";
-}
-
-const NAR_BYTES_JOIN = `FROM object o
-	 JOIN nar n ON n.id = o.nar_id
-	 JOIN chunkref cr ON cr.nar_id = n.id
-	 JOIN chunk ch ON ch.id = cr.chunk_id`;
-
 export const load: PageServerLoad = async ({ platform, url }) => {
 	const db = platform?.env.ATTIC_DB;
 	const granularity = parseGranularity(url.searchParams.get('granularity'));
@@ -113,35 +96,10 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 	const startDate = startMs === null ? null : iso(bucketStart(startMs, granularity));
 
 	// The bucketed series and the pre-range baseline are independent — run them
-	// together.
-	const seriesStmt = startDate
-		? read
-				.prepare(
-					`SELECT ${bucketExpr(granularity)} AS bucket, COUNT(*) AS paths,
-					        COALESCE(SUM(ch.file_size), 0) AS bytes
-					 ${NAR_BYTES_JOIN}
-					 WHERE o.created_at >= ?1
-					 GROUP BY bucket ORDER BY bucket`
-				)
-				.bind(startDate)
-		: read.prepare(
-				`SELECT ${bucketExpr(granularity)} AS bucket, COUNT(*) AS paths,
-				        COALESCE(SUM(ch.file_size), 0) AS bytes
-				 ${NAR_BYTES_JOIN}
-				 GROUP BY bucket ORDER BY bucket`
-			);
-	// Cumulative series should include everything added before the range starts.
-	const baselineStmt = startDate
-		? read
-				.prepare(
-					`SELECT COUNT(*) AS paths, COALESCE(SUM(ch.file_size), 0) AS bytes ${NAR_BYTES_JOIN} WHERE o.created_at < ?1`
-				)
-				.bind(startDate)
-		: null;
-
-	const [seriesResult, baselineRow, gcLastRun, globalLimit] = await Promise.all([
-		seriesStmt.all<BucketRow>(),
-		baselineStmt ? baselineStmt.first<{ paths: number; bytes: number }>() : Promise.resolve(null),
+	// together. Cumulative series include everything added before the range.
+	const [rows, baseline, gcLastRun, globalLimit] = await Promise.all([
+		ingestSeries(read, granularity, startDate),
+		startDate ? ingestBaseline(read, startDate) : Promise.resolve(null),
 		readGcLastRun(read),
 		read
 			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
@@ -150,9 +108,8 @@ export const load: PageServerLoad = async ({ platform, url }) => {
 	const globalMaxBytes = globalLimit ? Number(globalLimit.value) : null;
 	const { stats, statsAt } = await instanceStatsSnapshot(read, gcLastRun);
 
-	const rows = seriesResult.results;
-	const basePaths = baselineRow?.paths ?? 0;
-	const baseBytes = baselineRow?.bytes ?? 0;
+	const basePaths = baseline?.paths ?? 0;
+	const baseBytes = baseline?.bytes ?? 0;
 
 	// Nothing ever pushed and no window to draw → empty state.
 	if (rows.length === 0 && startDate === null) {

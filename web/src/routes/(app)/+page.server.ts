@@ -20,7 +20,7 @@ export const load: PageServerLoad = async ({ platform }) => {
 	const ingestSince = new Date(Date.now() - 90 * DAY_MS).toISOString().slice(0, 10);
 	const ingestStmt = read
 		.prepare(
-			`SELECT date(o.created_at) AS bucket, COUNT(*) AS paths,
+			`SELECT date(o.created_at) AS bucket, COUNT(DISTINCT o.id) AS paths,
 			        COALESCE(SUM(ch.file_size), 0) AS bytes
 			 FROM object o
 			 JOIN nar n ON n.id = o.nar_id
