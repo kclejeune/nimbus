@@ -23,6 +23,7 @@ it('appends diagnostics without moving existing Analytics Engine positions', asy
 					rows_read: 3,
 					rows_written: 2,
 					served_by_primary: true,
+					served_by_region: 'ENAM',
 					timings: { sql_duration_ms: 7 },
 					total_attempts: 2
 				}
@@ -33,7 +34,9 @@ it('appends diagnostics without moving existing Analytics Engine positions', asy
 			async () => new Response('ok', { headers: { 'Content-Length': '2' } })
 		);
 	});
-	const doubles = writeDataPoint.mock.calls[0][0].doubles;
+	const { blobs, doubles } = writeDataPoint.mock.calls[0][0];
+	// blob7 (the D1 region) is appended after the original six.
+	expect(blobs).toEqual(['latency', 'store', 'GET /nar/:file', 'NONE', 'unknown', '200', 'ENAM']);
 	expect(doubles).toHaveLength(20);
 	expect(doubles.slice(2, 8)).toEqual([1, 3, 2, 0, 1, 2]);
 	expect(doubles[15]).toBe(1);

@@ -237,7 +237,17 @@ export async function observeRequest(
 		const colo = (request as Request & { cf?: { colo?: string } }).cf?.colo ?? 'unknown';
 		try {
 			env.CACHE_METRICS?.writeDataPoint({
-				blobs: ['latency', layer, route, edge, colo, String(response.status)],
+				// Append only: blob7 is the region that served the request's last D1
+				// statement ('' when none ran), for the replica-placement view.
+				blobs: [
+					'latency',
+					layer,
+					route,
+					edge,
+					colo,
+					String(response.status),
+					sample.d1Region ?? ''
+				],
 				doubles: [
 					divisor,
 					elapsed,
