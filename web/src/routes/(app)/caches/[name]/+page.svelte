@@ -85,8 +85,7 @@
 		if (kind === 'prune') {
 			const ok = await ask({
 				title: `Remove ${n} ${n === 1 ? 'path' : 'paths'}?`,
-				description:
-					'They stop being served from this cache now. Anything another path still depends on is kept until its last dependent goes, and garbage collection reclaims the storage.',
+				description: 'They stop being served now. Paths that others still depend on are kept.',
 				confirmLabel: `Remove ${n} ${n === 1 ? 'path' : 'paths'}`,
 				tone: 'danger'
 			});
@@ -220,8 +219,7 @@
 	{#if form && 'pruned' in form}
 		<p class="mb-3 text-sm text-muted-foreground">
 			Removed {formatCount(form.pruned ?? 0)}
-			{form.pruned === 1 ? 'path' : 'paths'}. Anything still referenced by another path is kept
-			until its last dependent goes; freed storage is reclaimed by the next garbage collection.
+			{form.pruned === 1 ? 'path' : 'paths'}. Paths that others still depend on are kept.
 		</p>
 	{:else if form?.actionError}
 		<p class="mb-3 text-sm text-destructive">{form.actionError}</p>
@@ -230,8 +228,8 @@
 	{#if data.total === 0 && !data.q}
 		<EmptyState
 			icon={FolderSearch}
-			title="Nothing pushed yet"
-			description="Push a store path with the nimbus CLI and it appears here."
+			title="No paths yet"
+			description="Push a store path with the nimbus CLI."
 		/>
 	{:else}
 		<div bind:this={scrollBox} style="max-height: {maxH}px" class="table-frame overflow-y-auto">
@@ -279,9 +277,7 @@
 										wide
 									/>
 									{#if isPinned}
-										<StatusBadge tone="primary" title="Pinned: protected from garbage collection">
-											Pinned
-										</StatusBadge>
+										<StatusBadge tone="primary" title="Protected from GC">Pinned</StatusBadge>
 									{/if}
 								</div>
 							</td>
@@ -302,9 +298,7 @@
 											<input type="hidden" name="hash" value={p.hash} />
 											<button
 												type="submit"
-												title={isPinned
-													? 'Unpin: allow garbage collection again'
-													: 'Pin: protect this path and its closure from garbage collection'}
+												title={isPinned ? 'Unpin' : 'Pin this path and its closure'}
 												aria-label={isPinned ? 'Unpin' : 'Pin'}
 												class="rounded-md p-1.5 transition-colors hover:bg-muted {isPinned
 													? 'text-primary'
@@ -323,7 +317,7 @@
 													{
 														title: `Remove ${splitStorePath(p.storePath).name}?`,
 														description:
-															'It stops being served from this cache now. Anything another path still depends on is kept until its last dependent goes, and garbage collection reclaims the storage.',
+															'It stops being served now. Paths that others still depend on are kept.',
 														confirmLabel: 'Remove path',
 														tone: 'danger'
 													},
@@ -339,7 +333,7 @@
 											<input type="hidden" name="hash" value={p.hash} />
 											<button
 												type="submit"
-												title="Remove this path (closure-safe: shared dependencies stay while needed)"
+												title="Remove path"
 												aria-label="Remove path"
 												class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
 											>

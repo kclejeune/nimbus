@@ -78,10 +78,7 @@
 </script>
 
 <Page>
-	<PageHeader
-		title="Audit log"
-		description="Privileged actions across the instance, newest first."
-	/>
+	<PageHeader title="Audit log" description="Privileged actions, newest first." />
 
 	{#if data.total > 0 || data.filtered}
 		<div class="mb-4 flex flex-wrap items-center gap-2">
@@ -133,11 +130,7 @@
 	{/if}
 
 	{#if data.total === 0 && data.filtered}
-		<EmptyState
-			icon={SearchX}
-			title="No entries match these filters"
-			description="Try a different user or action, or a shorter search."
-		>
+		<EmptyState icon={SearchX} title="No entries match">
 			{#snippet action()}
 				<Button
 					variant="outline"
@@ -147,11 +140,7 @@
 			{/snippet}
 		</EmptyState>
 	{:else if data.total === 0}
-		<EmptyState
-			icon={ScrollText}
-			title="No audit entries yet"
-			description="Changes to caches, tokens, users and settings are recorded here as they happen."
-		/>
+		<EmptyState icon={ScrollText} title="No audit entries yet" />
 	{:else}
 		<div bind:this={tableBox} class="table-frame">
 			<table class="data-table">

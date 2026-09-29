@@ -67,17 +67,11 @@
 			{/each}
 		{/if}
 		{#if allowGc}
-			<label
-				class="check-chip"
-				title="Storage-wide: lets the token trigger garbage collection via the API, independent of the cache scope"
-			>
+			<label class="check-chip" title="Run GC on all storage, regardless of scope">
 				<input name="gc" type="checkbox" />
 				Garbage collection
 			</label>
-			<label
-				class="check-chip"
-				title="Trust admin: lets the token change trust-affecting cache settings via the API (signing keypair, visibility)"
-			>
+			<label class="check-chip" title="Change signing keypair and visibility">
 				<input name="ct" type="checkbox" />
 				Trust admin
 			</label>

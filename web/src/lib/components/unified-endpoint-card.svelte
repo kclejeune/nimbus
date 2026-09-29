@@ -50,7 +50,7 @@
 						bind:checked={includeKeys}
 						class="size-3.5 rounded border-input text-primary"
 					/>
-					Include upstream signing keys (redirected paths keep their upstream signatures)
+					Include upstream signing keys (needed for redirected paths)
 				</label>
 				<label class="flex items-center gap-2 text-xs text-muted-foreground">
 					<input
@@ -58,7 +58,7 @@
 						bind:checked={includeUrls}
 						class="size-3.5 rounded border-input text-primary"
 					/>
-					Include upstream substituters (queried after this endpoint; redirects usually make this unnecessary)
+					Include upstream substituters (usually unnecessary)
 				</label>
 			</div>
 		{/if}

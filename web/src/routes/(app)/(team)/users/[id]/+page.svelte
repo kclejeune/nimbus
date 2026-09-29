@@ -75,7 +75,7 @@
 							{
 								title: `Delete ${u.name || u.email}?`,
 								description:
-									'Their grants and group memberships are removed and every token they issued stops working.',
+									'Removes their grants and group memberships. Their tokens stop working.',
 								confirmLabel: 'Delete user',
 								tone: 'danger'
 							},
@@ -116,8 +116,7 @@
 		>
 			<ShieldCheck class="mt-0.5 size-4 shrink-0" />
 			<p>
-				Admins bypass grants and hold every permission. The grants below only take effect if this
-				user becomes a member.
+				Admins have every permission. The grants below apply only if this user becomes a member.
 			</p>
 		</div>
 	{/if}
@@ -150,9 +149,7 @@
 
 		<Panel
 			title="Access via groups"
-			description={canManage
-				? "Inherited from group membership. Edit these on the group's page."
-				: 'Inherited from group membership.'}
+			description={canManage ? "Edit on the group's page." : undefined}
 			flush
 		>
 			<div class="relative overflow-x-auto">
@@ -201,14 +198,14 @@
 			<div class="mb-3">
 				<h2 class="text-base font-semibold">Tokens</h2>
 				<p class="mt-0.5 max-w-2xl text-sm text-muted-foreground">
-					Each token keeps the permissions its holder had when it was created. Deactivating the
-					account suspends its tokens until reactivation; revoking is permanent.
+					Tokens keep the permissions they were created with. Deactivating the user suspends them.
+					Revoking is permanent.
 				</p>
 			</div>
 			<TokenTable
 				tokens={data.tokens}
 				revokeAction="?/revokeToken"
-				emptyText="This user hasn't created any tokens."
+				emptyText="This user has no tokens."
 			/>
 		</section>
 	</div>

@@ -14,8 +14,8 @@
 
 <Panel title="Access" flush>
 	{#snippet description()}
-		Who can use this cache beyond {c.isPublic ? 'anonymous public pulls' : 'admins'}. Tokens are
-		permission snapshots: changes here don't alter tokens already issued, so revoke those instead.
+		Who can use this cache beyond {c.isPublic ? 'anonymous pulls' : 'admins'}. Changes don't affect
+		tokens already issued.
 	{/snippet}
 	<div class="relative overflow-x-auto">
 		<table class="data-table">
@@ -45,7 +45,7 @@
 									>{grant.pattern}</code
 								>
 								<span class="ml-1 text-xs text-muted-foreground"
-									>Pattern grant, edit it on the subject's page</span
+									>Pattern grant. Edit on the subject's page.</span
 								>
 							{/if}
 						</td>
@@ -70,7 +70,7 @@
 					</tr>
 				{:else}
 					<tr>
-						<td colspan="4" class="text-muted-foreground">No grants apply to this cache.</td>
+						<td colspan="4" class="text-muted-foreground">No grants.</td>
 					</tr>
 				{/each}
 			</tbody>

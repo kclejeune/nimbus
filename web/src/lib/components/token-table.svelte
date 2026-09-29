@@ -102,11 +102,7 @@
 							{:else if t.status === 'expired'}
 								<StatusBadge>Expired</StatusBadge>
 							{:else if t.status === 'suspended'}
-								<StatusBadge
-									tone="warning"
-									dot
-									title="Inert while the account is deactivated; works again on reactivation"
-								>
+								<StatusBadge tone="warning" dot title="Works again when the account is reactivated">
 									Suspended
 								</StatusBadge>
 							{:else}

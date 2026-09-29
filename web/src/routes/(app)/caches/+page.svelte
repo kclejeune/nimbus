@@ -13,7 +13,7 @@
 <Page>
 	<PageHeader
 		title="Caches"
-		description="Each cache is an isolated view into the shared content-addressed store, with its own signing key, access list and retention."
+		description="Each cache has its own signing key, access and retention."
 	>
 		{#snippet actions()}
 			<Button href="/caches/new">
@@ -26,8 +26,8 @@
 	{#if data.caches.length === 0}
 		<EmptyState
 			icon={Boxes}
-			title="Create your first cache"
-			description="A cache gets its own substituter URL and signing key. Push to it with the nimbus CLI or attic."
+			title="No caches yet"
+			description="Push to a cache with the nimbus CLI or attic."
 		>
 			{#snippet action()}
 				<Button href="/caches/new"><Plus /> New cache</Button>
@@ -41,12 +41,7 @@
 						<th>Name</th>
 						<th>Visibility</th>
 						<th class="num">Paths</th>
-						<th
-							class="num"
-							title="NAR bytes attributed to this cache; content shared with other NARs or caches counts in each"
-						>
-							Size
-						</th>
+						<th class="num" title="Deduplicated NAR bytes"> Size </th>
 						<th>Compression</th>
 						<th class="num">Priority</th>
 						<th>Retention</th>
@@ -103,9 +98,8 @@
 			</table>
 		</div>
 		<p class="mt-3 max-w-3xl text-xs leading-relaxed text-muted-foreground">
-			Size is each cache's deduplicated NAR bytes. Chunks shared between NARs, or with other caches,
-			count toward every cache that references them, so these sizes can total more than the
-			instance's physical storage.
+			Shared chunks count toward every cache that references them, so sizes can total more than
+			physical storage.
 		</p>
 	{/if}
 </Page>

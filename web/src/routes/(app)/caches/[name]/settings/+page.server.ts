@@ -124,7 +124,7 @@ export const actions: Actions = {
 			if (selected === current) continue;
 			if (entry.enforced && selected === 'off') {
 				return fail(400, {
-					error: `${entry.url} is enforced by the server and cannot be disabled.`
+					error: `${entry.url} is enforced and can’t be turned off.`
 				});
 			}
 			if (selected === 'persist' && !isAdmin) {

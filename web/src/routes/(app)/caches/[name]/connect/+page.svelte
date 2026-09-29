@@ -34,23 +34,20 @@
 		},
 		{
 			label: c.isPublic
-				? 'Pull from this cache (adds it to nix.conf)'
-				: 'Pull from this cache (adds it to nix.conf and your token to netrc)',
+				? 'Add this cache to nix.conf'
+				: 'Add this cache to nix.conf and your token to netrc',
 			command: `nimbus use ${c.name}`
 		},
 		{ label: 'Push a build and its closure', command: `nimbus push ${c.name} ./result` },
 		{
-			label: 'Push everything a command adds to the store, once it finishes',
+			label: 'Push everything a command adds to the store',
 			command: `nimbus watch-exec ${c.name} nix build`
 		}
 	]);
 </script>
 
 <div class="grid grid-cols-1 gap-6">
-	<Panel
-		title="With the nimbus CLI"
-		description="The quickest setup: the CLI writes nix.conf and netrc for you, and handles pushing."
-	>
+	<Panel title="With the nimbus CLI" description="The CLI writes nix.conf and netrc for you.">
 		<dl class="grid gap-4">
 			{#each cli as step (step.command)}
 				<div class="min-w-0">
@@ -64,7 +61,7 @@
 	<Panel
 		title="Configure Nix by hand"
 		description={endpoint === 'cache'
-			? 'Add these to nix.conf, or a flake’s nixConfig, to substitute from this cache without the CLI.'
+			? 'Add to nix.conf or a flake’s nixConfig.'
 			: 'One substituter for every cache you can read. Private caches need a pull token in netrc.'}
 	>
 		{#snippet actions()}
@@ -130,7 +127,7 @@
 								bind:checked={includeKeys}
 								class="size-3.5 rounded border-input text-primary"
 							/>
-							Include upstream signing keys (redirected paths keep their upstream signatures)
+							Include upstream signing keys (needed for redirected paths)
 						</label>
 						<label class="flex items-center gap-2 text-xs text-muted-foreground">
 							<input
@@ -138,7 +135,7 @@
 								bind:checked={includeUrls}
 								class="size-3.5 rounded border-input text-primary"
 							/>
-							Include upstream substituters (queried after this cache; redirects usually make this unnecessary)
+							Include upstream substituters (usually unnecessary)
 						</label>
 					</div>
 				{/if}

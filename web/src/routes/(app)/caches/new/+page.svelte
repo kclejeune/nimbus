@@ -16,10 +16,7 @@
 </script>
 
 <Page width="narrow">
-	<PageHeader
-		title="New cache"
-		description="A signing keypair is generated for the cache automatically. Its public key is shown once the cache exists."
-	/>
+	<PageHeader title="New cache" description="A signing keypair is generated automatically." />
 
 	<form
 		method="POST"
@@ -83,7 +80,7 @@
 									><Globe class="size-3.5" /> Public</span
 								>
 								<span class="mt-0.5 block text-xs text-muted-foreground"
-									>Anyone can pull without a token. Pushing still needs one.</span
+									>Anyone can pull. Pushing needs a token.</span
 								>
 							</span>
 						</label>
@@ -120,8 +117,7 @@
 					</div>
 				</div>
 				<p class="-mt-3 text-xs text-muted-foreground">
-					Lower priority wins when Nix has several substituters. Leave retention blank to keep paths
-					until they're removed.
+					Lower priority wins across substituters. Blank retention keeps paths until removed.
 				</p>
 
 				{#if form?.error}

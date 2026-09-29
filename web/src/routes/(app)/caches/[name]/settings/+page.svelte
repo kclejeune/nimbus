@@ -33,10 +33,7 @@
 		})}
 		class="divide-y"
 	>
-		<SettingsSection
-			title="General"
-			description="Who can pull without a token, and how this cache ranks and stores what it serves."
-		>
+		<SettingsSection title="General">
 			<div class="space-y-5">
 				<fieldset>
 					<legend class="mb-2 text-sm font-medium">
@@ -62,7 +59,7 @@
 								Public
 							</span>
 							<span class="mt-0.5 block text-xs text-muted-foreground">
-								Anyone can pull without a token. Pushing still needs one.
+								Anyone can pull. Pushing needs a token.
 							</span>
 						</span>
 					</label>
@@ -82,9 +79,7 @@
 							value={c.priority}
 							disabled={!canConfigure}
 						/>
-						<p class="text-xs text-muted-foreground">
-							Lower wins when Nix has several substituters.
-						</p>
+						<p class="text-xs text-muted-foreground">Lower wins across substituters.</p>
 					</div>
 					<div class="space-y-2">
 						<Label for="compression">Compression</Label>
@@ -107,7 +102,7 @@
 
 		<SettingsSection
 			title="Retention"
-			description="Closure-aware: a path survives while anything recently pulled, or pinned, still depends on it. Over the size limit, the least recently used closures go first. Space is reclaimed by the nightly garbage collection, or right after a push tips the cache over its limit."
+			description="A path is kept while anything recently pulled or pinned depends on it. Over the size limit, least recently used closures go first."
 		>
 			<div class="grid gap-4 sm:grid-cols-2">
 				<div class="space-y-2">
@@ -139,10 +134,9 @@
 
 		<SettingsSection title="Upstream caches" flush>
 			{#snippet description()}
-				Paths already available from an enabled upstream are skipped at push time and served through
-				this cache on pull. Persist copies each hit into this cache in the background, re-signed and
-				safe from upstream garbage collection. Upstream trust is server-wide{#if data.isAdmin};
-					manage it in <a
+				Paths an enabled upstream already has are skipped on push and served through this cache.
+				Persist keeps a re-signed copy here, safe from upstream GC. Upstreams are server-wide{#if data.isAdmin},
+					managed in <a
 						href="/upstreams"
 						class="font-medium text-foreground underline-offset-4 hover:underline">Upstreams</a
 					>{/if}.
@@ -183,9 +177,7 @@
 					{/each}
 				</ul>
 			{:else}
-				<p class="px-5 py-6 text-sm text-muted-foreground">
-					No upstreams are registered on this server.
-				</p>
+				<p class="px-5 py-6 text-sm text-muted-foreground">No upstreams configured.</p>
 			{/if}
 		</SettingsSection>
 
@@ -200,7 +192,7 @@
 						<Check class="size-4" /> Saved
 					</span>
 				{:else}
-					General, retention and upstream settings save together.
+					Saves all settings above.
 				{/if}
 			</span>
 			<Button type="submit" class="ms-auto" disabled={submitting || !canConfigure}>
@@ -213,7 +205,7 @@
 		{#if canConfigure}
 			<SettingsSection
 				title="Rename cache"
-				description="The signing key is kept, so paths already pushed stay trusted. The substituter URL changes to the new name."
+				description="The substituter URL changes. The signing key stays, so pushed paths stay trusted."
 			>
 				<form
 					method="POST"
@@ -251,7 +243,7 @@
 			<SettingsSection
 				title="Delete cache"
 				tone="danger"
-				description="Removes the cache and hides its paths. Stored data is kept, but clients can no longer pull from it."
+				description="Clients can no longer pull from it. Stored data is kept until GC."
 			>
 				<form
 					method="POST"
@@ -260,8 +252,7 @@
 						confirmFirst(
 							{
 								title: `Delete ${c.name}?`,
-								description:
-									'Clients can no longer pull from it, its substituter URL stops working, and its access grants are removed. Stored data is kept until garbage collection.',
+								description: 'Its substituter URL stops working and its access grants are removed.',
 								confirmLabel: 'Delete cache',
 								tone: 'danger',
 								typeToConfirm: c.name

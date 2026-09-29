@@ -27,7 +27,7 @@
 	<Page>
 		<PageHeader
 			title="Team"
-			description="Everyone who can sign in, and the groups that carry their cache access."
+			description="Users and the groups that grant them cache access."
 			class="mb-5"
 		/>
 		<TabNav label="Team sections" {tabs} />

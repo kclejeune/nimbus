@@ -19,7 +19,7 @@
 <Page>
 	<PageHeader
 		title="Tokens"
-		description="Scoped API tokens for CI and scripts. A token can never exceed your own access, and revoking one takes effect immediately."
+		description="API tokens for CI and scripts. A token can't exceed your own access."
 	>
 		{#snippet actions()}
 			<Button onclick={() => (sheetOpen = true)}><Plus /> New token</Button>
@@ -61,9 +61,7 @@
 
 	<TokenTable
 		tokens={data.tokens}
-		emptyText={data.view === 'all'
-			? 'Nobody has created a token yet.'
-			: 'Create a token to push from CI or run scripts against the cache API.'}
+		emptyText={data.view === 'all' ? 'Nobody has a token.' : 'Create one for CI or scripts.'}
 	/>
 
 	{#if data.view === 'all' && (data.page > 1 || data.hasMore)}
@@ -90,9 +88,7 @@
 	<Sheet.Content side="right" class="w-full gap-0 sm:max-w-md">
 		<Sheet.Header class="border-b px-6 py-5">
 			<Sheet.Title class="text-base font-semibold">New token</Sheet.Title>
-			<Sheet.Description>
-				The token is shown once after it's created. Store it in your CI secrets right away.
-			</Sheet.Description>
+			<Sheet.Description>Shown once after creation.</Sheet.Description>
 		</Sheet.Header>
 		<form
 			method="POST"

@@ -195,7 +195,7 @@
 	<div
 		role="application"
 		aria-roledescription="chart"
-		aria-label="{ariaLabel}. Use the left and right arrow keys to read values."
+		aria-label="{ariaLabel}. Left and right arrows step through values."
 		tabindex="0"
 		onkeydown={onKey}
 		onblur={() => (hovered = null)}

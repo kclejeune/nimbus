@@ -47,10 +47,7 @@
 </script>
 
 <Page>
-	<PageHeader
-		title="Paths"
-		description="Store paths across every cache you can read, newest first."
-	/>
+	<PageHeader title="Paths" description="All caches you can read, newest first." />
 
 	<div class="mb-3 flex flex-wrap items-center gap-3">
 		<Select.Root
@@ -83,16 +80,12 @@
 	{#if data.total === 0 && !data.q}
 		<EmptyState
 			icon={FolderSearch}
-			title={data.cacheFilter ? 'This cache is empty' : 'No store paths yet'}
-			description="Paths pushed with the nimbus CLI or attic appear here."
+			title={data.cacheFilter ? 'This cache is empty' : 'No paths yet'}
+			description="Push with the nimbus CLI or attic."
 		/>
 	{:else}
 		{#if data.paths.length === 0}
-			<EmptyState
-				icon={Search}
-				title="No paths match “{data.q}”"
-				description="Try a shorter name, or a different cache."
-			/>
+			<EmptyState icon={Search} title="No paths match “{data.q}”" />
 		{:else}
 			<StorePathTable
 				showCache

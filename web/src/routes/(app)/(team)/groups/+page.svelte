@@ -13,8 +13,8 @@
 
 <div>
 	<p class="mb-6 max-w-2xl text-sm text-muted-foreground">
-		Groups collect users and carry permission grants. Map an OIDC group claim to sync membership
-		automatically at sign-in.
+		A group's grants apply to all its members. Map an OIDC group claim to sync membership at
+		sign-in.
 	</p>
 
 	{#if form?.error}
@@ -43,11 +43,7 @@
 	</Panel>
 
 	{#if data.groups.length === 0}
-		<EmptyState
-			icon={UsersRound}
-			title="No groups yet"
-			description="Create a group to grant cache access to several people at once."
-		/>
+		<EmptyState icon={UsersRound} title="No groups yet" description="Create one above." />
 	{:else}
 		<div class="table-frame">
 			<table class="data-table">
@@ -86,7 +82,7 @@
 										confirmFirst({
 											title: `Delete ${group.name}?`,
 											description:
-												'Its grants and memberships are removed. Members keep access they have through other grants or groups.',
+												'Removes its grants and memberships. Members keep access from other grants and groups.',
 											confirmLabel: 'Delete group',
 											tone: 'danger'
 										})

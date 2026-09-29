@@ -20,7 +20,7 @@
 	// The callback-redirect error (?error=...) shows until a new attempt starts.
 	const callbackError = $derived(
 		errorCode === 'signup_disabled'
-			? 'That account isn’t linked to a user here. Sign in with SSO first, then link it from Settings.'
+			? 'That account isn’t linked to a user here. Sign in with SSO, then link it from your profile.'
 			: errorCode
 				? `Sign-in failed (${errorCode}). Try again.`
 				: ''
@@ -67,8 +67,7 @@
 		{/if}
 	{:else if accessConfigured}
 		<p class="text-sm text-muted-foreground">
-			This deployment signs you in through Cloudflare Access. Open the app from your Access
-			dashboard to continue.
+			Sign-in goes through Cloudflare Access. Open the app from your Access dashboard.
 		</p>
 	{:else}
 		<p class="text-sm text-muted-foreground">

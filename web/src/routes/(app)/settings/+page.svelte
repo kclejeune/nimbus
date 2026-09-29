@@ -56,7 +56,7 @@
 		>
 			<Panel
 				title="Storage limit"
-				description="Physical, deduplicated bytes across all caches. When the limit is exceeded, checked after every push and nightly, the least-recently-used closures are evicted from any cache until storage is back under it. Pinned closures are never evicted."
+				description="Physical bytes after dedup, across all caches. Over the limit, the least recently used closures are evicted from any cache. Pinned closures are never evicted."
 			>
 				<div class="space-y-2">
 					<Label for="global_max_gib">Global limit (GiB)</Label>
@@ -92,7 +92,7 @@
 
 		<Panel
 			title="Garbage collection"
-			description="Runs nightly. Reaps abandoned uploads and deleted caches, retention-expired paths, and NARs and chunks nothing references."
+			description="Runs nightly. Removes abandoned uploads, deleted caches, expired paths and unreferenced NARs and chunks."
 		>
 			{#snippet actions()}
 				<form
@@ -161,7 +161,7 @@
 					)} chunks freed from storage).
 				</p>
 			{:else if reclaimable === 0}
-				<p class="mt-4 text-sm text-muted-foreground">Nothing to reclaim right now.</p>
+				<p class="mt-4 text-sm text-muted-foreground">Nothing to reclaim.</p>
 			{/if}
 
 			{#if lastRun}
@@ -186,8 +186,7 @@
 								<span>
 									{formatCount(lastRun.integrity.incompleteObjects)}
 									{lastRun.integrity.incompleteObjects === 1 ? 'path has' : 'paths have'} references that
-									are neither stored locally nor covered by an upstream, so Nix may fail to substitute
-									their closures.
+									aren’t in any cache or upstream, so Nix may fail to substitute their closures.
 								</span>
 							</summary>
 							<ul class="mt-2 space-y-1 ps-6 text-foreground">

@@ -80,7 +80,7 @@ describe('explainRetention', () => {
 		expect(held.reasons[0].detail).toContain('a path that depends on it is still here');
 
 		const gone = explainRetention(facts({ detachedAt: daysAgo(1), liveAncestor: false }));
-		expect(gone.reasons[0].detail).toContain('next garbage collection deletes it');
+		expect(gone.reasons[0].detail).toContain('next GC deletes it');
 
 		const pinned = explainRetention(
 			facts({ detachedAt: daysAgo(1), protectedBy: [{ label: 'atlas' }] })

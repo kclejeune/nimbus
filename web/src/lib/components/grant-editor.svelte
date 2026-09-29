@@ -27,7 +27,7 @@
 
 <Panel
 	title="Cache access"
-	description="Direct grants. Patterns like ci-* cover every matching cache, including ones created later."
+	description="Direct grants. Patterns like ci-* also match caches created later."
 	flush
 >
 	<div class="relative overflow-x-auto">
@@ -93,7 +93,7 @@
 				{:else}
 					<tr>
 						<td colspan={editable ? 4 : 3} class="py-6 text-center text-sm text-muted-foreground">
-							No cache access granted directly.
+							No direct grants.
 						</td>
 					</tr>
 				{/each}

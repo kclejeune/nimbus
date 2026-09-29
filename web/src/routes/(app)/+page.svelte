@@ -64,7 +64,7 @@
 		{
 			done: ob.hasCache,
 			title: 'Create a cache',
-			body: 'Each cache has its own substituter URL, signing key and access list. If a teammate already has one, ask them for push access instead.',
+			body: 'Each cache has its own substituter URL, signing key and access. If a teammate has one, ask for push access instead.',
 			command: null,
 			href: '/caches/new',
 			action: 'New cache'
@@ -72,7 +72,7 @@
 		{
 			done: ob.hasToken,
 			title: 'Sign in with the nimbus CLI',
-			body: 'Opens your browser to approve the CLI, or prints a code to enter here when you’re on SSH.',
+			body: 'Opens a browser to approve the CLI. Over SSH, it prints a code to enter here.',
 			command: `nimbus login ${alias} ${endpoint}`,
 			href: null,
 			action: null
@@ -80,7 +80,7 @@
 		{
 			done: ob.hasPush,
 			title: 'Push a build',
-			body: 'Uploads the closure, skipping anything already cached here or upstream.',
+			body: 'Uploads the closure, skipping paths already in the cache or upstream.',
 			command: `nimbus push ${cacheArg} ./result`,
 			href: null,
 			action: null
@@ -99,10 +99,9 @@
 <Page>
 	<PageHeader title="Overview">
 		{#snippet description()}
-			What needs your attention, and where storage stands across every cache{#if data.statsAt}
-				{' '}
-				as of the last garbage collection
-				<span title={data.statsAt}>{formatRelativeTime(data.statsAt)}</span>{/if}.
+			{#if data.statsAt}
+				Storage as of last GC, <span title={data.statsAt}>{formatRelativeTime(data.statsAt)}</span
+				>.{:else}Live storage totals.{/if}
 		{/snippet}
 	</PageHeader>
 
@@ -158,8 +157,8 @@
 				{/each}
 			</ol>
 			<p class="border-t px-5 py-3 text-xs text-muted-foreground">
-				Then run <code class="font-mono">nimbus use {cacheArg}</code> on any machine that should pull
-				from it.
+				Then run <code class="font-mono">nimbus use {cacheArg}</code> on each machine that pulls from
+				it.
 			</p>
 		</section>
 	{/if}
@@ -277,7 +276,7 @@
 			{/snippet}
 			{#if data.recent.length === 0}
 				<p class="px-5 py-8 text-center text-sm text-muted-foreground">
-					Nothing pushed to a cache you can see yet.
+					Nothing pushed to your caches yet.
 				</p>
 			{:else}
 				<ul class="divide-y">

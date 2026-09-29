@@ -10,10 +10,10 @@
 		if (status === 403) {
 			return {
 				icon: ShieldX,
-				title: "You don't have access to this",
+				title: 'No access',
 				text:
 					message === 'Permission denied' || message === 'Admins only'
-						? 'This page needs permissions your account doesn’t have. Ask an administrator for a grant if you think you should have access.'
+						? 'Ask an admin for a grant if you need this page.'
 						: message
 			};
 		}

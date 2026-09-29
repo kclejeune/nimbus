@@ -31,8 +31,6 @@
 		{/if}
 
 		<Button type="submit" size="lg" class="w-full">Authorize CLI</Button>
-		<p class="text-center text-xs text-muted-foreground">
-			You can revoke this token at any time from Tokens.
-		</p>
+		<p class="text-center text-xs text-muted-foreground">Revoke it anytime from Tokens.</p>
 	</form>
 </AuthShell>

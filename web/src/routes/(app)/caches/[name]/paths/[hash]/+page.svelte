@@ -162,7 +162,7 @@
 			{#if o.detachedAt}
 				<StatusBadge
 					tone="danger"
-					title="Removed {formatIsoDateTime(o.detachedAt)}; kept while other paths reference it"
+					title="Removed {formatIsoDateTime(o.detachedAt)}. Kept while other paths reference it."
 				>
 					Detached
 				</StatusBadge>
@@ -313,16 +313,9 @@
 	</Panel>
 
 	<section class="mb-10">
-		{@render sectionHeading(
-			'References',
-			data.references.length,
-			'Paths this store path depends on.'
-		)}
+		{@render sectionHeading('References', data.references.length, 'Paths this one depends on.')}
 		{#if data.references.length === 0}
-			<EmptyState
-				title="No references"
-				description="This path doesn't depend on any other store path."
-			/>
+			<EmptyState title="No references" />
 		{:else}
 			<StorePathTable
 				interactive
@@ -368,10 +361,10 @@
 		{@render sectionHeading(
 			'Referrers',
 			data.referrers.total,
-			'Paths in this cache that depend on this store path.'
+			'Paths in this cache that depend on this one.'
 		)}
 		{#if data.referrers.rows.length === 0}
-			<EmptyState title="No referrers" description="Nothing in this cache depends on this path." />
+			<EmptyState title="No referrers" />
 		{:else}
 			<StorePathTable
 				interactive
@@ -385,20 +378,16 @@
 			/>
 			{#if data.referrers.total > data.referrers.rows.length}
 				<p class="mt-2 text-xs text-muted-foreground tabular-nums">
-					And {formatCount(data.referrers.total - data.referrers.rows.length)} more not shown.
+					{formatCount(data.referrers.total - data.referrers.rows.length)} more not shown.
 				</p>
 			{/if}
 		{/if}
 	</section>
 
 	<section>
-		{@render sectionHeading(
-			'Chunks',
-			data.chunks.length,
-			'How this NAR is split in storage, and which chunks other NARs share.'
-		)}
+		{@render sectionHeading('Chunks', data.chunks.length, 'How this NAR is split in storage.')}
 		{#if data.chunks.length === 0}
-			<EmptyState title="No chunks recorded" description="This NAR has no chunk records." />
+			<EmptyState title="No chunks recorded" />
 		{:else}
 			{#if data.chunks.length > CHUNK_PAGE || chunkQ}
 				<SearchInput

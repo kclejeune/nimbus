@@ -75,14 +75,13 @@ export function explainRetention(f: RetentionFacts): RetentionExplanation {
 				names.length > 0
 					? `Pinned as ${listNames(names)}${f.pinnedAs.quick ? ', and pinned directly' : ''}`
 					: 'Pinned',
-			detail: `Garbage collection never removes a pinned path or anything it depends on, whatever its age or the size limits.${f.detachedAt ? '' : ' Removing it is blocked until it’s unpinned.'}`
+			detail: `GC never removes a pinned path or its dependencies.${f.detachedAt ? '' : ' Removal is blocked until it’s unpinned.'}`
 		});
 	} else if (f.protectedBy.length > 0) {
 		reasons.push({
 			tone: 'protected',
 			title: `Protected by ${listNames([...new Set(f.protectedBy.map((p) => p.label))])}`,
-			detail:
-				'A pinned path depends on it, so garbage collection keeps it for as long as that pin exists.'
+			detail: 'A pinned path depends on it. GC keeps it while that pin exists.'
 		});
 	}
 
@@ -93,19 +92,19 @@ export function explainRetention(f: RetentionFacts): RetentionExplanation {
 			reasons.push({
 				tone: 'info',
 				title: 'Removed from this cache',
-				detail: 'It was removed, but stays because a pin still depends on it.'
+				detail: 'Kept because a pin still depends on it.'
 			});
 		} else if (f.liveAncestor) {
 			reasons.push({
 				tone: 'warning',
 				title: 'Removed from this cache',
-				detail: `It keeps serving only because ${f.referrers === 1 ? 'a path that depends on it is' : 'paths that depend on it are'} still here. Garbage collection deletes it once none are.`
+				detail: `Still served because ${f.referrers === 1 ? 'a path that depends on it is' : 'paths that depend on it are'} still here. GC deletes it once none are.`
 			});
 		} else {
 			reasons.push({
 				tone: 'warning',
 				title: 'Removed from this cache',
-				detail: 'Nothing still here depends on it, so the next garbage collection deletes it.'
+				detail: 'Nothing here depends on it, so the next GC deletes it.'
 			});
 		}
 		return {
@@ -135,20 +134,20 @@ export function explainRetention(f: RetentionFacts): RetentionExplanation {
 			reasons.push({
 				tone: 'info',
 				title: `Expires ${plural(f.retentionDays, 'day')} after its last use`,
-				detail: `Last ${verb} ${formatAgo(f.now - lastUsed)}. It becomes eligible for removal after ${eligible.toISOString().slice(0, 10)}, unless it or a path that depends on it is pulled again.`
+				detail: `Last ${verb} ${formatAgo(f.now - lastUsed)}. Eligible for removal after ${eligible.toISOString().slice(0, 10)} unless it or a dependent is pulled again.`
 			});
 		} else if (f.freshAncestor) {
 			reasons.push({
 				tone: 'info',
 				title: `Past its ${f.retentionDays}-day window, but still needed`,
-				detail: `Last ${verb} ${formatAgo(f.now - lastUsed)}. A path that depends on it was used recently, so it stays as long as that path does.`
+				detail: `Last ${verb} ${formatAgo(f.now - lastUsed)}. A dependent was used recently, so it stays as long as that path does.`
 			});
 		} else {
 			atRisk = true;
 			reasons.push({
 				tone: 'warning',
 				title: `Past its ${f.retentionDays}-day window`,
-				detail: `Last ${verb} ${formatAgo(f.now - lastUsed)}, and nothing that depends on it has been used since. The next garbage collection removes it.`
+				detail: `Last ${verb} ${formatAgo(f.now - lastUsed)}. No dependent has been used since, so the next GC removes it.`
 			});
 		}
 	} else {
@@ -167,8 +166,8 @@ export function explainRetention(f: RetentionFacts): RetentionExplanation {
 	// deletes it with whatever only it depends on.
 	const sizeDetail =
 		f.referrers > 0
-			? `Least recently used top-level paths go first, each with whatever only it depends on. ${plural(f.referrers, 'path')} ${f.referrers === 1 ? 'depends' : 'depend'} on this one, so it only goes along with the last of them.`
-			: 'Least recently used top-level paths go first, each with whatever only it depends on. Nothing depends on this path, so it’s evicted in order of its own last use.';
+			? `Least recently used top-level paths go first, with their unshared dependencies. ${plural(f.referrers, 'path')} ${f.referrers === 1 ? 'depends' : 'depend'} on this one, so it goes with the last of them.`
+			: 'Least recently used top-level paths go first, with their unshared dependencies. Nothing depends on this path, so its own last use decides.';
 	if (f.retentionMaxBytes != null) {
 		reasons.push({
 			tone: 'info',

@@ -101,7 +101,7 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 		attention.push({
 			tone: 'warning',
 			title: `${plural(pendingUsers, 'person is', 'people are')} waiting for access`,
-			detail: 'They signed in but can’t use nimbus until an admin activates them.',
+			detail: 'They can’t use nimbus until an admin activates them.',
 			href: '/users',
 			action: 'Review users'
 		});
@@ -112,7 +112,7 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 			tone: 'danger',
 			title: `${plural(incomplete, 'store path has', 'store paths have')} incomplete closures`,
 			detail:
-				'Their references are missing from every cache and upstream, so Nix may fail to substitute them.',
+				'Their references aren’t in any cache or upstream, so Nix may fail to substitute them.',
 			href: '/settings',
 			action: 'See affected paths'
 		});
@@ -122,14 +122,12 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 		if (!gcLastRun || Date.now() - last > GC_OVERDUE_MS) {
 			attention.push({
 				tone: 'warning',
-				title: gcLastRun
-					? 'Nightly garbage collection is overdue'
-					: 'Garbage collection hasn’t run yet',
+				title: gcLastRun ? 'Nightly GC is overdue' : 'GC hasn’t run yet',
 				detail: gcLastRun
-					? 'The scheduled run was missed, so expired paths and unused storage are piling up.'
-					: 'It runs nightly on its own; run it now to get storage totals right away.',
+					? 'Expired paths and unused storage aren’t being reclaimed.'
+					: 'It runs nightly. Run it now to get storage totals sooner.',
 				href: '/settings',
-				action: 'Open garbage collection'
+				action: 'Open settings'
 			});
 		}
 	}
@@ -137,7 +135,7 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 		attention.push({
 			tone: stats.storageBytes >= globalMaxBytes ? 'danger' : 'warning',
 			title: `Storage is at ${Math.round((stats.storageBytes / globalMaxBytes) * 100)}% of the instance limit`,
-			detail: 'Past the limit, the least recently used closures are evicted from every cache.',
+			detail: 'Over the limit, the least recently used closures are evicted from every cache.',
 			href: '/settings',
 			action: 'Adjust limit'
 		});
@@ -149,7 +147,7 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 		attention.push({
 			tone: pct >= 1 ? 'danger' : 'warning',
 			title: `${c.name} is at ${Math.round(pct * 100)}% of its size budget`,
-			detail: 'Its least recently used closures are evicted once it goes over.',
+			detail: 'Over budget, its least recently used closures are evicted.',
 			href: `/caches/${encodeURIComponent(c.name)}/settings`,
 			action: 'Review retention'
 		});
@@ -167,7 +165,10 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 				expiring.length === 1
 					? `Your token “${expiring[0].name}” expires ${days === 0 ? 'today' : `in ${plural(days, 'day')}`}`
 					: `${expiring.length} of your tokens expire within ${TOKEN_WARN_DAYS} days`,
-			detail: 'Create a replacement and update wherever it’s stored before it stops working.',
+			detail:
+				expiring.length === 1
+					? 'Create a replacement before it expires.'
+					: 'Create replacements before they expire.',
 			href: '/tokens',
 			action: 'Manage tokens'
 		});

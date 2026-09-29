@@ -22,9 +22,7 @@
 			</div>
 			<div>
 				<p class="text-sm font-medium">Device authorized</p>
-				<p class="mt-0.5 text-sm text-muted-foreground">
-					Return to your terminal. The CLI will finish signing in.
-				</p>
+				<p class="mt-0.5 text-sm text-muted-foreground">Return to your terminal.</p>
 			</div>
 		</div>
 	{:else if !data.code}

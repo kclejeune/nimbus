@@ -21,9 +21,8 @@
 
 <AuthShell title="Waiting for approval">
 	<p class="text-sm leading-relaxed text-muted-foreground">
-		You're signed in as <span class="font-medium text-foreground">{data.user.email}</span>. An
-		administrator needs to activate your account before you can use nimbus. This page doesn't
-		refresh on its own; sign in again once you've been approved.
+		Signed in as <span class="font-medium text-foreground">{data.user.email}</span>. An admin needs
+		to activate your account. Sign in again once approved.
 	</p>
 	<div class="mt-5 flex items-center gap-2 border-t pt-5">
 		<Hourglass class="size-4 text-warning" />

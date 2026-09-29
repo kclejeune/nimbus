@@ -53,7 +53,7 @@ export const actions: Actions = {
 		if (pinName) {
 			// Named pin: re-pinning the name adds a revision (cachix-style).
 			if (!PIN_NAME_RE.test(pinName)) {
-				return fail(400, { rootError: 'Pin names must have no whitespace (max 100 chars).' });
+				return fail(400, { rootError: 'Pin names can’t contain whitespace. Max 100 characters.' });
 			}
 			const keepRaw = String(form.get('keep_revisions') ?? '').trim();
 			const keep = keepRaw === '' ? undefined : Number(keepRaw);
@@ -62,7 +62,7 @@ export const actions: Actions = {
 				(!Number.isInteger(keep) || keep <= 0 || keep > PIN_KEEP_REVISIONS_MAX)
 			) {
 				return fail(400, {
-					rootError: `Keep revisions must be a whole number from 1 to ${PIN_KEEP_REVISIONS_MAX}.`
+					rootError: `“Keep last” must be a whole number from 1 to ${PIN_KEEP_REVISIONS_MAX}.`
 				});
 			}
 			await upsertPin(db, cache.id, pinName, hash, { keepRevisions: keep, note });

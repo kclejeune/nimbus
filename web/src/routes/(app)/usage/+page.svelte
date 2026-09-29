@@ -21,11 +21,7 @@
 </script>
 
 <Page>
-	<PageHeader
-		title="Usage"
-		description="How the cache is performing and what it stores, across every cache on this instance."
-		class="mb-5"
-	>
+	<PageHeader title="Usage" class="mb-5">
 		{#snippet actions()}
 			{#if data.view === 'performance'}
 				<!-- One time filter, scoping every chart below it. -->

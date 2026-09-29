@@ -36,11 +36,11 @@
 
 <Panel
 	title="Pinned paths"
-	description="Garbage collection never removes a pinned path or anything in its closure, regardless of age or size limits. You can also pin a path from the Paths tab."
+	description="GC never removes a pinned path or its closure, regardless of age or size limits."
 	flush
 >
 	{#if data.roots.length === 0}
-		<p class="px-5 py-6 text-sm text-muted-foreground">Nothing is pinned.</p>
+		<p class="px-5 py-6 text-sm text-muted-foreground">No pins yet.</p>
 	{:else}
 		<ul class="divide-y">
 			{#each namedPins as pin (pin.name)}
@@ -170,8 +170,8 @@
 				</Button>
 			</div>
 			<p class="text-xs text-muted-foreground">
-				Naming a pin gives it a revision history: pinning the same name again keeps the older
-				revisions protected too, up to “Keep last”. Name and note are optional.
+				Pinning an existing name adds a revision. Older revisions stay protected, up to “Keep last”.
+				Name is optional.
 			</p>
 			{#if form?.rootError}
 				<p role="alert" class="text-sm text-destructive">{form.rootError}</p>

@@ -84,12 +84,10 @@
 		<h2 id="access-heading" class="mb-1 text-base font-semibold">Your access</h2>
 		<p class="mb-3 text-sm text-muted-foreground">
 			{#if me.role === 'admin'}
-				As an admin you hold every permission on every cache; the grants below apply only if you
-				become a member.
+				Admins have every permission. The grants below apply only if you become a member.
 			{:else}
-				What you can do on each cache. Patterns like <code class="font-mono text-[0.8125rem]"
-					>ci-*</code
-				> cover every matching cache, including ones created later. Ask an admin to change these.
+				Patterns like <code class="font-mono text-[0.8125rem]">ci-*</code> also match caches created later.
+				Ask an admin to change these.
 			{/if}
 		</p>
 		<div class="table-frame">
@@ -115,7 +113,7 @@
 									<span class="text-muted-foreground">Group</span>
 									<span class="font-medium">{row.via}</span>
 								{:else}
-									<span class="text-muted-foreground">Granted to you directly</span>
+									<span class="text-muted-foreground">Direct</span>
 								{/if}
 							</td>
 						</tr>
@@ -144,15 +142,13 @@
 
 	<h2 class="mb-1 text-base font-semibold">Sign-in methods</h2>
 	<p class="mb-3 text-sm text-muted-foreground">
-		Any linked provider signs in to the same user, tokens and role, even when the providers report
-		different emails.
+		Every linked provider signs in to this account, even if its email differs.
 	</p>
 
 	{#if cfAccessSession}
 		<Panel>
 			<p class="text-sm text-muted-foreground">
-				You're signed in through Cloudflare Access, which authenticates each request and doesn't
-				take part in account linking. Sign in with SSO to manage linked providers.
+				Cloudflare Access sessions can't link providers. Sign in with SSO to manage them.
 			</p>
 		</Panel>
 	{:else}
@@ -207,7 +203,7 @@
 						{/each}
 					</div>
 				{:else}
-					<span>Every configured provider is linked.</span>
+					<span>All providers linked.</span>
 				{/if}
 			{/snippet}
 		</Panel>

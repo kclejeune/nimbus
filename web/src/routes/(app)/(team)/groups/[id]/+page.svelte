@@ -104,7 +104,7 @@
 
 		<Panel
 			title="SSO group sync"
-			description="Set a groups-claim value to sync membership from your identity provider at every sign-in. Members added by hand are never removed by sync."
+			description="Sync membership from this groups-claim value at each sign-in. Sync never removes members added by hand."
 		>
 			<form
 				method="POST"

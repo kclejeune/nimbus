@@ -86,8 +86,8 @@
 	{#if b.length === 0}
 		<EmptyState
 			icon={ChartLine}
-			title="No activity to chart yet"
-			description="Storage growth appears here once paths are pushed to a cache."
+			title="Nothing pushed yet"
+			description="Charts fill in once a path is pushed to a cache."
 		/>
 	{:else}
 		<div
@@ -97,19 +97,15 @@
 				label="Storage used"
 				value={formatBytes(stats.storageBytes)}
 				sub={data.globalMaxBytes
-					? `${usagePct}% of the ${formatBytes(data.globalMaxBytes)} global limit`
-					: 'Physical bytes after dedup, no global limit set'}
+					? `${usagePct}% of ${formatBytes(data.globalMaxBytes)} global limit`
+					: 'After dedup. No global limit.'}
 			/>
 			<StatTile label="Store paths" value={formatCount(stats.objects)} sub="Across all caches" />
-			<StatTile
-				label="Caches"
-				value={formatCount(stats.caches)}
-				sub="Isolated views into shared storage"
-			/>
+			<StatTile label="Caches" value={formatCount(stats.caches)} />
 			<StatTile
 				label="Unique NARs"
 				value={formatCount(stats.nars)}
-				sub="Store paths with identical content share one NAR"
+				sub="Identical content is stored once"
 			/>
 			<StatTile
 				label="Deduplication"
@@ -126,7 +122,7 @@
 		</div>
 		{#if data.statsAt}
 			<p class="mt-2 text-xs text-muted-foreground">
-				Storage totals as of the last garbage collection, {formatRelativeTime(data.statsAt)}.
+				Totals as of last GC, {formatRelativeTime(data.statsAt)}.
 			</p>
 		{/if}
 

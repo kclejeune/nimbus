@@ -122,7 +122,7 @@
 					size="icon-sm"
 					class="text-muted-foreground"
 					disabled={idx === 0}
-					aria-label="Move up (queried earlier)"
+					aria-label="Move up"
 					onclick={() => move(entry.id, -1)}
 				>
 					<ChevronUp />
@@ -133,7 +133,7 @@
 					size="icon-sm"
 					class="text-muted-foreground"
 					disabled={idx === section.length - 1}
-					aria-label="Move down (queried later)"
+					aria-label="Move down"
 					onclick={() => move(entry.id, 1)}
 				>
 					<ChevronDown />
@@ -154,8 +154,7 @@
 						const button = e.currentTarget as HTMLButtonElement;
 						const ok = await ask({
 							title: `Remove ${entry.url}?`,
-							description:
-								'Caches stop checking it, and its cached presence verdicts are dropped. Paths already persisted from it stay in their caches.',
+							description: 'Caches stop checking it. Paths already persisted from it stay.',
 							confirmLabel: 'Remove upstream',
 							tone: 'danger'
 						});
@@ -193,7 +192,7 @@
 			</label>
 			<label
 				class="check-chip"
-				title="Already in every Nix installation's default config; omitted from generated nix.conf snippets"
+				title="In Nix's default config. Left out of generated nix.conf snippets."
 			>
 				<input name="nix_default_{entry.id}" type="checkbox" bind:checked={entry.nixDefault} />
 				Nix default
@@ -213,7 +212,7 @@
 <Page>
 	<PageHeader
 		title="Upstream caches"
-		description="The server-wide trust registry: each upstream URL with its signing key and TTL. Caches choose how they use each entry (off, redirect or persist) in their own settings. Entries are queried top to bottom."
+		description="Server-wide, queried top to bottom. Each cache picks its own mode in its settings."
 	>
 		{#snippet actions()}
 			<Button variant={addOpen ? 'outline' : 'default'} onclick={() => (addOpen = !addOpen)}>
@@ -238,7 +237,7 @@
 		>
 			<Panel
 				title="Add upstream"
-				description="The public key is required: a path only counts as present upstream when its narinfo is signed by it."
+				description="A path counts as present upstream only if its narinfo is signed by this key."
 			>
 				<div class="space-y-4">
 					<div class="grid gap-3 md:grid-cols-2">
@@ -290,7 +289,7 @@
 						</label>
 						<label
 							class="check-chip"
-							title="Already in every Nix installation's default config; omitted from generated nix.conf snippets"
+							title="In Nix's default config. Left out of generated nix.conf snippets."
 						>
 							<input name="nix_default" type="checkbox" />
 							Nix default
@@ -298,8 +297,7 @@
 					</div>
 				</div>
 				{#snippet footer()}
-					<span>Changing a URL or key later re-probes everything under the new identity.</span>
-					<Button type="submit" disabled={adding}>
+					<Button type="submit" disabled={adding} class="ml-auto">
 						{adding ? 'Adding…' : 'Add upstream'}
 					</Button>
 				{/snippet}
@@ -326,11 +324,7 @@
 
 		<div class="space-y-6">
 			{#if enforcedEntries.length > 0}
-				<Panel
-					title="Enforced"
-					description="Applied to every cache. Caches can't turn these off."
-					flush
-				>
+				<Panel title="Enforced" description="Caches can't turn these off." flush>
 					{#snippet actions()}
 						<ShieldCheck class="size-4 text-primary" />
 					{/snippet}
@@ -345,7 +339,7 @@
 			{#if optionalEntries.length > 0}
 				<Panel
 					title="Optional"
-					description="Available to caches at the default mode shown here, unless a cache overrides it."
+					description="Caches use the default mode unless they override it."
 					flush
 				>
 					<ul class="divide-y">
@@ -358,7 +352,7 @@
 				<EmptyState
 					icon={CloudDownload}
 					title="No optional upstreams"
-					description="Add an upstream to filter pushes against it and fall back to it on reads."
+					description="Add one to skip pushing paths it already serves."
 				/>
 			{/if}
 		</div>
@@ -369,13 +363,13 @@
 			>
 				<span class="text-sm text-muted-foreground">
 					{#if dirty}
-						You have unsaved changes.
+						Unsaved changes
 					{:else if form?.saved}
 						<span class="inline-flex items-center gap-1.5 text-success">
 							<Check class="size-4" /> Saved
 						</span>
 					{:else}
-						No unsaved changes.
+						No changes
 					{/if}
 				</span>
 				<Button type="submit" class="ms-auto" disabled={!dirty || saving}>
@@ -390,9 +384,7 @@
 	{/if}
 
 	<p class="mt-6 max-w-3xl text-xs leading-relaxed text-muted-foreground">
-		With a public key set, an upstream path only counts as present when its narinfo carries a valid
-		signature from that key. TTL takes durations like 3600s, 90m, 720h, 30d or 1y, and bounds how
-		long a hit is served before the upstream is checked again. Changing a URL or key drops that
-		upstream's cached verdicts so everything is re-probed under the new identity.
+		TTL is how long a hit is served before the upstream is checked again, e.g. 90m, 720h or 30d.
+		Changing a URL or key re-checks every path against it.
 	</p>
 </Page>

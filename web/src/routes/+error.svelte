@@ -11,7 +11,7 @@
 <AuthShell
 	title={notFound ? 'Page not found' : 'Something went wrong'}
 	description={notFound
-		? 'There’s nothing at this address. Check the URL, or head back to the dashboard.'
+		? 'Nothing at this address.'
 		: (page.error?.message ?? 'The request failed.')}
 >
 	<div class="flex items-center justify-between gap-3">

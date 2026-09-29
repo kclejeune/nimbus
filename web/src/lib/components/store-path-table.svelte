@@ -185,7 +185,7 @@
 	</table>
 
 	{#if interactive && paged.length === 0}
-		<p class="py-8 text-center text-sm text-muted-foreground">No rows match “{q}”.</p>
+		<p class="py-8 text-center text-sm text-muted-foreground">No paths match “{q}”.</p>
 	{/if}
 </div>
 

@@ -50,13 +50,13 @@
 	<EmptyState
 		icon={Activity}
 		title="Connect Workers Analytics Engine"
-		description="Request rates, latency percentiles, edge cache and D1 metrics are recorded already. To chart them here, set CF_ACCOUNT_ID and a CF_ANALYTICS_TOKEN with Account Analytics read access on this worker."
+		description="Metrics are already being recorded. To chart them, set CF_ACCOUNT_ID and a CF_ANALYTICS_TOKEN with Account Analytics read access on this worker."
 	/>
 {:else if result.status === 'error'}
 	<EmptyState
 		icon={CircleAlert}
 		title="Couldn't load metrics"
-		description="The Analytics Engine query failed: {result.message}. Reload to try again."
+		description="Analytics Engine query failed: {result.message}."
 	/>
 {:else if d && tot}
 	{#if result.sample}
@@ -65,7 +65,7 @@
 			role="status"
 		>
 			<FlaskConical class="size-4 text-warning" />
-			Sample data generated for local development. Set the Analytics Engine credentials to see real traffic.
+			Sample data for local development. Set the Analytics Engine credentials for real traffic.
 		</div>
 	{/if}
 
@@ -81,7 +81,7 @@
 		<StatTile
 			label="Server errors"
 			value={formatPct(errorRate5)}
-			sub={`5xx responses; ${formatPct(tot.requests > 0 ? tot.errors4xx / tot.requests : 0)} were 4xx`}
+			sub={`5xx, plus ${formatPct(tot.requests > 0 ? tot.errors4xx / tot.requests : 0)} 4xx`}
 			alert={errorRate5 > 0.01 ? 'Above 1%' : undefined}
 		/>
 		<StatTile
@@ -152,16 +152,14 @@
 	<section class="mt-10">
 		<SectionHead
 			title="Latency"
-			description="Time to response headers. Gateway is what clients see; store is the origin work behind an edge miss."
+			description="Time to response headers. Gateway is what clients see. Store is origin work on an edge miss."
 			class="mb-4"
 		/>
 		<Panel>
 			<div class="mb-3 flex flex-wrap items-center justify-between gap-3">
 				<div>
 					<h3 class="text-[0.9375rem] font-semibold">Percentiles</h3>
-					<p class="text-xs text-muted-foreground">
-						Log scale, so a tail spike doesn't flatten the median.
-					</p>
+					<p class="text-xs text-muted-foreground">Log scale.</p>
 				</div>
 				<Segmented
 					options={[
@@ -234,7 +232,7 @@
 	<section class="mt-10">
 		<SectionHead
 			title="Edge cache"
-			description="Of responses the edge could cache, how many it answered without running D1 or R2."
+			description="Cacheable responses served at the edge, without touching D1 or R2."
 			class="mb-4"
 		/>
 		<div class="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
@@ -256,10 +254,7 @@
 				/>
 			</Panel>
 			{#if reads}
-				<Panel
-					title="Lookups"
-					description="Whether nix found a path in this cache, via an upstream, or not at all."
-				>
+				<Panel title="Lookups" description="Where Nix found each requested path.">
 					<dl class="grid grid-cols-1 gap-3 text-sm">
 						{#each [['Found here', reads.narinfo.hit], ['Found upstream', reads.narinfo.upstream], ['Not found', reads.narinfo.miss]] as [label, n] (label)}
 							<div
@@ -287,7 +282,7 @@
 	<section class="mt-10">
 		<SectionHead
 			title="Database"
-			description="D1 statements from both layers. Reads should land on replicas; writes and read-your-write checks go to the primary."
+			description="D1 statements from both layers. Reads should hit replicas. Writes and read-your-write checks go to the primary."
 			class="mb-4"
 		/>
 		<div class="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
@@ -314,10 +309,7 @@
 					]}
 				/>
 			</Panel>
-			<Panel
-				title="Serving region"
-				description="Where D1 answered, and how much of it was the primary."
-			>
+			<Panel title="Serving region" description="Statements by D1 region, with primary share.">
 				{#if d.regions.length > 0}
 					<BarList
 						mono
@@ -330,7 +322,7 @@
 						}))}
 					/>
 				{:else}
-					<p class="text-sm text-muted-foreground">No region data in this window yet.</p>
+					<p class="text-sm text-muted-foreground">No region data in this window.</p>
 				{/if}
 			</Panel>
 		</div>
@@ -350,7 +342,7 @@
 			<StatTile
 				label="SQL time"
 				value={formatMs(tot.d1 > 0 ? tot.d1SqlMs / tot.d1 : 0)}
-				sub="Mean per statement, as reported by D1"
+				sub="Mean per statement"
 			/>
 			<StatTile
 				label="R2 operations"
@@ -362,10 +354,7 @@
 
 	<section class="mt-10">
 		<div class="mb-4 flex flex-wrap items-end justify-between gap-3">
-			<SectionHead
-				title="Routes"
-				description="Busiest first. The bar shows where a request's time goes, by stage."
-			/>
+			<SectionHead title="Routes" description="Busiest first. Bars split mean time by stage." />
 			<Segmented
 				options={[
 					['gateway', 'Client-facing'],
@@ -438,7 +427,7 @@
 	<section class="mt-10 grid grid-cols-1 gap-6 xl:grid-cols-2">
 		<Panel
 			title="Where requests come from"
-			description="Cloudflare data centers, by gateway requests."
+			description="Gateway requests by Cloudflare data center."
 		>
 			{#if d.colos.length > 0}
 				<BarList
@@ -455,10 +444,7 @@
 				<p class="text-sm text-muted-foreground">No requests in this window.</p>
 			{/if}
 		</Panel>
-		<Panel
-			title="Writes and protection"
-			description="What landed in storage, and what the rate limits turned away."
-		>
+		<Panel title="Writes and protection" description="Stored writes and refused requests.">
 			<dl class="grid grid-cols-1 gap-3 text-sm">
 				{#each [['Paths pushed', `${formatCompact(d.pushes.stored + d.pushes.deduplicated)} (${formatPct(ratio(d.pushes.deduplicated, d.pushes.stored + d.pushes.deduplicated), 0)} already stored)`], ['Chunks written to R2', `${formatCompact(d.chunkWrites.stored)} (${formatBytes(d.chunkWrites.storedBytes)})`], ['Chunk writes avoided by dedup', `${formatCompact(d.chunkWrites.deduplicated)} (${formatBytes(d.chunkWrites.dedupBytes)})`], ['Abuse guard refusals', formatCompact(d.guards.probe + d.guards.verdict + d.guards.ingest)], ['Rate-limited API calls', formatCompact(d.rateLimited.api + d.rateLimited.mutation + d.rateLimited.gc)]] as [label, value] (label)}
 					<div

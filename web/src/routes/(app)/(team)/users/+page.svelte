@@ -44,11 +44,7 @@
 </script>
 
 <div>
-	<Panel
-		title="Invite a user"
-		description="Pre-assign a role by email. The account activates the first time they sign in."
-		class="mb-8"
-	>
+	<Panel title="Invite a user" description="The account activates on first sign-in." class="mb-8">
 		<form
 			method="POST"
 			action="?/addUser"
@@ -198,7 +194,7 @@
 											confirmFirst({
 												title: `Delete ${u.name || u.email}?`,
 												description:
-													'Their grants and group memberships are removed and every token they issued stops working.',
+													'Removes their grants and group memberships. Their tokens stop working.',
 												confirmLabel: 'Delete user',
 												tone: 'danger'
 											})

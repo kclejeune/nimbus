@@ -5,10 +5,7 @@
 	let { data } = $props();
 </script>
 
-<AuthShell
-	title="Sign in"
-	description="Manage caches, tokens and access for your Nix binary cache."
->
+<AuthShell title="Sign in">
 	<LoginForm
 		providers={data.providers}
 		accessConfigured={data.accessConfigured}
