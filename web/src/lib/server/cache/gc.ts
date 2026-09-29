@@ -19,6 +19,7 @@ import { allLiveUpstreams, filterUpstreamPaths, VERDICT_ABSENT } from './missing
 import { type ExecutionContext } from './platform';
 import { PURGE_TAG_LIMIT } from './purge';
 import { instanceStats, type InstanceStats } from './stats';
+import { refreshIngestRollup } from './ingest';
 import { candidateTag } from './metadata';
 import { narinfoTag } from './store';
 import { retentionCutoff } from './retention-explain';
@@ -230,6 +231,12 @@ async function runGcLocked(env: Env, opts: GcOptions): Promise<GcStats> {
 		);
 		await pruneUpstreamChecks(env.ATTIC_DB);
 		await refreshAllGcRootStats(env.ATTIC_DB);
+		// The Usage history's rollup: one whole-store walk per run instead of
+		// one per page view. A failure leaves the previous rollup in place;
+		// readers then just join a longer live tail.
+		await refreshIngestRollup(env.ATTIC_DB).catch((e) =>
+			console.warn(`gc: ingest rollup failed: ${e}`)
+		);
 		await purgeNarinfoTags(opts.ctx, purgeTags, stats);
 		await persistLastRun(env.ATTIC_DB, stats, integrity);
 	}

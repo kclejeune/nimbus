@@ -107,6 +107,15 @@ CREATE TABLE IF NOT EXISTS server_config (
     value TEXT NOT NULL
 );
 
+-- Per-day ingest rollup for the Usage page's storage history, rebuilt by
+-- nightly GC for the days before server_config.ingest_rollup_until; readers
+-- join only the paths pushed since (see cache/ingest.ts).
+CREATE TABLE IF NOT EXISTS ingest_day (
+    day TEXT PRIMARY KEY, -- UTC date, YYYY-MM-DD
+    paths INTEGER NOT NULL,
+    bytes INTEGER NOT NULL
+) WITHOUT ROWID;
+
 -- Cached upstream narinfo existence checks (get-missing-paths filtering and
 -- read-path fallback), keyed by registry id so verdicts follow the trust
 -- identity and are wiped when its key rotates.
