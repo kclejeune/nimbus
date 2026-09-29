@@ -22,7 +22,7 @@ nimbus use mycache                            # wires up nix.conf (+ netrc if pr
 The server is a single Worker, deployed with `cd web && npm run deploy` (see
 [Deploy](#deploy)). [CLI](#cli) covers the full command set.
 
-![Overview dashboard: storage and dedup stats, the unified cache endpoint, and ingest activity](docs/screenshots/overview.png)
+![Overview: what needs attention, storage and dedup savings, and recent pushes](docs/screenshots/overview.png)
 
 ## Motivation
 
@@ -89,12 +89,12 @@ object layout), but Cloudflare is the only supported target today.
 
 <table>
   <tr>
-    <td><img src="docs/screenshots/cache-detail.png" alt="Cache detail: trust configuration, unified endpoint, and store path browser"></td>
-    <td><img src="docs/screenshots/path-detail.png" alt="Store path detail: NAR and chunk breakdown, pin state, references, and referrers"></td>
+    <td><img src="docs/screenshots/cache-detail.png" alt="Cache detail: store path browser with bulk pin and remove, alongside the Connect, Pins, Access and Settings tabs"></td>
+    <td><img src="docs/screenshots/path-detail.png" alt="Store path detail: why it is kept, NAR and chunk breakdown, pins, references, and referrers"></td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/paths.png" alt="Paths explorer: browse store paths across every readable cache"></td>
-    <td><img src="docs/screenshots/monitoring.png" alt="Monitoring: storage growth and read traffic across all caches"></td>
+    <td><img src="docs/screenshots/usage.png" alt="Usage: storage growth and read traffic across all caches"></td>
   </tr>
   <tr>
     <td colspan="2"><img src="docs/screenshots/upstreams.png" alt="Upstream registry: enforced and optional upstream caches with trust keys, TTLs, and modes"></td>
