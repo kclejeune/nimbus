@@ -2,7 +2,16 @@ import { error } from '@sveltejs/kit';
 import { canSeeCache } from '$lib/server/auth/permissions';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
 import { cacheSizes } from '$lib/server/cache/gc';
+import { readSession } from '$lib/server/cache/db';
+import { AsyncMemo } from '$lib/server/cache/async-memo';
 import type { PageServerLoad } from './$types';
+
+/**
+ * Per-cache sizes walk every object's chunks (590 ms, 243k rows on prod), so
+ * they're shared for five minutes and streamed: the table renders at once
+ * and the Size column fills in. Hover preloading makes this matter twice.
+ */
+const sizes = new AsyncMemo<Map<number, number>>(5 * 60_000, 1, 10_000);
 
 interface CacheRow {
 	id: number;
@@ -19,7 +28,7 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
-	const [{ results }, sizeByCache, access] = await Promise.all([
+	const [{ results }, access] = await Promise.all([
 		db
 			.prepare(
 				`SELECT c.id, c.name, c.is_public, c.priority, c.compression,
@@ -30,13 +39,15 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 				 ORDER BY c.name`
 			)
 			.all<CacheRow>(),
-		// Physical compressed bytes per cache; sums can overlap across caches
-		// that share content.
-		cacheSizes(db),
 		effectiveAccessOf(locals, db)
 	]);
 
 	const visible = results.filter((c) => canSeeCache(access, c.name));
+	// Physical compressed bytes per cache; sums can overlap across caches
+	// that share content. Keyed by name, for the visible caches only.
+	const storageBytes = sizes
+		.get('all', () => cacheSizes(readSession(db)))
+		.then((m) => Object.fromEntries(visible.map((c) => [c.name, m.get(c.id) ?? 0])));
 
 	return {
 		caches: visible.map((c) => ({
@@ -46,8 +57,8 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 			compression: c.compression,
 			retentionDays: c.retention_period,
 			retentionMaxBytes: c.retention_max_bytes,
-			objects: c.objects,
-			storageBytes: sizeByCache.get(c.id) ?? 0
-		}))
+			objects: c.objects
+		})),
+		storageBytes
 	};
 };

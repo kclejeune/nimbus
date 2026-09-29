@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { formatBytes, formatCount } from '$lib/format';
+	import { Skeleton } from '$lib/components/ui/skeleton/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
@@ -9,6 +10,29 @@
 
 	let { data } = $props();
 </script>
+
+{#snippet size(bytes: number, budget: number | null)}
+	{#if budget}
+		{@const pct = (bytes / budget) * 100}
+		<div class="flex flex-col items-end gap-1.5">
+			<span>
+				{formatBytes(bytes)}
+				<span class="text-muted-foreground">/ {formatBytes(budget)}</span>
+			</span>
+			<div
+				class="h-1 w-28 overflow-hidden rounded-full bg-muted"
+				title="{Math.round(pct)}% of size budget"
+			>
+				<div
+					class="h-full rounded-full {pct >= 90 ? 'bg-warning' : 'bg-primary'}"
+					style="width: {Math.min(100, pct)}%"
+				></div>
+			</div>
+		</div>
+	{:else}
+		{formatBytes(bytes)}
+	{/if}
+{/snippet}
 
 <Page>
 	<PageHeader
@@ -64,28 +88,11 @@
 							</td>
 							<td class="num">{formatCount(cache.objects)}</td>
 							<td class="num">
-								{#if cache.retentionMaxBytes}
-									{@const pct = (cache.storageBytes / cache.retentionMaxBytes) * 100}
-									<div class="flex flex-col items-end gap-1.5">
-										<span>
-											{formatBytes(cache.storageBytes)}
-											<span class="text-muted-foreground"
-												>/ {formatBytes(cache.retentionMaxBytes)}</span
-											>
-										</span>
-										<div
-											class="h-1 w-28 overflow-hidden rounded-full bg-muted"
-											title="{Math.round(pct)}% of size budget"
-										>
-											<div
-												class="h-full rounded-full {pct >= 90 ? 'bg-warning' : 'bg-primary'}"
-												style="width: {Math.min(100, pct)}%"
-											></div>
-										</div>
-									</div>
-								{:else}
-									{formatBytes(cache.storageBytes)}
-								{/if}
+								{#await data.storageBytes}
+									<Skeleton class="ml-auto h-4 w-16" aria-label="Loading size" />
+								{:then sizes}
+									{@render size(sizes[cache.name] ?? 0, cache.retentionMaxBytes)}
+								{/await}
 							</td>
 							<td class="font-mono text-[0.8125rem] text-muted-foreground">{cache.compression}</td>
 							<td class="num">{cache.priority}</td>
