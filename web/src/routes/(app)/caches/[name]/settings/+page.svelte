@@ -6,7 +6,7 @@
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
 	import { Check, Globe, Lock, Trash2 } from '@lucide/svelte';
-	import Panel from '$lib/components/layout/panel.svelte';
+	import SettingsSection from '$lib/components/layout/settings-section.svelte';
 	import StatusBadge from '$lib/components/layout/status-badge.svelte';
 
 	let { data, form } = $props();
@@ -20,11 +20,7 @@
 	const maxGib = $derived(gibInputValue(c.retentionMaxBytes));
 </script>
 
-<div class="max-w-3xl">
-	<p class="mb-6 text-sm text-muted-foreground">
-		Changing compression only affects paths pushed afterwards.
-	</p>
-
+<div>
 	<form
 		method="POST"
 		action="?/save"
@@ -35,9 +31,12 @@
 				submitting = false;
 			};
 		})}
-		class="space-y-6"
+		class="divide-y"
 	>
-		<Panel title="General">
+		<SettingsSection
+			title="General"
+			description="Who can pull without a token, and how this cache ranks and stores what it serves."
+		>
 			<div class="space-y-5">
 				<fieldset>
 					<legend class="mb-2 text-sm font-medium">
@@ -83,6 +82,9 @@
 							value={c.priority}
 							disabled={!canConfigure}
 						/>
+						<p class="text-xs text-muted-foreground">
+							Lower wins when Nix has several substituters.
+						</p>
 					</div>
 					<div class="space-y-2">
 						<Label for="compression">Compression</Label>
@@ -97,12 +99,13 @@
 							<option value="gzip">gzip</option>
 							<option value="none">none</option>
 						</select>
+						<p class="text-xs text-muted-foreground">Applies to paths pushed from now on.</p>
 					</div>
 				</div>
 			</div>
-		</Panel>
+		</SettingsSection>
 
-		<Panel
+		<SettingsSection
 			title="Retention"
 			description="Closure-aware: a path survives while anything recently pulled, or pinned, still depends on it. Over the size limit, the least recently used closures go first. Space is reclaimed by the nightly garbage collection, or right after a push tips the cache over its limit."
 		>
@@ -132,9 +135,9 @@
 					/>
 				</div>
 			</div>
-		</Panel>
+		</SettingsSection>
 
-		<Panel title="Upstream caches" flush>
+		<SettingsSection title="Upstream caches" flush>
 			{#snippet description()}
 				Paths already available from an enabled upstream are skipped at push time and served through
 				this cache on pull. Persist copies each hit into this cache in the background, re-signed and
@@ -184,17 +187,15 @@
 					No upstreams are registered on this server.
 				</p>
 			{/if}
-		</Panel>
-
-		{#if form?.error}
-			<p role="alert" class="text-sm text-destructive">{form.error}</p>
-		{/if}
+		</SettingsSection>
 
 		<div
-			class="sticky bottom-4 z-10 flex items-center gap-3 rounded-lg border bg-card/95 px-4 py-3 shadow-(--shadow-sheet) backdrop-blur"
+			class="sticky bottom-4 z-10 flex items-center gap-3 rounded-lg border !border-t bg-card/95 px-4 py-3 shadow-(--shadow-sheet) backdrop-blur"
 		>
 			<span class="text-sm text-muted-foreground">
-				{#if form?.saved}
+				{#if form?.error}
+					<span role="alert" class="text-destructive">{form.error}</span>
+				{:else if form?.saved}
 					<span class="inline-flex items-center gap-1.5 text-success">
 						<Check class="size-4" /> Saved
 					</span>
@@ -208,9 +209,9 @@
 		</div>
 	</form>
 
-	<div class="mt-10 space-y-6">
+	<div class="mt-10 divide-y">
 		{#if canConfigure}
-			<Panel
+			<SettingsSection
 				title="Rename cache"
 				description="The signing key is kept, so paths already pushed stay trusted. The substituter URL changes to the new name."
 			>
@@ -243,11 +244,11 @@
 				{#if form?.renameError}
 					<p role="alert" class="mt-3 text-sm text-destructive">{form.renameError}</p>
 				{/if}
-			</Panel>
+			</SettingsSection>
 		{/if}
 
 		{#if data.permissions.canDestroy}
-			<Panel
+			<SettingsSection
 				title="Delete cache"
 				tone="danger"
 				description="Removes the cache and hides its paths. Stored data is kept, but clients can no longer pull from it."
@@ -283,7 +284,7 @@
 				{#if form?.deleteError}
 					<p role="alert" class="mt-3 text-sm text-destructive">{form.deleteError}</p>
 				{/if}
-			</Panel>
+			</SettingsSection>
 		{/if}
 	</div>
 </div>
