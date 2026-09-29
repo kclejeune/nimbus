@@ -1,7 +1,8 @@
 import { error } from '@sveltejs/kit';
 import { PARAM_BATCH, readSession, STORE_PATH_HASH_RE, findCache } from '$lib/server/cache/db';
 import { syncObjectRefs } from '$lib/server/cache/gc';
-import { canBrowseCache } from '$lib/server/auth/permissions';
+import { canBrowseCache, canOnCache } from '$lib/server/auth/permissions';
+import { explainRetention, retentionCutoff } from '$lib/server/cache/retention-explain';
 import { effectiveAccessOf } from '$lib/server/auth/guard';
 import type { PageServerLoad } from './$types';
 
@@ -181,6 +182,105 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 
 	if (!object) throw error(404, 'Store path not found in this cache');
 
+	// --- Retention: why GC keeps this path, mirroring gc.ts's rules. These
+	// walk object_ref, so they read the primary like refs/referrers above.
+	const quickPin = pins.results.some((p) => p.pin_id === null);
+	const namedPins = [
+		...new Set(pins.results.filter((p) => p.pin_id !== null).map((p) => p.pin_name ?? ''))
+	].filter(Boolean);
+	const pinnedHere = quickPin || namedPins.length > 0;
+	const referrerCount = referrers.results[0]?.total ?? 0;
+
+	// Pinned paths whose closure contains this one: a forward walk from every
+	// gc_root in the cache, tagged by root. Bounded by the pinned closures —
+	// the same work the Pins tab does computing closure sizes. Skipped when
+	// the path is pinned itself, which already settles it.
+	const [protecting, globalLimit] = await Promise.all([
+		pinnedHere
+			? Promise.resolve([] as { hash: string; store_path: string; pin_name: string | null }[])
+			: db
+					.prepare(
+						`WITH RECURSIVE prot(root, id) AS (
+						   SELECT g.store_path_hash, o.id FROM gc_root g
+						     JOIN object o ON o.cache_id = g.cache_id AND o.store_path_hash = g.store_path_hash
+						    WHERE g.cache_id = ?1
+						   UNION
+						   SELECT p.root, r.child_id FROM prot p
+						     JOIN object_ref r ON r.object_id = p.id
+						    WHERE r.child_id IS NOT NULL
+						 )
+						 SELECT DISTINCT d.root AS hash, o.store_path, pn.name AS pin_name
+						 FROM (SELECT DISTINCT root FROM prot WHERE id = ?2) d
+						 JOIN object o ON o.cache_id = ?1 AND o.store_path_hash = d.root
+						 JOIN gc_root g ON g.cache_id = ?1 AND g.store_path_hash = d.root
+						 LEFT JOIN pin pn ON pn.id = g.pin_id`
+					)
+					.bind(cache.id, object.id)
+					.all<{ hash: string; store_path: string; pin_name: string | null }>()
+					.then((r) => r.results),
+		read
+			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
+			.first<{ value: string }>()
+	]);
+	// One label per pin (a pin's revisions collapse to its name); quick pins
+	// are labeled by the pinned path's name.
+	const protectedBy = [
+		...new Set(
+			protecting.map((r) => r.pin_name ?? r.store_path.replace(/^\/nix\/store\/[0-9a-z]{32}-/, ''))
+		)
+	].map((label) => ({ label }));
+	const isProtected = pinnedHere || protectedBy.length > 0;
+
+	// Does some other live path that depends on this one (transitively) keep
+	// it? Only asked when the answer matters and cheaper facts don't settle
+	// it: a walk up object_ref.child_id (indexed), bounded by the cache.
+	const now = Date.now();
+	const cutoffIso =
+		cache.retention_period != null
+			? new Date(retentionCutoff(now, cache.retention_period)).toISOString()
+			: null;
+	const selfFresh =
+		cutoffIso === null || (object.last_accessed_at ?? object.created_at) >= cutoffIso;
+	const needAncestors =
+		!isProtected && referrerCount > 0 && (object.detached_at !== null || !selfFresh);
+	const ancestorHit = needAncestors
+		? await db
+				.prepare(
+					`WITH RECURSIVE anc(id) AS (
+					   SELECT ?1
+					   UNION
+					   SELECT r.object_id FROM anc a JOIN object_ref r ON r.child_id = a.id
+					 )
+					 SELECT EXISTS (
+					   SELECT 1 FROM object o
+					    WHERE o.id IN (SELECT id FROM anc) AND o.id <> ?1
+					      AND o.detached_at IS NULL
+					      AND (?2 IS NULL OR COALESCE(o.last_accessed_at, o.created_at) >= ?2)
+					 ) AS hit`
+				)
+				// Detached: any live dependent keeps it. Otherwise: a fresh one.
+				.bind(object.id, object.detached_at !== null ? null : cutoffIso)
+				.first<{ hit: number }>()
+				.then((r) => Boolean(r?.hit))
+		: referrerCount === 0
+			? false
+			: null;
+
+	const retention = explainRetention({
+		now,
+		detachedAt: object.detached_at,
+		createdAt: object.created_at,
+		lastAccessedAt: object.last_accessed_at,
+		pinnedAs: { named: namedPins, quick: quickPin },
+		protectedBy,
+		referrers: referrerCount,
+		freshAncestor: object.detached_at === null ? ancestorHit : null,
+		liveAncestor: object.detached_at !== null ? ancestorHit : null,
+		retentionDays: cache.retention_period,
+		retentionMaxBytes: cache.retention_max_bytes,
+		globalMaxBytes: globalLimit ? Number(globalLimit.value) : null
+	});
+
 	// References with no object in this cache usually exist somewhere else:
 	// pushes skip paths an upstream already serves (get-missing-paths filters
 	// on cached verdicts), and closures can span caches. Resolve the gaps from
@@ -248,6 +348,9 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 
 	return {
 		cache: { name: cache.name },
+		retention,
+		// Pin/unpin post to the cache page's actions, which re-check 'cr'.
+		canPin: canOnCache(access, 'cr', cache.name),
 		object: {
 			hash: params.hash,
 			storePath: object.store_path,

@@ -3,7 +3,17 @@
 	import StorePathTable from '$lib/components/store-path-table.svelte';
 	import CopyField from '$lib/components/copy-field.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
-	import { ChevronDown, ChevronUp, Pin } from '@lucide/svelte';
+	import { enhance } from '$app/forms';
+	import { toastErrors } from '$lib/enhance';
+	import {
+		ChevronDown,
+		ChevronUp,
+		Info,
+		Pin,
+		PinOff,
+		ShieldCheck,
+		TriangleAlert
+	} from '@lucide/svelte';
 	import Page from '$lib/components/layout/page.svelte';
 	import Panel from '$lib/components/layout/panel.svelte';
 	import StatusBadge from '$lib/components/layout/status-badge.svelte';
@@ -82,6 +92,25 @@
 	}
 
 	const isPinned = $derived(data.pins.anonymous !== null || data.pins.named.length > 0);
+	const r = $derived(data.retention);
+	const reasonIcon = { protected: ShieldCheck, info: Info, warning: TriangleAlert } as const;
+	const reasonClass = {
+		protected: 'text-success',
+		info: 'text-muted-foreground',
+		warning: 'text-warning'
+	} as const;
+	let pinning = $state(false);
+	// The cache page's pin/unpin actions: pin adds a quick pin; unpin clears
+	// every gc_root row for the hash, so it's only offered for a quick pin —
+	// named pins (with revision history) are managed on the Pins tab.
+	const pinSubmit = () =>
+		toastErrors(() => {
+			pinning = true;
+			return async ({ update }) => {
+				await update();
+				pinning = false;
+			};
+		});
 	const cacheHref = $derived(`/caches/${encodeURIComponent(data.cache.name)}`);
 	// The 32-char store hash, shown muted beside the name.
 	const storeHash = $derived(/^\/nix\/store\/([0-9a-z]{32})-/.exec(o.storePath)?.[1] ?? '');
@@ -150,6 +179,45 @@
 			<CopyField text={o.storePath} label="Copy store path" />
 		</div>
 	</header>
+
+	<Panel title="Retention" class="mb-6">
+		{#snippet actions()}
+			<StatusBadge tone={r.status.tone} dot={r.status.tone !== 'neutral'}
+				>{r.status.label}</StatusBadge
+			>
+			{#if data.canPin}
+				{#if data.pins.named.length > 0}
+					<Button variant="ghost" size="sm" href="{cacheHref}/pins">Manage pins</Button>
+				{:else if data.pins.anonymous}
+					<form method="POST" action="{cacheHref}?/unpin" use:enhance={pinSubmit()}>
+						<input type="hidden" name="hash" value={o.hash} />
+						<Button type="submit" variant="outline" size="sm" disabled={pinning}>
+							<PinOff /> Unpin
+						</Button>
+					</form>
+				{:else}
+					<form method="POST" action="{cacheHref}?/pin" use:enhance={pinSubmit()}>
+						<input type="hidden" name="hash" value={o.hash} />
+						<Button type="submit" variant="outline" size="sm" disabled={pinning}>
+							<Pin /> Pin
+						</Button>
+					</form>
+				{/if}
+			{/if}
+		{/snippet}
+		<ul class="space-y-3.5">
+			{#each r.reasons as reason (reason.title)}
+				{@const Icon = reasonIcon[reason.tone]}
+				<li class="flex gap-3">
+					<Icon class="mt-0.5 size-4 shrink-0 {reasonClass[reason.tone]}" />
+					<div class="min-w-0">
+						<p class="text-sm font-medium">{reason.title}</p>
+						<p class="mt-0.5 text-sm text-muted-foreground">{reason.detail}</p>
+					</div>
+				</li>
+			{/each}
+		</ul>
+	</Panel>
 
 	<Panel title="Details" class="mb-10">
 		<dl class="grid gap-x-10 gap-y-4 text-sm sm:grid-cols-2">
