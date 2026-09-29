@@ -1,9 +1,10 @@
 import { error } from '@sveltejs/kit';
-import { PARAM_BATCH, readSession, STORE_PATH_HASH_RE, findCache } from '$lib/server/cache/db';
-import { syncObjectRefs } from '$lib/server/cache/gc';
+import { PARAM_BATCH, readSession, STORE_PATH_HASH_RE } from '$lib/server/cache/db';
+import { readGlobalMaxBytes, rootsProtecting, syncObjectRefs } from '$lib/server/cache/gc';
 import { canBrowseCache, canOnCache } from '$lib/server/auth/permissions';
 import { explainRetention, retentionCutoff } from '$lib/server/cache/retention-explain';
-import { effectiveAccessOf } from '$lib/server/auth/guard';
+import { requireCacheBrowse } from '$lib/server/cache/cache-page';
+import { splitStorePath } from '$lib/format';
 import type { PageServerLoad } from './$types';
 
 interface ObjectNarRow {
@@ -79,17 +80,10 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	}
 	const read = readSession(db);
 
-	const [cache, access] = await Promise.all([
-		findCache(read, params.name),
-		effectiveAccessOf(locals, db)
-	]);
-
-	if (!cache) throw error(404, `Cache "${params.name}" not found`);
 	// Same browse rule as the /paths explorer: public caches are viewable by
-	// any active user; private ones need a grant.
-	if (!canBrowseCache(access, { name: cache.name, isPublic: cache.is_public === 1 })) {
-		throw error(403, 'Permission denied');
-	}
+	// any active user; private ones need a grant. Shares the [name] layout's
+	// lookup, so it costs nothing extra.
+	const { cache, access } = await requireCacheBrowse(locals, db, params.name);
 
 	// References/referrers read object_ref, which is derived from object.refs
 	// by a watermark-incremental sync that otherwise only runs on the nightly
@@ -191,43 +185,16 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	const pinnedHere = quickPin || namedPins.length > 0;
 	const referrerCount = referrers.results[0]?.total ?? 0;
 
-	// Pinned paths whose closure contains this one: a forward walk from every
-	// gc_root in the cache, tagged by root. Bounded by the pinned closures —
-	// the same work the Pins tab does computing closure sizes. Skipped when
-	// the path is pinned itself, which already settles it.
-	const [protecting, globalLimit] = await Promise.all([
-		pinnedHere
-			? Promise.resolve([] as { hash: string; store_path: string; pin_name: string | null }[])
-			: db
-					.prepare(
-						`WITH RECURSIVE prot(root, id) AS (
-						   SELECT g.store_path_hash, o.id FROM gc_root g
-						     JOIN object o ON o.cache_id = g.cache_id AND o.store_path_hash = g.store_path_hash
-						    WHERE g.cache_id = ?1
-						   UNION
-						   SELECT p.root, r.child_id FROM prot p
-						     JOIN object_ref r ON r.object_id = p.id
-						    WHERE r.child_id IS NOT NULL
-						 )
-						 SELECT DISTINCT d.root AS hash, o.store_path, pn.name AS pin_name
-						 FROM (SELECT DISTINCT root FROM prot WHERE id = ?2) d
-						 JOIN object o ON o.cache_id = ?1 AND o.store_path_hash = d.root
-						 JOIN gc_root g ON g.cache_id = ?1 AND g.store_path_hash = d.root
-						 LEFT JOIN pin pn ON pn.id = g.pin_id`
-					)
-					.bind(cache.id, object.id)
-					.all<{ hash: string; store_path: string; pin_name: string | null }>()
-					.then((r) => r.results),
-		read
-			.prepare("SELECT value FROM server_config WHERE key = 'global_max_bytes'")
-			.first<{ value: string }>()
+	// Pinned paths whose closure contains this one. Skipped when the path is
+	// pinned itself, which already settles it.
+	const [protecting, globalMaxBytes] = await Promise.all([
+		pinnedHere ? [] : rootsProtecting(db, cache.id, object.id),
+		readGlobalMaxBytes(read)
 	]);
 	// One label per pin (a pin's revisions collapse to its name); quick pins
 	// are labeled by the pinned path's name.
 	const protectedBy = [
-		...new Set(
-			protecting.map((r) => r.pin_name ?? r.store_path.replace(/^\/nix\/store\/[0-9a-z]{32}-/, ''))
-		)
+		...new Set(protecting.map((r) => r.pin_name ?? splitStorePath(r.store_path).name))
 	].map((label) => ({ label }));
 	const isProtected = pinnedHere || protectedBy.length > 0;
 
@@ -278,7 +245,7 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		liveAncestor: object.detached_at !== null ? ancestorHit : null,
 		retentionDays: cache.retention_period,
 		retentionMaxBytes: cache.retention_max_bytes,
-		globalMaxBytes: globalLimit ? Number(globalLimit.value) : null
+		globalMaxBytes
 	});
 
 	// References with no object in this cache usually exist somewhere else:
@@ -328,7 +295,7 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		]);
 		for (const row of inCaches.results) {
 			if (elsewhere.has(row.hash)) continue;
-			if (!canBrowseCache(access, { name: row.cache_name, isPublic: row.is_public === 1 })) {
+			if (!canBrowseCache(access, { name: row.cache_name, isPublic: row.is_public !== 0 })) {
 				continue;
 			}
 			elsewhere.set(row.hash, {

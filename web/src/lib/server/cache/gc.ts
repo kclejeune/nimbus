@@ -559,6 +559,42 @@ export async function cacheSizes(db: D1, ids?: number[]): Promise<Map<number, nu
 	return new Map(results.map((r) => [r.cache_id, r.bytes]));
 }
 
+export interface ProtectingRoot {
+	hash: string;
+	store_path: string;
+	pin_name: string | null;
+}
+
+/**
+ * The gc_roots in this cache whose closure contains the object, one row per
+ * root (a named pin's revisions each appear, labeled with the pin's name).
+ * Walks *up* from the object via idx_object_ref_child, so the cost is this
+ * path's dependents — bounded by the cache — rather than every pinned
+ * closure times its revisions. A cache with no roots never walks.
+ */
+export async function rootsProtecting(
+	db: D1,
+	cacheId: number,
+	objectId: number
+): Promise<ProtectingRoot[]> {
+	const { results } = await db
+		.prepare(
+			`WITH RECURSIVE anc(id) AS (
+			   SELECT ?2 WHERE EXISTS (SELECT 1 FROM gc_root WHERE cache_id = ?1)
+			   UNION
+			   SELECT r.object_id FROM anc a JOIN object_ref r ON r.child_id = a.id
+			 )
+			 SELECT DISTINCT o.store_path_hash AS hash, o.store_path, pn.name AS pin_name
+			 FROM anc
+			 JOIN object o ON o.id = anc.id AND o.cache_id = ?1
+			 JOIN gc_root g ON g.cache_id = ?1 AND g.store_path_hash = o.store_path_hash
+			 LEFT JOIN pin pn ON pn.id = g.pin_id`
+		)
+		.bind(cacheId, objectId)
+		.all<ProtectingRoot>();
+	return results;
+}
+
 interface DoomedRow {
 	id: number;
 	store_path_hash: string;
