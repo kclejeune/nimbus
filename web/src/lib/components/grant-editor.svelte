@@ -48,7 +48,7 @@
 						<td>
 							{#if !isGlob(grant.pattern) && grant.matches > 0}
 								<a
-									href="/caches/{grant.pattern}/settings"
+									href="/caches/{grant.pattern}/access"
 									class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs underline-offset-4 hover:text-primary hover:underline"
 									>{grant.pattern}</a
 								>

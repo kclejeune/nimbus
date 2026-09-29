@@ -5,15 +5,8 @@ import {
 	destroyCache,
 	renameCache
 } from '$lib/server/cache/cache-config';
-import { listGcRoots } from '$lib/server/cache/gc';
-import {
-	canOnCache,
-	parseGrantActions,
-	partitionCacheGrants,
-	type CacheGrantRow
-} from '$lib/server/auth/permissions';
-import { decodeSubject, encodeSubject, insertGrant, removeGrantRow } from '$lib/server/auth/grants';
-import { effectiveAccessOf, requireAdmin, requireCachePermission } from '$lib/server/auth/guard';
+import { canOnCache } from '$lib/server/auth/permissions';
+import { effectiveAccessOf, requireCachePermission } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
 import { formatDuration } from '$lib/duration';
 import { gibFieldToBytes } from '$lib/format';
@@ -23,35 +16,9 @@ import {
 	listRegistry,
 	setCacheUpstreamModes
 } from '$lib/server/cache/upstream-registry';
-import {
-	addGcRoot,
-	GC_ROOT_NOTE_MAX_CHARS,
-	PIN_KEEP_REVISIONS_MAX,
-	PIN_NAME_RE,
-	removeGcRoot,
-	removePin,
-	STORE_PATH_HASH_RE,
-	upsertPin
-} from '$lib/server/cache/db';
 import { CACHE_NAME_HINT, CACHE_NAME_RE } from '$lib/utils';
+import { getCache } from '$lib/server/cache/cache-page';
 import type { PageServerLoad, Actions } from './$types';
-
-interface CacheRow {
-	id: number;
-	name: string;
-	is_public: number;
-	priority: number;
-	compression: string;
-	retention_period: number | null;
-	retention_max_bytes: number | null;
-}
-
-/** Accepts a full store path, `<hash>-name`, or a bare 32-char hash. */
-function parseStorePathHash(raw: string): string | null {
-	const base = raw.trim().split('/').pop() ?? '';
-	const hash = base.slice(0, 32).toLowerCase();
-	return STORE_PATH_HASH_RE.test(hash) ? hash : null;
-}
 
 /** The form's per-upstream mode selection: an override or 'inherit'. */
 function parseModeField(raw: FormDataEntryValue | null): UpstreamMode | 'inherit' | null {
@@ -60,35 +27,6 @@ function parseModeField(raw: FormDataEntryValue | null): UpstreamMode | 'inherit
 		return value;
 	}
 	return null;
-}
-
-/** Fetch rows by id when the caller has a specific id list (non-admin label
- *  lookups); avoids shipping whole tables for a handful of labels. */
-async function rowsByIds<T>(
-	db: App.Platform['env']['ATTIC_DB'],
-	selectSql: string,
-	ids: string[]
-): Promise<T[]> {
-	if (ids.length === 0) return [];
-	const placeholders = ids.map((_, i) => `?${i + 1}`).join(', ');
-	const { results } = await db
-		.prepare(`${selectSql} WHERE id IN (${placeholders})`)
-		.bind(...ids)
-		.all<T>();
-	return results;
-}
-
-async function getCache(db: App.Platform['env']['ATTIC_DB'], name: string): Promise<CacheRow> {
-	const cache = await db
-		.prepare(
-			`SELECT id, name, is_public, priority, compression, retention_period,
-			        retention_max_bytes
-			 FROM cache WHERE name = ?1 AND deleted_at IS NULL`
-		)
-		.bind(name)
-		.first<CacheRow>();
-	if (!cache) throw error(404, `Cache "${name}" not found`);
-	return cache;
 }
 
 export const load: PageServerLoad = async ({ platform, params, locals }) => {
@@ -105,69 +43,10 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	if (!canConfigure && !canDestroy) throw error(403, 'Permission denied');
 
 	const isAdmin = locals.user!.role === 'admin';
-	const [roots, registry, overrides, grantRows, adminUsers, adminGroups] = await Promise.all([
-		listGcRoots(env, cache.id),
+	const [registry, overrides] = await Promise.all([
 		listRegistry(env.ATTIC_DB),
-		cacheUpstreamOverrides(env.ATTIC_DB, cache.id),
-		// Only this cache's exact-name rows and glob rows can apply here (see
-		// partitionCacheGrants) — other caches' exact grants never match.
-		env.ATTIC_DB.prepare(
-			`SELECT id, subject_type, subject_id, pattern, actions FROM permission_grant
-			 WHERE pattern = ?1 OR pattern GLOB '*[*?]*'`
-		)
-			.bind(params.name)
-			.all<CacheGrantRow>(),
-		// Admins get the full lists (they also feed the add-access picker).
-		isAdmin
-			? env.ATTIC_DB.prepare('SELECT id, name, email FROM user ORDER BY name').all<{
-					id: string;
-					name: string;
-					email: string;
-				}>()
-			: null,
-		isAdmin
-			? env.ATTIC_DB.prepare('SELECT id, name FROM groups ORDER BY name').all<{
-					id: string;
-					name: string;
-				}>()
-			: null
+		cacheUpstreamOverrides(env.ATTIC_DB, cache.id)
 	]);
-
-	const { direct, viaPatterns } = partitionCacheGrants(grantRows.results, params.name);
-	const applicable = [...direct, ...viaPatterns];
-
-	// Emails are admin-only PII; non-admin viewers see display names, resolved
-	// only for the subjects that actually appear on this page.
-	const subjectIds = (type: string) => [
-		...new Set(applicable.filter((g) => g.subject_type === type).map((g) => g.subject_id))
-	];
-	const [users, groupRows] = isAdmin
-		? [adminUsers!.results, adminGroups!.results]
-		: await Promise.all([
-				rowsByIds<{ id: string; name: string; email: string }>(
-					env.ATTIC_DB,
-					'SELECT id, name, email FROM user',
-					subjectIds('user')
-				),
-				rowsByIds<{ id: string; name: string }>(
-					env.ATTIC_DB,
-					'SELECT id, name FROM groups',
-					subjectIds('group')
-				)
-			]);
-	const userLabel = new Map(users.map((u) => [u.id, isAdmin ? `${u.name} (${u.email})` : u.name]));
-	const groupLabel = new Map(groupRows.map((g) => [g.id, g.name]));
-	const subjectLabel = (g: CacheGrantRow) =>
-		(g.subject_type === 'user' ? userLabel.get(g.subject_id) : groupLabel.get(g.subject_id)) ??
-		g.subject_id;
-	const describe = (g: CacheGrantRow) => ({
-		id: g.id,
-		subjectType: g.subject_type,
-		subjectId: g.subject_id,
-		subjectLabel: subjectLabel(g),
-		pattern: g.pattern,
-		actions: g.actions
-	});
 
 	// One row per registry entry: the picker chooses this cache's mode
 	// (inherit/off/redirect/persist); trust fields are read-only here (the
@@ -192,27 +71,8 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 			retentionMaxBytes: cache.retention_max_bytes,
 			upstreams
 		},
-		roots,
 		permissions: { canConfigure, canDestroy },
-		isAdmin,
-		// Direct (exact-name, editable here) rows first, then read-only rows
-		// contributed by glob patterns.
-		access: [
-			...direct.map((g) => ({ ...describe(g), direct: true })),
-			...viaPatterns.map((g) => ({ ...describe(g), direct: false }))
-		],
-		subjects: isAdmin
-			? [
-					...users.map((u) => ({
-						value: encodeSubject('user', u.id),
-						label: `${u.name} (${u.email})`
-					})),
-					...groupRows.map((g) => ({
-						value: encodeSubject('group', g.id),
-						label: `${g.name} (group)`
-					}))
-				]
-			: []
+		isAdmin
 	};
 };
 
@@ -317,75 +177,6 @@ export const actions: Actions = {
 		return { saved: true };
 	},
 
-	addRoot: async ({ request, locals, platform, params }) => {
-		if (!locals.user) throw error(401, 'Not signed in');
-		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
-		const db = platform.env.ATTIC_DB;
-
-		await requireCachePermission(locals, db, 'cr', params.name, 'configure cache retention');
-
-		const form = await request.formData();
-		const hash = parseStorePathHash(String(form.get('path') ?? ''));
-		if (!hash) {
-			return fail(400, { rootError: 'Enter a store path or its 32-character hash.' });
-		}
-
-		const cache = await getCache(db, params.name);
-		const exists = await db
-			.prepare('SELECT 1 AS x FROM object WHERE cache_id = ?1 AND store_path_hash = ?2')
-			.bind(cache.id, hash)
-			.first();
-		if (!exists) {
-			return fail(400, { rootError: `No path with hash ${hash} in this cache.` });
-		}
-
-		const note = String(form.get('note') ?? '').trim() || null;
-		if (note && note.length > GC_ROOT_NOTE_MAX_CHARS) {
-			return fail(400, { rootError: `Notes are limited to ${GC_ROOT_NOTE_MAX_CHARS} characters.` });
-		}
-		const pinName = String(form.get('pin_name') ?? '').trim();
-		if (pinName) {
-			// Named pin: re-pinning the name adds a revision (cachix-style).
-			if (!PIN_NAME_RE.test(pinName)) {
-				return fail(400, { rootError: 'Pin names must have no whitespace (max 100 chars).' });
-			}
-			const keepRaw = String(form.get('keep_revisions') ?? '').trim();
-			const keep = keepRaw === '' ? undefined : Number(keepRaw);
-			if (
-				keep !== undefined &&
-				(!Number.isInteger(keep) || keep <= 0 || keep > PIN_KEEP_REVISIONS_MAX)
-			) {
-				return fail(400, {
-					rootError: `Keep revisions must be a whole number from 1 to ${PIN_KEEP_REVISIONS_MAX}.`
-				});
-			}
-			await upsertPin(db, cache.id, pinName, hash, { keepRevisions: keep, note });
-			return { rootAdded: true };
-		}
-		await addGcRoot(db, cache.id, hash, note);
-		return { rootAdded: true };
-	},
-
-	removeRoot: async ({ request, locals, platform, params }) => {
-		if (!locals.user) throw error(401, 'Not signed in');
-		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
-		const db = platform.env.ATTIC_DB;
-
-		await requireCachePermission(locals, db, 'cr', params.name, 'configure cache retention');
-
-		const form = await request.formData();
-		const cache = await getCache(db, params.name);
-		const pinName = String(form.get('pin') ?? '').trim();
-		if (pinName) {
-			// Removes the named pin and its whole revision history.
-			await removePin(db, cache.id, pinName);
-			return { rootRemoved: true };
-		}
-		const hash = String(form.get('hash') ?? '');
-		await removeGcRoot(db, cache.id, hash);
-		return { rootRemoved: true };
-	},
-
 	rename: async ({ request, locals, platform, params }) => {
 		if (!locals.user) throw error(401, 'Not signed in');
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
@@ -453,43 +244,5 @@ export const actions: Actions = {
 		});
 
 		redirect(303, '/caches');
-	},
-
-	accessAdd: async ({ request, locals, platform, params }) => {
-		requireAdmin(locals);
-		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
-		const db = platform.env.ATTIC_DB;
-
-		const form = await request.formData();
-		const subject = decodeSubject(String(form.get('subject') ?? ''));
-		if (!subject) return fail(400, { accessError: 'Pick a user or group.' });
-		const actions = parseGrantActions(form);
-		if (Object.keys(actions).length === 0) {
-			return fail(400, { accessError: 'Pick at least one permission.' });
-		}
-		await insertGrant(db, {
-			subjectType: subject.type,
-			subjectId: subject.id,
-			pattern: params.name,
-			actions,
-			actorId: locals.user!.id
-		});
-		return { accessSaved: true };
-	},
-
-	accessRemove: async ({ request, locals, platform }) => {
-		requireAdmin(locals);
-		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
-		const db = platform.env.ATTIC_DB;
-
-		const form = await request.formData();
-		const id = String(form.get('id') ?? '');
-		const subjectType = String(form.get('subject_type') ?? '');
-		const subjectId = String(form.get('subject_id') ?? '');
-		if (subjectType !== 'user' && subjectType !== 'group') {
-			return fail(400, { accessError: 'Invalid subject.' });
-		}
-		await removeGrantRow(db, id, subjectType, subjectId, locals.user!.id);
-		return { accessSaved: true };
 	}
 };

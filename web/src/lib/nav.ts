@@ -72,6 +72,14 @@ export function sectionTitle(pathname: string): string {
 	return hit?.title ?? 'Overview';
 }
 
+/** Per-cache tab segments under /caches/[name]. */
+const CACHE_TABS: Record<string, string> = {
+	connect: 'Connect',
+	pins: 'Pins',
+	access: 'Access',
+	settings: 'Settings'
+};
+
 export interface Crumb {
 	label: string;
 	href: string;
@@ -97,8 +105,8 @@ export function breadcrumbs(pathname: string, data: Record<string, unknown>): Cr
 		const prev = rest[i - 1];
 		if (section.url === '/caches' && i === 0) {
 			crumbs.push({ label: seg === 'new' ? 'New cache' : seg, href, mono: seg !== 'new' });
-		} else if (seg === 'settings') {
-			crumbs.push({ label: 'Settings', href });
+		} else if (section.url === '/caches' && CACHE_TABS[seg]) {
+			crumbs.push({ label: CACHE_TABS[seg], href });
 		} else if (seg === 'paths') {
 			// /caches/[name]/paths is an API endpoint, not a page: fold it into the next crumb.
 			return;

@@ -305,6 +305,7 @@ function mintSession(label, userId) {
 }
 const cookieValue = mintSession('nimbus-dev-seed-session', U.kennan.id);
 const memberCookieValue = mintSession('nimbus-dev-seed-member-session', U.marcus.id);
+const readerCookieValue = mintSession('nimbus-dev-seed-reader-session', U.tomas.id);
 const cookieName = appUrl.startsWith('https://')
 	? '__Secure-better-auth.session_token'
 	: 'better-auth.session_token';
@@ -1177,6 +1178,8 @@ console.log(`  ${cookieName}=${cookieValue}\n`);
 console.log(`  curl -b '${cookieName}=${cookieValue}' ${appUrl}/`);
 console.log(`\nMember (${U.marcus.name}, no admin role), for previewing role scoping:`);
 console.log(`  ${cookieName}=${memberCookieValue}`);
+console.log(`\nReader (${U.tomas.name}, pull-only everywhere):`);
+console.log(`  ${cookieName}=${readerCookieValue}`);
 console.log(
 	`\nIn a browser: open ${appUrl}, then in devtools run\n  document.cookie = "${cookieName}=${cookieValue}; path=/"\nand reload.`
 );

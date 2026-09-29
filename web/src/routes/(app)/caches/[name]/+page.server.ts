@@ -7,33 +7,9 @@ import {
 	countStorePaths
 } from '$lib/server/store-paths';
 import { detachClosure } from '$lib/server/cache/gc';
-import { allLiveUpstreams, upstreamsForCache } from '$lib/server/cache/missing-paths';
-import { getProxyKeypair } from '$lib/server/cache/proxy';
-import { extractPublicKey } from '$lib/server/attic/signing';
 import { canOnCache, canSeeCache } from '$lib/server/auth/permissions';
 import { effectiveAccessOf, requireCachePermission } from '$lib/server/auth/guard';
 import type { PageServerLoad, Actions } from './$types';
-
-interface CacheRow {
-	id: number;
-	name: string;
-	is_public: number;
-	priority: number;
-	compression: string;
-	retention_period: number | null;
-	retention_max_bytes: number | null;
-	store_dir: string;
-	keypair: string;
-}
-
-/** The Nix trusted-key form of the cache keypair, or null when malformed. */
-function derivePublicKey(keypair: string): string | null {
-	try {
-		return extractPublicKey(keypair);
-	} catch {
-		return null;
-	}
-}
 
 export const load: PageServerLoad = async ({ platform, params, url, locals }) => {
 	const db = platform?.env.ATTIC_DB;
@@ -45,13 +21,9 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 
 	const [cache, access] = await Promise.all([
 		db
-			.prepare(
-				`SELECT id, name, is_public, priority, compression, retention_period, retention_max_bytes,
-				        store_dir, keypair
-				 FROM cache WHERE name = ?1 AND deleted_at IS NULL`
-			)
+			.prepare('SELECT id, name FROM cache WHERE name = ?1 AND deleted_at IS NULL')
 			.bind(params.name)
-			.first<CacheRow>(),
+			.first<{ id: number; name: string }>(),
 		effectiveAccessOf(locals, db)
 	]);
 
@@ -66,47 +38,17 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 		canManage: canRetention || canOnCache(access, 'cd', params.name)
 	};
 
-	const cacheBase = (platform?.env.CACHE_BASE_URL ?? 'https://cache.kclj.io').replace(/\/$/, '');
-	const publicKey = derivePublicKey(cache.keypair);
-
-	const [{ paths, hasMore }, total, pinned, proxyPublicKey, cacheUpstreams, proxyUpstreams] =
-		await Promise.all([
-			queryStorePaths(db, params.name, { sort, dir, q, limit: PATHS_PAGE_SIZE, offset: 0 }),
-			countStorePaths(db, params.name, q),
-			db
-				.prepare('SELECT store_path_hash FROM gc_root WHERE cache_id = ?1')
-				.bind(cache.id)
-				.all<{ store_path_hash: string }>(),
-			getProxyKeypair(platform.env)
-				.then(extractPublicKey)
-				.catch(() => null),
-			upstreamsForCache(db, { id: cache.id, name: cache.name }),
-			allLiveUpstreams(db)
-		]);
-	const upstreamRef = (u: { url: string; publicKey: string | null; nixDefault: boolean }) => ({
-		url: u.url,
-		publicKey: u.publicKey,
-		nixDefault: u.nixDefault
-	});
+	const [{ paths, hasMore }, total, pinned] = await Promise.all([
+		queryStorePaths(db, params.name, { sort, dir, q, limit: PATHS_PAGE_SIZE, offset: 0 }),
+		countStorePaths(db, params.name, q),
+		db
+			.prepare('SELECT store_path_hash FROM gc_root WHERE cache_id = ?1')
+			.bind(cache.id)
+			.all<{ store_path_hash: string }>()
+	]);
 
 	return {
-		cache: {
-			name: cache.name,
-			isPublic: cache.is_public !== 0,
-			priority: cache.priority,
-			compression: cache.compression,
-			retentionDays: cache.retention_period,
-			retentionMaxBytes: cache.retention_max_bytes,
-			storeDir: cache.store_dir,
-			url: `${cacheBase}/${cache.name}`,
-			publicKey
-		},
-		// The nix.conf snippets carry these: keys always (redirect-tier paths
-		// keep their upstream signatures), URLs behind the checkbox.
-		upstreams: cacheUpstreams.map(upstreamRef),
-		proxy: proxyPublicKey
-			? { url: cacheBase, publicKey: proxyPublicKey, upstreams: proxyUpstreams.map(upstreamRef) }
-			: null,
+		cache: { name: cache.name },
 		viewer,
 		pinnedHashes: pinned.results.map((r) => r.store_path_hash),
 		paths,
