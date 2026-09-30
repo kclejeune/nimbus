@@ -135,6 +135,10 @@ describe('token filters', () => {
 		]);
 		const mine = await listUserTokens(db, 'ada', filters('status=expired', false));
 		expect(ids(mine)).toEqual(['old']);
+		const { tokens: either } = await listAllTokens(db, {
+			filters: filters('status=revoked&status=suspended')
+		});
+		expect(ids(either)).toEqual(['gone', 'held']);
 	});
 
 	it('filters by owner and by inclusive UTC date ranges', async () => {

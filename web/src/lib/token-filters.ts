@@ -18,7 +18,8 @@ export const TOKEN_STATUS_SQL = `CASE
 	ELSE 'active' END`;
 
 export interface TokenFilters {
-	status: TokenStatus | null;
+	/** Any of these statuses; empty for any. */
+	statuses: TokenStatus[];
 	/** Owner user ids (any of); empty for everyone. From the URL only in the
 	 *  everyone view; the own view sets it to the viewer. */
 	users: string[];
@@ -30,7 +31,7 @@ export interface TokenFilters {
 }
 
 export const NO_TOKEN_FILTERS: TokenFilters = {
-	status: null,
+	statuses: [],
 	users: [],
 	createdFrom: null,
 	createdTo: null,
@@ -39,7 +40,7 @@ export const NO_TOKEN_FILTERS: TokenFilters = {
 };
 
 const PARAMS = {
-	status: 'status',
+	statuses: 'status',
 	users: 'user',
 	createdFrom: 'created_from',
 	createdTo: 'created_to',
@@ -65,12 +66,12 @@ function parseDate(raw: string | null): string | null {
  *  Owner and 'suspended' only apply to the everyone view: in your own view
  *  every token is yours, and your account is active. */
 export function parseTokenFilters(params: URLSearchParams, everyone: boolean): TokenFilters {
-	const raw = params.get(PARAMS.status);
-	const status = (TOKEN_STATUSES as readonly string[]).includes(raw ?? '')
-		? (raw as TokenStatus)
-		: null;
+	const statuses = [...new Set(params.getAll(PARAMS.statuses))].filter(
+		(s): s is TokenStatus =>
+			(TOKEN_STATUSES as readonly string[]).includes(s) && (everyone || s !== 'suspended')
+	);
 	return {
-		status: status === 'suspended' && !everyone ? null : status,
+		statuses,
 		users: everyone
 			? [...new Set(params.getAll(PARAMS.users).map((u) => u.trim()))].filter(Boolean).slice(0, 50)
 			: [],
@@ -110,7 +111,11 @@ export function tokenWhere(
 	const binds: (string | number)[] = [nowSecs];
 	/** Bind a value and return its placeholder. */
 	const p = (v: string | number) => `?${binds.push(v)}`;
-	if (f.status) conditions.push(`${TOKEN_STATUS_SQL} = ${p(f.status)}`);
+	if (f.statuses.length) {
+		conditions.push(
+			`${TOKEN_STATUS_SQL} IN (SELECT value FROM json_each(${p(JSON.stringify(f.statuses))}))`
+		);
+	}
 	if (f.users.length) {
 		conditions.push(`t.user_id IN (SELECT value FROM json_each(${p(JSON.stringify(f.users))}))`);
 	}

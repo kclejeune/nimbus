@@ -6,8 +6,8 @@
 	import CopyField from '$lib/components/copy-field.svelte';
 	import TokenScopeFields from '$lib/components/token-scope-fields.svelte';
 	import TokenTable from '$lib/components/token-table.svelte';
-	import { Check, ChevronDown, Plus, TriangleAlert } from '@lucide/svelte';
-	import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
+	import { Plus, TriangleAlert } from '@lucide/svelte';
+	import FilterMenu from '$lib/components/filter-menu.svelte';
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import * as Sheet from '$lib/components/ui/sheet/index.js';
@@ -40,26 +40,6 @@
 		goto(href(1, patch, view), { replaceState: true, keepFocus: true, noScroll: true });
 	}
 
-	// Whose tokens: yours, everyone's, or any set of owners (the everyone
-	// view narrowed to them). Admins only; members can only see their own.
-	// Suspended only exists outside your own view, so it's dropped when
-	// switching back to it.
-	function pickMine() {
-		const status = data.filters.status === 'suspended' ? null : data.filters.status;
-		applyFilter({ users: [], status }, 'mine');
-	}
-	function toggleOwner(id: string, on: boolean) {
-		const current = data.view === 'all' ? data.filters.users : [];
-		applyFilter({ users: on ? [...current, id] : current.filter((u) => u !== id) }, 'all');
-	}
-	const ownerLabel = $derived.by(() => {
-		if (data.view === 'mine') return 'Mine';
-		const picked = data.filters.users;
-		if (picked.length === 0) return 'All owners';
-		if (picked.length > 1) return `${picked.length} owners`;
-		return ownerOptions.find((o) => o.id === picked[0])?.label ?? picked[0];
-	});
-
 	// A date input reports every valid intermediate value while a year is
 	// typed (0002, 0020, …), so dates apply once the input settles.
 	let dateTimer: ReturnType<typeof setTimeout>;
@@ -73,15 +53,41 @@
 	const statuses = $derived(
 		data.view === 'all' ? TOKEN_STATUSES : TOKEN_STATUSES.filter((s) => s !== 'suspended')
 	);
-	// An owner from a shared link who isn't in the list still gets an option,
-	// so the select reflects the active filter.
+
+	// Whose tokens: yours, everyone's, or any set of owners (the everyone
+	// view narrowed to them). Admins only; members can only see their own.
+	// Suspended only exists outside your own view, so it's dropped when
+	// switching back to it.
+	function pickMine() {
+		applyFilter(
+			{ users: [], statuses: data.filters.statuses.filter((x) => x !== 'suspended') },
+			'mine'
+		);
+	}
+	const ownerDisplay = $derived(data.view === 'mine' ? 'Mine' : undefined);
+	const ownerPresets = $derived([
+		{ label: 'Mine', active: data.view === 'mine', onselect: pickMine },
+		{
+			label: 'All owners',
+			active: data.view === 'all' && data.filters.users.length === 0,
+			onselect: () => applyFilter({ users: [] }, 'all')
+		}
+	]);
+	const statusOptions = $derived(
+		statuses.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))
+	);
+
 	// Every owner, you marked as such; an owner from a shared link who isn't
 	// listed still gets an entry, so the menu reflects the filter.
 	const ownerOptions = $derived([
-		...data.owners.map((o) => (o.id === data.user.id ? { ...o, label: `${o.label} (you)` } : o)),
+		...data.owners.map((o) => ({
+			value: o.id,
+			label: o.id === data.user.id ? `${o.label} (you)` : o.label,
+			group: 'Owners'
+		})),
 		...data.filters.users
 			.filter((u) => !data.owners.some((o) => o.id === u))
-			.map((u) => ({ id: u, label: u }))
+			.map((u) => ({ value: u, label: u, group: 'Owners' }))
 	]);
 </script>
 
@@ -144,62 +150,27 @@
 	<div class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
 		<!-- Two clusters that wrap whole: whose and what, then when. -->
 		<div class="flex flex-wrap items-center gap-2">
-			{#if data.isAdmin}
-				<DropdownMenu.Root>
-					<DropdownMenu.Trigger class="owner-trigger" aria-label="Whose tokens">
-						<span class="truncate">{ownerLabel}</span>
-						<ChevronDown class="size-4 shrink-0 opacity-60" />
-					</DropdownMenu.Trigger>
-					<DropdownMenu.Content align="start" class="w-56">
-						<DropdownMenu.Item onSelect={pickMine}>
-							Mine
-							{#if data.view === 'mine'}<Check class="ml-auto" />{/if}
-						</DropdownMenu.Item>
-						<DropdownMenu.Item onSelect={() => applyFilter({ users: [] }, 'all')}>
-							All owners
-							{#if data.view === 'all' && data.filters.users.length === 0}
-								<Check class="ml-auto" />
-							{/if}
-						</DropdownMenu.Item>
-						{#if ownerOptions.length}
-							<DropdownMenu.Separator />
-							<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">
-								Owners
-							</DropdownMenu.Label>
-							<div class="max-h-64 overflow-y-auto">
-								{#each ownerOptions as o (o.id)}
-									<DropdownMenu.CheckboxItem
-										closeOnSelect={false}
-										checked={data.view === 'all' && data.filters.users.includes(o.id)}
-										onCheckedChange={(on) => toggleOwner(o.id, on)}
-									>
-										<span class="truncate">{o.label}</span>
-									</DropdownMenu.CheckboxItem>
-								{/each}
-							</div>
-						{/if}
-					</DropdownMenu.Content>
-				</DropdownMenu.Root>
-			{:else}
-				<!-- Members only ever see their own tokens; shown so the toolbar
-				     reads the same for everyone. -->
-				<button type="button" class="owner-trigger" disabled aria-label="Whose tokens">
-					<span>Mine</span>
-					<ChevronDown class="size-4 shrink-0 opacity-60" />
-				</button>
-			{/if}
-			<select
-				aria-label="Filter by status"
-				class="native-select w-auto"
-				value={data.filters.status ?? ''}
-				onchange={(e) =>
-					applyFilter({ status: (e.currentTarget.value || null) as TokenStatus | null })}
-			>
-				<option value="">Any status</option>
-				{#each statuses as status (status)}
-					<option value={status}>{status[0].toUpperCase() + status.slice(1)}</option>
-				{/each}
-			</select>
+			<!-- Members only ever see their own tokens: the owner filter shows
+			     that, disabled, so the toolbar reads the same for everyone. -->
+			<FilterMenu
+				label="Whose tokens"
+				noun="owners"
+				allLabel="All owners"
+				options={ownerOptions}
+				selected={data.view === 'all' ? data.filters.users : []}
+				onchange={(users) => applyFilter({ users }, 'all')}
+				presets={ownerPresets}
+				display={ownerDisplay}
+				disabled={!data.isAdmin}
+			/>
+			<FilterMenu
+				label="Filter by status"
+				noun="statuses"
+				allLabel="Any status"
+				options={statusOptions}
+				selected={data.filters.statuses}
+				onchange={(picked) => applyFilter({ statuses: picked as TokenStatus[] })}
+			/>
 		</div>
 		<div class="flex w-full flex-wrap items-center gap-2 sm:w-auto">
 			{@render dateRange('Created', 'createdFrom', 'createdTo')}
@@ -300,29 +271,6 @@
 		font-variant-numeric: tabular-nums;
 		outline: none;
 		color: var(--foreground);
-	}
-	/* Looks like the toolbar's native selects, but opens a menu (owners are
-	   multi-select). */
-	:global(.owner-trigger) {
-		display: inline-flex;
-		height: 2rem;
-		max-width: 12rem;
-		align-items: center;
-		gap: 0.5rem;
-		border-radius: var(--radius-lg);
-		border: 1px solid var(--input);
-		background: var(--background);
-		padding: 0 0.5rem 0 0.625rem;
-		font-size: 0.875rem;
-		box-shadow: var(--shadow-panel);
-		transition: border-color 150ms;
-	}
-	:global(.owner-trigger:focus-visible) {
-		border-color: var(--ring);
-		outline: 3px solid color-mix(in oklab, var(--ring) 50%, transparent);
-	}
-	:global(.owner-trigger:disabled) {
-		opacity: 0.5;
 	}
 	@media (min-width: 40rem) {
 		.range-date {

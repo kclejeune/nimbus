@@ -11,44 +11,56 @@ import {
 const parse = (qs: string) => parseAuditFilters(new URLSearchParams(qs));
 
 describe('parseAuditFilters', () => {
-	it('reads user, action and q', () => {
-		expect(parse('user=u1&action=cache.create&q=%20main%20')).toEqual({
-			user: 'u1',
-			action: 'cache.create',
+	it('reads users, actions and q, deduplicated', () => {
+		expect(parse('user=u1&user=u2&user=u1&action=cache.create&q=%20main%20')).toEqual({
+			users: ['u1', 'u2'],
+			actions: ['cache.create'],
 			q: 'main'
 		});
 	});
 
 	it('accepts families and drops malformed actions', () => {
-		expect(parse('action=token.*').action).toBe('token.*');
-		expect(parse("action=cache.create' OR 1=1").action).toBeNull();
-		expect(parse('action=%25').action).toBeNull();
+		expect(parse('action=token.*&action=cache.create').actions).toEqual([
+			'token.*',
+			'cache.create'
+		]);
+		expect(parse("action=cache.create' OR 1=1").actions).toEqual([]);
+		expect(parse('action=%25').actions).toEqual([]);
 	});
 
 	it('treats empty params as no filter', () => {
 		const f = parse('user=&action=&q=');
-		expect(f).toEqual({ user: null, action: null, q: '' });
+		expect(f).toEqual({ users: [], actions: [], q: '' });
 		expect(hasFilters(f)).toBe(false);
 	});
 });
 
 describe('auditWhere', () => {
 	it('is empty without filters', () => {
-		expect(auditWhere({ user: null, action: null, q: '' })).toEqual({ sql: '', binds: [] });
+		expect(auditWhere({ users: [], actions: [], q: '' })).toEqual({ sql: '', binds: [] });
 	});
 
 	it('binds every value and escapes LIKE wildcards', () => {
-		const { sql, binds } = auditWhere({ user: 'u1', action: 'cache.*', q: '50%_off' });
+		const { sql, binds } = auditWhere({ users: ['u1'], actions: ['cache.*'], q: '50%_off' });
 		expect(sql).toBe(
-			"WHERE a.user_id = ? AND a.action LIKE ? ESCAPE '\\' AND (a.target LIKE ? ESCAPE '\\' OR a.detail LIKE ? ESCAPE '\\')"
+			"WHERE a.user_id IN (SELECT value FROM json_each(?)) AND a.action LIKE ? ESCAPE '\\' AND (a.target LIKE ? ESCAPE '\\' OR a.detail LIKE ? ESCAPE '\\')"
 		);
-		expect(binds).toEqual(['u1', 'cache.%', '%50\\%\\_off%', '%50\\%\\_off%']);
+		expect(binds).toEqual(['["u1"]', 'cache.%', '%50\\%\\_off%', '%50\\%\\_off%']);
 	});
 
 	it('matches system entries by a null user and exact actions by equality', () => {
-		expect(auditWhere({ user: SYSTEM_USER, action: 'gc.trigger', q: '' })).toEqual({
+		expect(auditWhere({ users: [SYSTEM_USER], actions: ['gc.trigger'], q: '' })).toEqual({
 			sql: 'WHERE a.user_id IS NULL AND a.action = ?',
 			binds: ['gc.trigger']
+		});
+	});
+
+	it('ORs several users (system included) and several actions', () => {
+		expect(
+			auditWhere({ users: ['u1', SYSTEM_USER], actions: ['gc.trigger', 'token.*'], q: '' })
+		).toEqual({
+			sql: "WHERE (a.user_id IN (SELECT value FROM json_each(?)) OR a.user_id IS NULL) AND (a.action = ? OR a.action LIKE ? ESCAPE '\\')",
+			binds: ['["u1"]', 'gc.trigger', 'token.%']
 		});
 	});
 });

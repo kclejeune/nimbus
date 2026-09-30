@@ -3,7 +3,7 @@
 	import StorePathTable from '$lib/components/store-path-table.svelte';
 	import { goto } from '$app/navigation';
 	import { Button } from '$lib/components/ui/button/index.js';
-	import * as Select from '$lib/components/ui/select/index.js';
+	import FilterMenu from '$lib/components/filter-menu.svelte';
 	import { FolderSearch, Search } from '@lucide/svelte';
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
@@ -15,25 +15,18 @@
 	const first = $derived((data.page - 1) * data.pageSize + 1);
 	const last = $derived(first + data.paths.length - 1);
 
-	// Sentinel for "no cache filter": bits-ui treats '' as no selection, and a
-	// '/' can never appear in a cache name so this cannot collide.
-	const ALL = '//all';
-	const selectedCache = $derived(data.cacheFilter ?? ALL);
-
 	/** Query string for the current filters; page omitted when 1. */
-	function href(next: { cache?: string | null; q?: string; page?: number }): string {
-		const cache = next.cache !== undefined ? next.cache : data.cacheFilter;
-		const q = next.q ?? data.q;
-		const page = next.page ?? 1;
+	function href(next: { caches?: string[]; q?: string; page?: number }): string {
 		const params = new URLSearchParams();
-		if (cache) params.set('cache', cache);
+		for (const c of next.caches ?? data.cacheFilter) params.append('cache', c);
+		const q = next.q ?? data.q;
 		if (q) params.set('q', q);
-		if (page > 1) params.set('page', String(page));
+		if ((next.page ?? 1) > 1) params.set('page', String(next.page));
 		const qs = params.toString();
 		return qs ? `?${qs}` : '?';
 	}
 
-	function applyFilters(next: { cache?: string | null; q?: string }) {
+	function applyFilters(next: { caches?: string[]; q?: string }) {
 		// Any filter change resets to page 1 — the old offset is meaningless.
 		goto(href(next), { replaceState: true, keepFocus: true, noScroll: true });
 	}
@@ -50,27 +43,14 @@
 	<PageHeader title="Paths" description="All caches you can read, newest first." />
 
 	<div class="mb-3 flex flex-wrap items-center gap-3">
-		<Select.Root
-			type="single"
-			value={selectedCache}
-			onValueChange={(v) => applyFilters({ cache: v === ALL ? null : v })}
-		>
-			<Select.Trigger
-				size="default"
-				class="w-48 bg-background shadow-(--shadow-panel)"
-				aria-label="Filter by cache"
-			>
-				<span data-slot="select-value" class={data.cacheFilter ? 'font-mono text-[0.8125rem]' : ''}>
-					{data.cacheFilter ?? 'All caches'}
-				</span>
-			</Select.Trigger>
-			<Select.Content>
-				<Select.Item value={ALL}>All caches</Select.Item>
-				{#each data.caches as name (name)}
-					<Select.Item value={name} class="font-mono text-[0.8125rem]">{name}</Select.Item>
-				{/each}
-			</Select.Content>
-		</Select.Root>
+		<FilterMenu
+			label="Filter by cache"
+			noun="caches"
+			allLabel="All caches"
+			options={data.caches.map((name) => ({ value: name, label: name, mono: true }))}
+			selected={data.cacheFilter}
+			onchange={(caches) => applyFilters({ caches })}
+		/>
 		<SearchInput value={data.q} oninput={onSearchInput} aria-label="Filter paths by name" />
 		<span class="ms-auto text-sm whitespace-nowrap text-muted-foreground tabular-nums">
 			{formatCount(data.total)}{data.q ? ' matching' : ' paths'}
@@ -80,7 +60,11 @@
 	{#if data.total === 0 && !data.q}
 		<EmptyState
 			icon={FolderSearch}
-			title={data.cacheFilter ? 'This cache is empty' : 'No paths yet'}
+			title={data.cacheFilter.length === 1
+				? 'This cache is empty'
+				: data.cacheFilter.length
+					? 'These caches are empty'
+					: 'No paths yet'}
 			description="Push with the nimbus CLI or attic."
 		/>
 	{:else}

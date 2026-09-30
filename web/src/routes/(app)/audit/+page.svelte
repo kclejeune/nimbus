@@ -7,6 +7,7 @@
 	import { fitPageSize } from './page-size';
 	import { ScrollText, SearchX } from '@lucide/svelte';
 	import SearchInput from '$lib/components/layout/search-input.svelte';
+	import FilterMenu from '$lib/components/filter-menu.svelte';
 	import { SYSTEM_USER } from '$lib/audit-filters';
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
@@ -17,7 +18,7 @@
 	const first = $derived((data.page - 1) * data.pageSize + 1);
 	const last = $derived(first + data.entries.length - 1);
 
-	type FilterPatch = Partial<{ user: string | null; action: string | null; q: string }>;
+	type FilterPatch = Partial<{ users: string[]; actions: string[]; q: string }>;
 
 	/** Query string for a page/limit pair under the current filters (optionally
 	 *  patched); limit is always explicit so pagination never drifts back to the
@@ -25,8 +26,8 @@
 	function href(page: number, limit: number, patch: FilterPatch = {}): string {
 		const f = { ...data.filters, ...patch };
 		const params = new URLSearchParams();
-		if (f.user) params.set('user', f.user);
-		if (f.action) params.set('action', f.action);
+		for (const u of f.users) params.append('user', u);
+		for (const a of f.actions) params.append('action', a);
 		if (f.q) params.set('q', f.q);
 		if (page > 1) params.set('page', String(page));
 		params.set('limit', String(limit));
@@ -46,15 +47,25 @@
 		debounce = setTimeout(() => applyFilter({ q: v }), 300);
 	}
 
-	// A user id from a shared link that isn't in the actor list still gets a
-	// selectable option, so the select reflects the active filter.
-	const actorOptions = $derived(
-		data.filters.user &&
-			data.filters.user !== SYSTEM_USER &&
-			!data.actors.some((a) => a.id === data.filters.user)
-			? [...data.actors, { id: data.filters.user, label: data.filters.user }]
-			: data.actors
+	// System first, then everyone who has acted; a user id from a shared link
+	// that isn't in the actor list still gets an entry, so the menu reflects
+	// the active filter.
+	const userOptions = $derived([
+		{ value: SYSTEM_USER, label: 'System' },
+		...data.actors.map((a) => ({ value: a.id, label: a.label, group: 'Users' })),
+		...data.filters.users
+			.filter((u) => u !== SYSTEM_USER && !data.actors.some((a) => a.id === u))
+			.map((u) => ({ value: u, label: u, group: 'Users' }))
+	]);
+	// A family entry (`cache.*`) heads each group; picking it covers the
+	// family, picking single actions narrows to those.
+	const actionOptions = $derived(
+		data.actionGroups.flatMap((g) => [
+			{ value: `${g.family}.*`, label: `All ${g.family} actions`, group: g.family },
+			...g.actions.map((a) => ({ value: a, label: a, group: g.family, mono: true }))
+		])
 	);
+	const noFilters = { users: [], actions: [], q: '' };
 
 	// Viewport-fit default: on first load without an explicit ?limit, pick the
 	// largest allowed page size whose rows fit below the table's top edge and
@@ -82,34 +93,22 @@
 
 	{#if data.total > 0 || data.filtered}
 		<div class="mb-4 flex flex-wrap items-center gap-2">
-			<select
-				aria-label="Filter by user"
-				class="native-select w-48"
-				value={data.filters.user ?? ''}
-				onchange={(e) => applyFilter({ user: e.currentTarget.value || null })}
-			>
-				<option value="">Everyone</option>
-				<option value={SYSTEM_USER}>System</option>
-				{#each actorOptions as actor (actor.id)}
-					<option value={actor.id}>{actor.label}</option>
-				{/each}
-			</select>
-			<select
-				aria-label="Filter by action"
-				class="native-select w-52"
-				value={data.filters.action ?? ''}
-				onchange={(e) => applyFilter({ action: e.currentTarget.value || null })}
-			>
-				<option value="">All actions</option>
-				{#each data.actionGroups as group (group.family)}
-					<optgroup label={group.family}>
-						<option value="{group.family}.*">All {group.family} actions</option>
-						{#each group.actions as action (action)}
-							<option value={action}>{action}</option>
-						{/each}
-					</optgroup>
-				{/each}
-			</select>
+			<FilterMenu
+				label="Filter by user"
+				noun="users"
+				allLabel="Everyone"
+				options={userOptions}
+				selected={data.filters.users}
+				onchange={(users) => applyFilter({ users })}
+			/>
+			<FilterMenu
+				label="Filter by action"
+				noun="actions"
+				allLabel="All actions"
+				options={actionOptions}
+				selected={data.filters.actions}
+				onchange={(actions) => applyFilter({ actions })}
+			/>
 			<SearchInput
 				value={data.filters.q}
 				oninput={onSearchInput}
@@ -120,7 +119,7 @@
 				<Button
 					variant="ghost"
 					size="sm"
-					href={href(1, data.pageSize, { user: null, action: null, q: '' })}
+					href={href(1, data.pageSize, noFilters)}
 					data-sveltekit-noscroll
 				>
 					Clear filters
@@ -132,10 +131,8 @@
 	{#if data.total === 0 && data.filtered}
 		<EmptyState icon={SearchX} title="No entries match">
 			{#snippet action()}
-				<Button
-					variant="outline"
-					href={href(1, data.pageSize, { user: null, action: null, q: '' })}
-					data-sveltekit-noscroll>Clear filters</Button
+				<Button variant="outline" href={href(1, data.pageSize, noFilters)} data-sveltekit-noscroll
+					>Clear filters</Button
 				>
 			{/snippet}
 		</EmptyState>

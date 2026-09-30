@@ -27,12 +27,13 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 
 	const { caches: inScope } = await browsableCaches(locals, db, read);
 
-	// A cache filter naming anything outside the scope — private without
-	// access or plain nonexistent — is indistinguishable from "no such cache".
-	const cacheFilter = url.searchParams.get('cache');
-	const selected = cacheFilter ? inScope.filter((c) => c.name === cacheFilter) : inScope;
-	if (cacheFilter && selected.length === 0) {
-		throw error(404, `Cache "${cacheFilter}" not found`);
+	// Any number of caches (?cache= repeats). Names outside the scope —
+	// private without access or plain nonexistent — are indistinguishable
+	// from "no such cache": dropped, or a 404 when none are left.
+	const requested = new Set(url.searchParams.getAll('cache'));
+	const selected = requested.size ? inScope.filter((c) => requested.has(c.name)) : inScope;
+	if (requested.size && selected.length === 0) {
+		throw error(404, `Cache "${[...requested][0]}" not found`);
 	}
 
 	const q = (url.searchParams.get('q') ?? '').trim();
@@ -71,7 +72,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 
 	return {
 		caches: cacheNames,
-		cacheFilter: cacheFilter ?? null,
+		cacheFilter: requested.size ? selected.map((c) => c.name) : [],
 		q,
 		page,
 		pageSize: PAGE_SIZE,
