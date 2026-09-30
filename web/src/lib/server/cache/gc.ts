@@ -409,8 +409,8 @@ export async function syncObjectRefs(db: D1, stats?: GcStats): Promise<void> {
 			// Objects in this window may be the missing children of older
 			// dangling edges (pushes arrive in any order). Driven from the
 			// window's objects through idx_object_ref_ref_hash: scanning every
-			// dangling edge instead read 1.5M rows per window on prod, where
-			// most edges dangle for good (upstream-served references). The
+			// dangling edge reads 1.5M rows per window on prod, where most
+			// edges dangle for good (upstream-served references). The
 			// unary + keeps the planner off idx_object_ref_child for the NULL
 			// test, which would be that same scan.
 			db

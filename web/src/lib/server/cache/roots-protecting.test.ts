@@ -5,9 +5,9 @@ vi.mock('./compression', async () => (await import('./test-db')).fakeCompression
 
 import { rootsProtecting, type ProtectingRoot } from './gc';
 
-// The path page's previous formulation: a forward walk from every gc_root in
-// the cache, tagged by root. rootsProtecting walks up instead; on any graph
-// the two must name the same roots.
+// Reference oracle: a forward walk from every gc_root in the cache, tagged by
+// root. rootsProtecting walks up instead; on any graph the two must name the
+// same roots.
 const FORWARD_SQL = `WITH RECURSIVE prot(root, id) AS (
    SELECT g.store_path_hash, o.id FROM gc_root g
      JOIN object o ON o.cache_id = g.cache_id AND o.store_path_hash = g.store_path_hash

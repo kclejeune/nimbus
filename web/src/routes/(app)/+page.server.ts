@@ -71,18 +71,15 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 	// new member on a busy instance still needs to sign in and push themselves.
 	const writable = inScope.filter((c) => canOnCache(access, 'w', c.name));
 
-	// Recent pushes and budget usage are scoped to caches this viewer can
-	// browse.
 	const [recent, budgetBytes, pushed] = await Promise.all([
 		newestAcrossCaches(read, ids, 6),
 		// Same accounting (and memo) as /caches; skipped with no budget to check.
 		budgeted.length === 0 ? new Map<number, number>() : cacheSizes(read),
-		// created_by is the pushing token's subject (the user id). Unindexed,
-		// so a viewer who never pushed scans every object in their writable
-		// caches — skipped when they hold no token, since then the push step
-		// can't be next anyway, and remembered: a yes for a day (it doesn't
-		// go back), a no for a minute. (An index would bill a row per pushed
-		// path to save this; not worth it.)
+		// created_by (the pushing token's user id) is unindexed, so a viewer who
+		// never pushed scans every object in their writable caches. Skipped
+		// without a token (the push step can't be next) and memoized: a yes for
+		// a day (it doesn't go back), a no for a minute. An index would bill a
+		// row per pushed path to save this.
 		writable.length === 0 || tokens.length === 0
 			? false
 			: hasPushed.get(

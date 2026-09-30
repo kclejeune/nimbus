@@ -103,8 +103,8 @@ async function queryTokens(
 	};
 }
 
-/** A user's issued tokens, presented for the token table (own-tokens page,
- *  the admin view on the user detail page, and the CLI's token list). */
+/** A user's issued tokens, presented for the token table (the dashboard, the
+ *  admin view on the user detail page, and the CLI's token list). */
 export async function listUserTokens(
 	db: D1Database,
 	userId: string,

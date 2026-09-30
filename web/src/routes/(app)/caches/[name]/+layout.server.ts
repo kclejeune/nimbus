@@ -22,7 +22,6 @@ export const load: LayoutServerLoad = async ({ platform, params, locals }) => {
 			retentionDays: cache.retention_period,
 			retentionMaxBytes: cache.retention_max_bytes
 		},
-		// Pins, Access and Settings are management surfaces, as before.
 		cacheViewer: cacheViewer(access, params.name)
 	};
 };

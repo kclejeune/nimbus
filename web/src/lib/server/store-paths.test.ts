@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mulberry32, testDatabase } from './cache/test-db';
 import { countAcrossCaches, newestAcrossCaches } from './store-paths';
 
-// What newestAcrossCaches replaced: sort the whole scope, then page.
+// Reference oracle: sort the whole scope, then page.
 const NAIVE_SQL = `SELECT o.store_path, o.store_path_hash, o.created_at, n.nar_size, c.name AS cache_name
  FROM object o
  JOIN cache c ON c.id = o.cache_id

@@ -52,11 +52,10 @@
 	--sidebar-ring: oklch(0.52 0.155 264);
 	--shadow-panel: 0 1px 2px oklch(0.3 0.03 264 / 0.05);
 	--shadow-sheet: 0 1px 3px oklch(0.3 0.03 264 / 0.06), 0 0 0 1px oklch(0.3 0.03 264 / 0.06);
-	/* Data-viz roles, validated with the dataviz skill's checker against the
-	   card surface (#fff): categorical slots in fixed order (identity), and a
-	   one-hue ordinal ramp for ordered series (p50 < p95 < p99). Status
-	   colors stay --success / --warning / --destructive and never stand in
-	   for a series. */
+	/* Data-viz roles, contrast-checked against the card surface (#fff):
+	   categorical slots in fixed order (identity), and a one-hue ordinal ramp
+	   for ordered series (p50 < p95 < p99). Status colors stay --success /
+	   --warning / --destructive and never stand in for a series. */
 	--viz-1: #3963c1;
 	--viz-2: #eb6834;
 	--viz-3: #1baf7a;

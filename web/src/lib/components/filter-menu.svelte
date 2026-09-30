@@ -56,7 +56,7 @@
 		selected.length === 1 && (shown.find((o) => o.value === selected[0])?.mono ?? false)
 	);
 
-	// Groups in first-seen order; ungrouped options come first.
+	// Groups in first-seen order; ungrouped options form the unlabeled '' group.
 	const groups = $derived.by(() => {
 		const out = new Map<string, FilterOption[]>();
 		for (const o of shown) out.set(o.group ?? '', [...(out.get(o.group ?? '') ?? []), o]);

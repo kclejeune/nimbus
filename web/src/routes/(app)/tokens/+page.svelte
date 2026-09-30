@@ -61,8 +61,7 @@
 		statuses.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))
 	);
 
-	// Whose tokens: you (the default), everyone (none picked), or any set of
-	// owners. Admins only; a member's menu shows "Mine", disabled.
+	// Whose tokens: you (the default), everyone (none picked), or any set of owners.
 	const ownerOptions = $derived([
 		{ value: data.user.id, label: 'Mine' },
 		...data.owners

@@ -15,8 +15,7 @@
 
 	let { data, form } = $props();
 	const u = $derived(data.subject);
-	// Viewer identity comes from the (app) layout's `user`; the load already
-	// sent members to /account, so the viewer is an admin.
+	// `data.user` is the viewer (from the (app) layout); members were redirected to /account.
 	const isSelf = $derived(u.id === data.user.id);
 </script>
 

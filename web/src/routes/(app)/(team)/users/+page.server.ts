@@ -29,8 +29,7 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 
 	return {
 		currentUserId: locals.user!.id,
-		// The last remaining owner is undeletable/undemotable; the UI uses this to
-		// gray out the relevant controls.
+		// The last remaining owner is undeletable/undemotable; the UI grays out those controls.
 		lastOwner: owners <= 1,
 		users: results.map((u) => ({
 			id: u.id,

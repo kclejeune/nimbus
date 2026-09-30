@@ -54,8 +54,6 @@
 	}
 </script>
 
-<!-- Stats sit in one ruled grid per section (gap-px over the border color draws
-     the dividers) rather than a field of separate cards. -->
 {#snippet chartPanel(title: string, total: string)}
 	<div class="mb-4 flex items-baseline justify-between gap-3">
 		<h3 class="text-[0.9375rem] font-semibold">{title}</h3>

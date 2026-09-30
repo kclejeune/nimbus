@@ -1,10 +1,10 @@
-// Ingest series for the dashboard charts: store paths pushed and the stored
+// Ingest series for the Usage page's storage history: store paths pushed and the stored
 // (compressed, chunk-summed) bytes behind them, bucketed by push date.
 //
 // The byte sum has to walk object → nar → chunkref → chunk, which yields one
 // row per *chunk*. Paths are therefore counted as DISTINCT object ids — a plain
-// COUNT(*) counts a chunked NAR (≥ 100 MiB, cut into many chunks) once per
-// chunk and inflated the path series many times over.
+// COUNT(*) would count a chunked NAR (≥ 100 MiB, cut into many chunks) once
+// per chunk.
 //
 // That walk over the whole store is too heavy per page view, so nightly GC
 // rolls it up per day into ingest_day, covering everything created before
@@ -89,8 +89,7 @@ export async function ingestBaseline(
 /**
  * Rebuild the rollup through the end of yesterday (UTC), atomically with its
  * bound. Nightly, from GC on the primary: it measures the store as the sweep
- * left it, so paths reaped since the previous run drop out of the history
- * just as they did from the old per-view aggregate. Writes ~one row per day
+ * left it, so reaped paths drop out of the history. Writes ~one row per day
  * of history (no secondary index), which is why this is a whole rebuild
  * rather than incremental bookkeeping on the push path.
  */

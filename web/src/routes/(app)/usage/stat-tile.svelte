@@ -15,7 +15,7 @@
 	} = $props();
 </script>
 
-<!-- A tile in the page's gap-px stat grids. -->
+<!-- A tile in the page's stat grids, where gap-px over bg-border draws the dividers. -->
 <div class="bg-card px-5 py-4">
 	<div class="flex items-center gap-1.5 text-xs text-muted-foreground">
 		{label}

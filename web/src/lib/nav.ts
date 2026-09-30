@@ -1,7 +1,7 @@
 import { displayName, splitStorePath } from '$lib/format';
 // Single source of truth for the app's top-level sections. The sidebar
-// renders these and the header derives the current page title from the same
-// list, so a section can't be navigable but titled "Overview" (or vice versa).
+// renders these and the header derives its breadcrumbs from the same list, so
+// a section can't be navigable but crumbed as "Overview" (or vice versa).
 import {
 	Boxes,
 	ChartLine,
@@ -58,9 +58,9 @@ export const NAV_GROUPS: NavGroup[] = [
 	}
 ];
 
-// Sections reachable only from the user menu still need a header title.
+// Sections reachable only from the user menu still need a breadcrumb.
 // (Role-hidden sidebar items need no entry: sections match every nav item
-// regardless of adminOnly, so /users/[id] still titles as "Team".)
+// regardless of adminOnly, so /users/[id] crumbs under "Team".)
 const EXTRA_SECTIONS: { title: string; url: string; match?: string[] }[] = [
 	{ title: 'Profile', url: '/account' }
 ];
@@ -76,13 +76,13 @@ export function inSection(pathname: string, item: { url: string; match?: string[
 	return [item.url, ...(item.match ?? [])].some((prefix) => under(pathname, prefix));
 }
 
-/** The section owning `pathname`; subpages inherit their section's. */
 /** Whether two URL paths name the same page, however each is encoded
  *  (a typed `+` vs a link's `%2B`). */
 export function samePath(a: string, b: string): boolean {
 	return decodeURIComponent(a) === decodeURIComponent(b);
 }
 
+/** The section owning `pathname`; subpages inherit their section's. */
 function sectionFor(pathname: string) {
 	return ALL_SECTIONS.find((item) => item.url !== '/' && inSection(pathname, item));
 }

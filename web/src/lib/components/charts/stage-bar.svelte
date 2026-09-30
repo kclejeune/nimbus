@@ -17,7 +17,7 @@
 	let { stages, total }: { stages: Record<string, number>; total: number } = $props();
 
 	// Stages overlap (a store lookup includes its own D1 time), so segments are
-	// shares of their sum rather than of the mean; the title says so.
+	// shares of their sum rather than of the mean.
 	const entries = $derived(
 		Object.entries(STAGE_STYLE)
 			.map(([k, s]) => ({ key: k, ...s, ms: stages[k] ?? 0 }))

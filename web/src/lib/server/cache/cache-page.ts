@@ -1,6 +1,6 @@
-// Shared by the per-cache admin routes (/caches/[name]/…): the cache row
-// lookup, the browse/manage guards, and form-field parsing their loads and
-// actions have in common.
+// Shared by the per-cache routes (/caches/[name]/…) and the cross-cache read
+// surfaces: the cache row lookup, the browse/manage guards, the browsable
+// scope, store-path parsing, and the JSON-array `IN` helpers.
 import { error } from '@sveltejs/kit';
 import { findCache, STORE_PATH_HASH_RE, type CacheRow } from '$lib/server/cache/db';
 import { canBrowseCache, canOnCache, type EffectiveAccess } from '$lib/server/auth/permissions';
