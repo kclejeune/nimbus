@@ -23,16 +23,35 @@
 	let sheetOpen = $state(false);
 
 	/** This view's URL with the filters (optionally patched) and a page. */
-	function href(page: number, patch: Partial<TokenFilters> = {}): string {
+	function href(
+		page: number,
+		patch: Partial<TokenFilters> = {},
+		view: 'mine' | 'all' = data.view
+	): string {
 		const params = tokenFilterParams({ ...data.filters, ...patch });
-		if (data.view === 'all') params.set('view', 'all');
+		if (view === 'all') params.set('view', 'all');
 		if (page > 1) params.set('page', String(page));
 		return `?${params}`;
 	}
 
 	/** A filter change starts over at page 1. */
-	function applyFilter(patch: Partial<TokenFilters>) {
-		goto(href(1, patch), { replaceState: true, keepFocus: true, noScroll: true });
+	function applyFilter(patch: Partial<TokenFilters>, view: 'mine' | 'all' = data.view) {
+		goto(href(1, patch, view), { replaceState: true, keepFocus: true, noScroll: true });
+	}
+
+	// Admins pick whose tokens from one select: yours, everyone's, or one
+	// user's (the everyone view narrowed to them). Suspended only exists
+	// outside your own view, so it's dropped when switching back to it.
+	const owner = $derived(
+		data.view === 'mine' || data.filters.user === data.user.id
+			? 'mine'
+			: (data.filters.user ?? 'all')
+	);
+	function pickOwner(value: string) {
+		if (value === 'mine') {
+			const status = data.filters.status === 'suspended' ? null : data.filters.status;
+			applyFilter({ user: null, status }, 'mine');
+		} else applyFilter({ user: value === 'all' ? null : value }, 'all');
 	}
 
 	// A date input reports every valid intermediate value while a year is
@@ -50,11 +69,15 @@
 	);
 	// An owner from a shared link who isn't in the list still gets an option,
 	// so the select reflects the active filter.
-	const ownerOptions = $derived(
-		data.filters.user && !data.owners.some((o) => o.id === data.filters.user)
-			? [...data.owners, { id: data.filters.user, label: data.filters.user }]
-			: data.owners
-	);
+	// Everyone but you (that's Mine); an owner from a shared link who isn't
+	// listed still gets an option, so the select reflects the filter.
+	const ownerOptions = $derived.by(() => {
+		const others = data.owners.filter((o) => o.id !== data.user.id);
+		const u = data.filters.user;
+		return u && u !== data.user.id && !others.some((o) => o.id === u)
+			? [...others, { id: u, label: u }]
+			: others;
+	});
 </script>
 
 {#snippet dateRange(label: string, from: keyof TokenFilters, to: keyof TokenFilters)}
@@ -114,29 +137,25 @@
 	{/if}
 
 	<div class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
-		<!-- Two clusters that wrap whole: who and what, then when. -->
+		<!-- Two clusters that wrap whole: whose and what, then when. -->
 		<div class="flex flex-wrap items-center gap-2">
 			{#if data.isAdmin}
-				<div
-					role="tablist"
+				<select
 					aria-label="Whose tokens"
-					class="inline-flex h-8 rounded-lg border bg-subtle p-0.5 text-sm"
+					class="native-select w-auto max-w-48"
+					value={owner}
+					onchange={(e) => pickOwner(e.currentTarget.value)}
 				>
-					{#each [{ value: 'mine', label: 'Yours', href: '?' }, { value: 'all', label: 'Everyone', href: '?view=all' }] as opt (opt.value)}
-						<a
-							role="tab"
-							aria-selected={data.view === opt.value}
-							href={opt.href}
-							data-sveltekit-noscroll
-							class="flex items-center rounded-md px-3 font-medium transition-colors {data.view ===
-							opt.value
-								? 'bg-background text-foreground shadow-(--shadow-sheet)'
-								: 'text-muted-foreground hover:text-foreground'}">{opt.label}</a
-						>
-					{/each}
-				</div>
-				<!-- Scope first, then what narrows it. -->
-				<span aria-hidden="true" class="mx-1 hidden h-5 w-px bg-border sm:block"></span>
+					<option value="mine">Mine</option>
+					<option value="all">All</option>
+					{#if ownerOptions.length}
+						<optgroup label="Owner">
+							{#each ownerOptions as o (o.id)}
+								<option value={o.id}>{o.label}</option>
+							{/each}
+						</optgroup>
+					{/if}
+				</select>
 			{/if}
 			<select
 				aria-label="Filter by status"
@@ -150,25 +169,6 @@
 					<option value={status}>{status[0].toUpperCase() + status.slice(1)}</option>
 				{/each}
 			</select>
-			<!-- The owner slot stays in both views (fixed to you in Yours) so the
-			     other fields don't shift when switching. -->
-			{#if data.view === 'all'}
-				<select
-					aria-label="Filter by owner"
-					class="native-select w-auto max-w-48"
-					value={data.filters.user ?? ''}
-					onchange={(e) => applyFilter({ user: e.currentTarget.value || null })}
-				>
-					<option value="">Any owner</option>
-					{#each ownerOptions as owner (owner.id)}
-						<option value={owner.id}>{owner.label}</option>
-					{/each}
-				</select>
-			{:else if data.isAdmin}
-				<select aria-label="Owner" class="native-select w-auto max-w-48" disabled>
-					<option>You</option>
-				</select>
-			{/if}
 		</div>
 		<div class="flex w-full flex-wrap items-center gap-2 sm:w-auto">
 			{@render dateRange('Created', 'createdFrom', 'createdTo')}
