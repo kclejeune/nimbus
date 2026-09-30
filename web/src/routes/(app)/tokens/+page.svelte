@@ -6,7 +6,8 @@
 	import CopyField from '$lib/components/copy-field.svelte';
 	import TokenScopeFields from '$lib/components/token-scope-fields.svelte';
 	import TokenTable from '$lib/components/token-table.svelte';
-	import { Plus, TriangleAlert } from '@lucide/svelte';
+	import { Check, ChevronDown, Plus, TriangleAlert } from '@lucide/svelte';
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import * as Sheet from '$lib/components/ui/sheet/index.js';
@@ -39,20 +40,25 @@
 		goto(href(1, patch, view), { replaceState: true, keepFocus: true, noScroll: true });
 	}
 
-	// Admins pick whose tokens from one select: yours, everyone's, or one
-	// user's (the everyone view narrowed to them). Suspended only exists
-	// outside your own view, so it's dropped when switching back to it.
-	const owner = $derived(
-		data.view === 'mine' || data.filters.user === data.user.id
-			? 'mine'
-			: (data.filters.user ?? 'all')
-	);
-	function pickOwner(value: string) {
-		if (value === 'mine') {
-			const status = data.filters.status === 'suspended' ? null : data.filters.status;
-			applyFilter({ user: null, status }, 'mine');
-		} else applyFilter({ user: value === 'all' ? null : value }, 'all');
+	// Whose tokens: yours, everyone's, or any set of owners (the everyone
+	// view narrowed to them). Admins only; members can only see their own.
+	// Suspended only exists outside your own view, so it's dropped when
+	// switching back to it.
+	function pickMine() {
+		const status = data.filters.status === 'suspended' ? null : data.filters.status;
+		applyFilter({ users: [], status }, 'mine');
 	}
+	function toggleOwner(id: string, on: boolean) {
+		const current = data.view === 'all' ? data.filters.users : [];
+		applyFilter({ users: on ? [...current, id] : current.filter((u) => u !== id) }, 'all');
+	}
+	const ownerLabel = $derived.by(() => {
+		if (data.view === 'mine') return 'Mine';
+		const picked = data.filters.users;
+		if (picked.length === 0) return 'All owners';
+		if (picked.length > 1) return `${picked.length} owners`;
+		return ownerOptions.find((o) => o.id === picked[0])?.label ?? picked[0];
+	});
 
 	// A date input reports every valid intermediate value while a year is
 	// typed (0002, 0020, …), so dates apply once the input settles.
@@ -69,15 +75,14 @@
 	);
 	// An owner from a shared link who isn't in the list still gets an option,
 	// so the select reflects the active filter.
-	// Everyone but you (that's Mine); an owner from a shared link who isn't
-	// listed still gets an option, so the select reflects the filter.
-	const ownerOptions = $derived.by(() => {
-		const others = data.owners.filter((o) => o.id !== data.user.id);
-		const u = data.filters.user;
-		return u && u !== data.user.id && !others.some((o) => o.id === u)
-			? [...others, { id: u, label: u }]
-			: others;
-	});
+	// Every owner, you marked as such; an owner from a shared link who isn't
+	// listed still gets an entry, so the menu reflects the filter.
+	const ownerOptions = $derived([
+		...data.owners.map((o) => (o.id === data.user.id ? { ...o, label: `${o.label} (you)` } : o)),
+		...data.filters.users
+			.filter((u) => !data.owners.some((o) => o.id === u))
+			.map((u) => ({ id: u, label: u }))
+	]);
 </script>
 
 {#snippet dateRange(label: string, from: keyof TokenFilters, to: keyof TokenFilters)}
@@ -140,22 +145,48 @@
 		<!-- Two clusters that wrap whole: whose and what, then when. -->
 		<div class="flex flex-wrap items-center gap-2">
 			{#if data.isAdmin}
-				<select
-					aria-label="Whose tokens"
-					class="native-select w-auto max-w-48"
-					value={owner}
-					onchange={(e) => pickOwner(e.currentTarget.value)}
-				>
-					<option value="mine">Mine</option>
-					<option value="all">All</option>
-					{#if ownerOptions.length}
-						<optgroup label="Owner">
-							{#each ownerOptions as o (o.id)}
-								<option value={o.id}>{o.label}</option>
-							{/each}
-						</optgroup>
-					{/if}
-				</select>
+				<DropdownMenu.Root>
+					<DropdownMenu.Trigger class="owner-trigger" aria-label="Whose tokens">
+						<span class="truncate">{ownerLabel}</span>
+						<ChevronDown class="size-4 shrink-0 opacity-60" />
+					</DropdownMenu.Trigger>
+					<DropdownMenu.Content align="start" class="w-56">
+						<DropdownMenu.Item onSelect={pickMine}>
+							Mine
+							{#if data.view === 'mine'}<Check class="ml-auto" />{/if}
+						</DropdownMenu.Item>
+						<DropdownMenu.Item onSelect={() => applyFilter({ users: [] }, 'all')}>
+							All owners
+							{#if data.view === 'all' && data.filters.users.length === 0}
+								<Check class="ml-auto" />
+							{/if}
+						</DropdownMenu.Item>
+						{#if ownerOptions.length}
+							<DropdownMenu.Separator />
+							<DropdownMenu.Label class="text-xs font-normal text-muted-foreground">
+								Owners
+							</DropdownMenu.Label>
+							<div class="max-h-64 overflow-y-auto">
+								{#each ownerOptions as o (o.id)}
+									<DropdownMenu.CheckboxItem
+										closeOnSelect={false}
+										checked={data.view === 'all' && data.filters.users.includes(o.id)}
+										onCheckedChange={(on) => toggleOwner(o.id, on)}
+									>
+										<span class="truncate">{o.label}</span>
+									</DropdownMenu.CheckboxItem>
+								{/each}
+							</div>
+						{/if}
+					</DropdownMenu.Content>
+				</DropdownMenu.Root>
+			{:else}
+				<!-- Members only ever see their own tokens; shown so the toolbar
+				     reads the same for everyone. -->
+				<button type="button" class="owner-trigger" disabled aria-label="Whose tokens">
+					<span>Mine</span>
+					<ChevronDown class="size-4 shrink-0 opacity-60" />
+				</button>
 			{/if}
 			<select
 				aria-label="Filter by status"
@@ -269,6 +300,29 @@
 		font-variant-numeric: tabular-nums;
 		outline: none;
 		color: var(--foreground);
+	}
+	/* Looks like the toolbar's native selects, but opens a menu (owners are
+	   multi-select). */
+	:global(.owner-trigger) {
+		display: inline-flex;
+		height: 2rem;
+		max-width: 12rem;
+		align-items: center;
+		gap: 0.5rem;
+		border-radius: var(--radius-lg);
+		border: 1px solid var(--input);
+		background: var(--background);
+		padding: 0 0.5rem 0 0.625rem;
+		font-size: 0.875rem;
+		box-shadow: var(--shadow-panel);
+		transition: border-color 150ms;
+	}
+	:global(.owner-trigger:focus-visible) {
+		border-color: var(--ring);
+		outline: 3px solid color-mix(in oklab, var(--ring) 50%, transparent);
+	}
+	:global(.owner-trigger:disabled) {
+		opacity: 0.5;
 	}
 	@media (min-width: 40rem) {
 		.range-date {

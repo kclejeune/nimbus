@@ -142,6 +142,7 @@ describe('token filters', () => {
 		const list = async (q: string) =>
 			ids((await listAllTokens(db, { filters: filters(q) })).tokens);
 		expect(await list('user=bob')).toEqual(['held', 'heldold']);
+		expect(await list('user=bob&user=cy')).toEqual(['gone', 'held', 'heldold', 'zero']);
 		expect(await list('created_from=2026-03-01&created_to=2026-03-31')).toEqual(
 			['held', 'heldold', 'live', 'never', 'zero'].sort()
 		);
@@ -160,8 +161,9 @@ describe('token filters', () => {
 		);
 		const own = filters('status=suspended&user=bob&created_from=2026-03-01', false);
 		expect(own).toEqual({ ...NO_TOKEN_FILTERS, createdFrom: '2026-03-01' });
-		expect(tokenFilterParams(filters('status=revoked&user=bob')).toString()).toBe(
-			'status=revoked&user=bob'
+		expect(filters('user=bob&user=%20bob&user=cy').users).toEqual(['bob', 'cy']);
+		expect(tokenFilterParams(filters('status=revoked&user=bob&user=cy')).toString()).toBe(
+			'status=revoked&user=bob&user=cy'
 		);
 	});
 });

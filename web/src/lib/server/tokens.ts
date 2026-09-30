@@ -56,7 +56,7 @@ export interface OwnedToken extends PresentedToken {
 /** Rows shown per page of the admin all-tokens view. */
 export const ALL_TOKENS_PAGE_SIZE = 50;
 
-/** Tokens newest first, filtered (filters.user scopes to one owner). With a
+/** Tokens newest first, filtered (filters.users scopes to those owners). With a
  *  limit, fetches one extra row to report `hasMore` without a COUNT scan. */
 async function queryTokens(
 	db: D1Database,
@@ -109,7 +109,7 @@ export async function listUserTokens(
 	userId: string,
 	filters: TokenFilters = NO_TOKEN_FILTERS
 ): Promise<PresentedToken[]> {
-	const { tokens } = await queryTokens(db, { ...filters, user: userId });
+	const { tokens } = await queryTokens(db, { ...filters, users: [userId] });
 	return tokens.map(({ owner: _, ...t }) => t);
 }
 

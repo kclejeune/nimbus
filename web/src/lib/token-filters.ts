@@ -19,9 +19,9 @@ export const TOKEN_STATUS_SQL = `CASE
 
 export interface TokenFilters {
 	status: TokenStatus | null;
-	/** Owner user id. From the URL only in the everyone view; the own view
-	 *  sets it to the viewer. */
-	user: string | null;
+	/** Owner user ids (any of); empty for everyone. From the URL only in the
+	 *  everyone view; the own view sets it to the viewer. */
+	users: string[];
 	/** Inclusive UTC dates, YYYY-MM-DD. */
 	createdFrom: string | null;
 	createdTo: string | null;
@@ -31,7 +31,7 @@ export interface TokenFilters {
 
 export const NO_TOKEN_FILTERS: TokenFilters = {
 	status: null,
-	user: null,
+	users: [],
 	createdFrom: null,
 	createdTo: null,
 	expiresFrom: null,
@@ -40,7 +40,7 @@ export const NO_TOKEN_FILTERS: TokenFilters = {
 
 const PARAMS = {
 	status: 'status',
-	user: 'user',
+	users: 'user',
 	createdFrom: 'created_from',
 	createdTo: 'created_to',
 	expiresFrom: 'expires_from',
@@ -71,7 +71,9 @@ export function parseTokenFilters(params: URLSearchParams, everyone: boolean): T
 		: null;
 	return {
 		status: status === 'suspended' && !everyone ? null : status,
-		user: everyone ? params.get(PARAMS.user)?.trim() || null : null,
+		users: everyone
+			? [...new Set(params.getAll(PARAMS.users).map((u) => u.trim()))].filter(Boolean).slice(0, 50)
+			: [],
 		createdFrom: parseDate(params.get(PARAMS.createdFrom)),
 		createdTo: parseDate(params.get(PARAMS.createdTo)),
 		expiresFrom: parseDate(params.get(PARAMS.expiresFrom)),
@@ -80,7 +82,7 @@ export function parseTokenFilters(params: URLSearchParams, everyone: boolean): T
 }
 
 export function hasTokenFilters(f: TokenFilters): boolean {
-	return Object.values(f).some((v) => v !== null);
+	return Object.values(f).some((v) => (Array.isArray(v) ? v.length > 0 : v !== null));
 }
 
 /** The filters as query parameters (for links that keep them). */
@@ -88,7 +90,8 @@ export function tokenFilterParams(f: TokenFilters): URLSearchParams {
 	const params = new URLSearchParams();
 	for (const [key, param] of Object.entries(PARAMS) as [keyof TokenFilters, string][]) {
 		const v = f[key];
-		if (v) params.set(param, v);
+		if (Array.isArray(v)) for (const item of v) params.append(param, item);
+		else if (v) params.set(param, v);
 	}
 	return params;
 }
@@ -108,7 +111,9 @@ export function tokenWhere(
 	/** Bind a value and return its placeholder. */
 	const p = (v: string | number) => `?${binds.push(v)}`;
 	if (f.status) conditions.push(`${TOKEN_STATUS_SQL} = ${p(f.status)}`);
-	if (f.user) conditions.push(`t.user_id = ${p(f.user)}`);
+	if (f.users.length) {
+		conditions.push(`t.user_id IN (SELECT value FROM json_each(${p(JSON.stringify(f.users))}))`);
+	}
 	const range = (column: string, from: string | null, to: string | null) => {
 		if (from) conditions.push(`${column} >= ${p(dayStart(from)!)}`);
 		if (to) conditions.push(`${column} < ${p(dayStart(to)! + DAY_S)}`);
