@@ -12,7 +12,10 @@
 	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import * as Sheet from '$lib/components/ui/sheet/index.js';
 	import { replaceQuery } from '$lib/url-state';
+	import Pager from '$lib/components/layout/pager.svelte';
 	import {
+		isOwnOnly,
+		NO_TOKEN_FILTERS,
 		TOKEN_STATUSES,
 		tokenFilterParams,
 		type TokenFilters,
@@ -23,21 +26,16 @@
 	let issuing = $state(false);
 	let sheetOpen = $state(false);
 
-	/** This view's URL with the filters (optionally patched) and a page. */
-	function href(
-		page: number,
-		patch: Partial<TokenFilters> = {},
-		view: 'mine' | 'all' = data.view
-	): string {
-		const params = tokenFilterParams({ ...data.filters, ...patch });
-		if (view === 'all') params.set('view', 'all');
+	/** The URL with the filters (optionally patched) and a page. */
+	function href(page: number, patch: Partial<TokenFilters> = {}): string {
+		const params = tokenFilterParams({ ...data.filters, ...patch }, data.user.id);
 		if (page > 1) params.set('page', String(page));
 		return `?${params}`;
 	}
 
 	/** A filter change starts over at page 1. */
-	function applyFilter(patch: Partial<TokenFilters>, view: 'mine' | 'all' = data.view) {
-		replaceQuery(href(1, patch, view));
+	function applyFilter(patch: Partial<TokenFilters>) {
+		replaceQuery(href(1, patch));
 	}
 
 	// A date input reports every valid intermediate value while a year is
@@ -48,43 +46,29 @@
 		dateTimer = setTimeout(() => applyFilter(patch), 400);
 	}
 
-	const cleared = $derived(data.view === 'all' ? '?view=all' : '?');
-	// Suspended means the owner is deactivated, which your own tokens never are.
+	// Suspended means the owner is deactivated, which you never are: it's
+	// offered, and kept, only while other owners are in view.
 	const statuses = $derived(
-		data.view === 'all' ? TOKEN_STATUSES : TOKEN_STATUSES.filter((s) => s !== 'suspended')
+		data.ownOnly ? TOKEN_STATUSES.filter((s) => s !== 'suspended') : TOKEN_STATUSES
 	);
-
-	// Whose tokens: yours, everyone's, or any set of owners (the everyone
-	// view narrowed to them). Admins only; members can only see their own.
-	// Suspended only exists outside your own view, so it's dropped when
-	// switching back to it.
-	function pickMine() {
-		applyFilter(
-			{ users: [], statuses: data.filters.statuses.filter((x) => x !== 'suspended') },
-			'mine'
-		);
+	function pickOwners(users: string[]) {
+		const statuses = isOwnOnly({ ...data.filters, users }, data.user.id)
+			? data.filters.statuses.filter((s) => s !== 'suspended')
+			: data.filters.statuses;
+		applyFilter({ users, statuses });
 	}
-	const ownerDisplay = $derived(data.view === 'mine' ? 'Mine' : undefined);
-	const ownerPresets = $derived([
-		{ label: 'Mine', active: data.view === 'mine', onselect: pickMine },
-		{
-			label: 'All owners',
-			active: data.view === 'all' && data.filters.users.length === 0,
-			onselect: () => applyFilter({ users: [] }, 'all')
-		}
-	]);
 	const statusOptions = $derived(
 		statuses.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))
 	);
 
-	// Every owner, you marked as such.
-	const ownerOptions = $derived(
-		data.owners.map((o) => ({
-			value: o.id,
-			label: o.id === data.user.id ? `${o.label} (you)` : o.label,
-			group: 'Owners'
-		}))
-	);
+	// Whose tokens: you (the default), everyone (none picked), or any set of
+	// owners. Admins only; a member's menu shows "Mine", disabled.
+	const ownerOptions = $derived([
+		{ value: data.user.id, label: 'Mine' },
+		...data.owners
+			.filter((o) => o.id !== data.user.id)
+			.map((o) => ({ value: o.id, label: o.label, group: 'Owners' }))
+	]);
 </script>
 
 {#snippet dateRange(label: string, from: keyof TokenFilters, to: keyof TokenFilters)}
@@ -92,9 +76,7 @@
 	<!-- One control, not three loose parts: the label is the field's prefix
 	     and both dates share its border, so a range reads (and wraps) as a
 	     unit. The label brightens while the range is filtering. -->
-	<fieldset
-		class="flex h-8 w-full min-w-0 items-stretch overflow-hidden rounded-lg border border-input bg-background text-sm shadow-(--shadow-panel) transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 sm:w-auto dark:bg-input/30"
-	>
+	<fieldset class="range-field">
 		<legend class="sr-only">{label}</legend>
 		<span
 			aria-hidden="true"
@@ -153,10 +135,8 @@
 				noun="owners"
 				allLabel="All owners"
 				options={ownerOptions}
-				selected={data.view === 'all' ? data.filters.users : []}
-				onchange={(users) => applyFilter({ users }, 'all')}
-				presets={ownerPresets}
-				display={ownerDisplay}
+				selected={data.filters.users}
+				onchange={pickOwners}
 				disabled={!data.isAdmin}
 			/>
 			<FilterMenu
@@ -173,36 +153,29 @@
 			{@render dateRange('Expires', 'expiresFrom', 'expiresTo')}
 		</div>
 		{#if data.filtered}
-			<Button variant="ghost" size="sm" href={cleared} data-sveltekit-noscroll class="ml-auto"
-				>Clear filters</Button
+			<Button
+				variant="ghost"
+				size="sm"
+				href={href(1, { ...NO_TOKEN_FILTERS, users: data.filters.users })}
+				data-sveltekit-noscroll
+				class="ml-auto">Clear filters</Button
 			>
 		{/if}
 	</div>
 
 	<TokenTable
 		tokens={data.tokens}
-		emptyText={data.filtered
-			? 'No tokens match.'
-			: data.view === 'all'
+		emptyText={data.ownOnly && !data.filtered
+			? 'Create one for CI or scripts.'
+			: data.filters.users.length === 0 && !data.filtered
 				? 'Nobody has a token.'
-				: 'Create one for CI or scripts.'}
+				: 'No tokens match.'}
 	/>
 
-	{#if data.view === 'all' && (data.page > 1 || data.hasMore)}
+	{#if data.page > 1 || data.hasMore}
 		<div class="mt-3 flex items-center justify-between gap-3">
 			<p class="text-xs text-muted-foreground tabular-nums">Page {data.page}, newest first</p>
-			<div class="flex items-center gap-2">
-				{#if data.page > 1}
-					<Button variant="outline" size="sm" href={href(data.page - 1)}>Previous</Button>
-				{:else}
-					<Button variant="outline" size="sm" disabled>Previous</Button>
-				{/if}
-				{#if data.hasMore}
-					<Button variant="outline" size="sm" href={href(data.page + 1)}>Next</Button>
-				{:else}
-					<Button variant="outline" size="sm" disabled>Next</Button>
-				{/if}
-			</div>
+			<Pager page={data.page} hasMore={data.hasMore} {href} />
 		</div>
 	{/if}
 </Page>

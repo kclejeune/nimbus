@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { deserialize, enhance } from '$app/forms';
+	import { displayName } from '$lib/format';
 	import { invalidateAll } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
 	import { confirmFirst, toastErrors } from '$lib/enhance';
@@ -102,11 +103,11 @@
 									aria-hidden="true"
 									class="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-semibold text-accent-foreground"
 								>
-									{(u.name || u.email || '?').slice(0, 1).toUpperCase()}
+									{(displayName(u) || '?').slice(0, 1).toUpperCase()}
 								</span>
 								<div class="min-w-0">
 									<div class="flex items-center gap-2">
-										<a href="/users/{u.id}" class="row-link">{u.name || u.email}</a>
+										<a href="/users/{u.id}" class="row-link">{displayName(u)}</a>
 										{#if u.isOwner}
 											<StatusBadge>Owner</StatusBadge>
 										{/if}
@@ -192,7 +193,7 @@
 										action="?/deleteUser"
 										use:enhance={toastErrors(
 											confirmFirst({
-												title: `Delete ${u.name || u.email}?`,
+												title: `Delete ${displayName(u)}?`,
 												description:
 													'Removes their grants and group memberships. Their tokens stop working.',
 												confirmLabel: 'Delete user',

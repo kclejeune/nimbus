@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Segmented from './segmented.svelte';
+	import Segmented from '$lib/components/layout/segmented.svelte';
 	import StatTile from './stat-tile.svelte';
 	import SectionHead from './section-head.svelte';
 	import type { PageData } from './$types';

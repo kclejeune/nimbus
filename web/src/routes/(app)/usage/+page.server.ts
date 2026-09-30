@@ -115,46 +115,22 @@ async function loadStorage({ platform, url }: Parameters<PageServerLoad>[0]) {
 	]);
 	const { stats, statsAt } = await instanceStatsSnapshot(read, gcLastRun);
 
-	const basePaths = baseline?.paths ?? 0;
-	const baseBytes = baseline?.bytes ?? 0;
-
-	// Nothing ever pushed and no window to draw → empty state.
-	if (rows.length === 0 && startDate === null) {
-		return {
-			buckets: [],
-			granularity,
-			range,
-			stats,
-			statsAt,
-			globalMaxBytes
-		};
+	// Every bucket in the window, zero-filled. Nothing ever pushed and no
+	// window to draw leaves none (the empty state).
+	const points: Omit<Bucket, 'cumulativePaths' | 'cumulativeBytes'>[] = [];
+	if (rows.length > 0 || startDate !== null) {
+		const byBucket = new Map(rows.map((r) => [r.bucket, r]));
+		const firstMs =
+			startDate !== null
+				? bucketStart(startMs!, granularity)
+				: bucketStart(Date.parse(`${rows[0].bucket}T00:00:00Z`), granularity);
+		const endMs = bucketStart(now, granularity);
+		for (let ms = firstMs, i = 0; ms <= endMs && i < 800; ms = nextBucket(ms, granularity), i++) {
+			const row = byBucket.get(iso(ms));
+			points.push({ date: iso(ms), paths: row?.paths ?? 0, bytes: row?.bytes ?? 0 });
+		}
 	}
-
-	const byBucket = new Map(rows.map((r) => [r.bucket, r]));
-	const firstMs =
-		startDate !== null
-			? bucketStart(startMs!, granularity)
-			: bucketStart(Date.parse(`${rows[0].bucket}T00:00:00Z`), granularity);
-	const endMs = bucketStart(now, granularity);
-
-	const buckets: Bucket[] = [];
-	let cumPaths = basePaths;
-	let cumBytes = baseBytes;
-	for (let ms = firstMs, i = 0; ms <= endMs && i < 800; ms = nextBucket(ms, granularity), i++) {
-		const key = iso(ms);
-		const row = byBucket.get(key);
-		const paths = row?.paths ?? 0;
-		const bytes = row?.bytes ?? 0;
-		cumPaths += paths;
-		cumBytes += bytes;
-		buckets.push({
-			date: key,
-			paths,
-			bytes,
-			cumulativePaths: cumPaths,
-			cumulativeBytes: cumBytes
-		});
-	}
+	const buckets = accumulate(points, baseline ?? { paths: 0, bytes: 0 });
 
 	return {
 		buckets,
@@ -198,24 +174,26 @@ function sampleStats(): InstanceStats {
 	return { caches: 3, objects: 1180, nars: 990, storageBytes: 6.4e9, logicalBytes: 9.1e9 };
 }
 
+/** Running totals over per-bucket additions, from what existed before. */
+function accumulate(
+	points: Omit<Bucket, 'cumulativePaths' | 'cumulativeBytes'>[],
+	base: { paths: number; bytes: number }
+): Bucket[] {
+	let cumulativePaths = base.paths;
+	let cumulativeBytes = base.bytes;
+	return points.map((p) => ({
+		...p,
+		cumulativePaths: (cumulativePaths += p.paths),
+		cumulativeBytes: (cumulativeBytes += p.bytes)
+	}));
+}
+
 function sampleBuckets(granularity: Granularity): Bucket[] {
-	const out: Bucket[] = [];
-	let cumPaths = 0;
-	let cumBytes = 0;
 	const step = granularity === 'day' ? DAY_MS : granularity === 'month' ? 30 * DAY_MS : 7 * DAY_MS;
 	const start = Date.UTC(2026, 0, 5);
-	for (let i = 0; i < 20; i++) {
+	const points = Array.from({ length: 20 }, (_, i) => {
 		const paths = Math.round(20 + 60 * Math.abs(Math.sin(i / 2)) + (i % 3) * 12);
-		const bytes = paths * (4_000_000 + (i % 4) * 1_500_000);
-		cumPaths += paths;
-		cumBytes += bytes;
-		out.push({
-			date: iso(start + i * step),
-			paths,
-			bytes,
-			cumulativePaths: cumPaths,
-			cumulativeBytes: cumBytes
-		});
-	}
-	return out;
+		return { date: iso(start + i * step), paths, bytes: paths * (4_000_000 + (i % 4) * 1_500_000) };
+	});
+	return accumulate(points, { paths: 0, bytes: 0 });
 }

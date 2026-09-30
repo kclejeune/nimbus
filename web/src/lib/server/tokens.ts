@@ -1,4 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
+import { displayName } from '$lib/format';
 import { mintAtticToken, type CacheAccess, type CachePermission } from './attic-token';
 import { parseTokenBits, scopeDenial, type EffectiveAccess } from './auth/permissions';
 import { writeAudit } from './audit';
@@ -53,8 +54,8 @@ export interface OwnedToken extends PresentedToken {
 	owner: { id: string; name: string; email: string };
 }
 
-/** Rows shown per page of the admin all-tokens view. */
-export const ALL_TOKENS_PAGE_SIZE = 50;
+/** Rows shown per page of /tokens. */
+export const TOKENS_PAGE_SIZE = 50;
 
 /** Tokens newest first, filtered (filters.users scopes to those owners). With a
  *  limit, fetches one extra row to report `hasMore` without a COUNT scan. */
@@ -113,11 +114,12 @@ export async function listUserTokens(
 	return tokens.map(({ owner: _, ...t }) => t);
 }
 
-/** Every user's tokens, one page at a time (admin view). */
-export async function listAllTokens(
+/** Tokens one page at a time, each with its owner (filters.users picks
+ *  whose; empty for everyone's). */
+export async function listTokens(
 	db: D1Database,
 	{
-		limit = ALL_TOKENS_PAGE_SIZE,
+		limit = TOKENS_PAGE_SIZE,
 		offset = 0,
 		filters = NO_TOKEN_FILTERS
 	}: { limit?: number; offset?: number; filters?: TokenFilters } = {}
@@ -125,7 +127,7 @@ export async function listAllTokens(
 	return queryTokens(db, filters, { limit, offset });
 }
 
-/** Users who own at least one token, for the everyone view's owner filter. */
+/** Users who own at least one token, for /tokens' owner filter. */
 export async function listTokenOwners(db: D1Database): Promise<{ id: string; label: string }[]> {
 	const { results } = await db
 		.prepare(
@@ -134,7 +136,7 @@ export async function listTokenOwners(db: D1Database): Promise<{ id: string; lab
 			 ORDER BY u.name`
 		)
 		.all<{ id: string; name: string | null; email: string | null }>();
-	return results.map((u) => ({ id: u.id, label: u.name || u.email || u.id }));
+	return results.map((u) => ({ id: u.id, label: displayName(u) }));
 }
 
 /** Revoke a token, scoped to its owner (self-service and the admin view on

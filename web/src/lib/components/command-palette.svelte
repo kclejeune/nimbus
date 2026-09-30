@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { displayName } from '$lib/format';
 	import { Command, Dialog } from 'bits-ui';
 	import {
 		Boxes,
@@ -181,7 +182,7 @@
 											onSelect={() => go(`/users/${u.id}`)}
 										>
 											<User />
-											<span>{u.name || u.email}</span>
+											<span>{displayName(u)}</span>
 											<span class="truncate text-xs text-muted-foreground">{u.email}</span>
 										</Command.Item>
 									{/each}

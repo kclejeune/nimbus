@@ -72,6 +72,15 @@ export function storageSavings(
 	};
 }
 
+/** A user as people read them: name, else email, else the raw id. */
+export function displayName(u: {
+	name?: string | null;
+	email?: string | null;
+	id?: string | null;
+}): string {
+	return u.name || u.email || u.id || '';
+}
+
 /** Share of a size budget or limit past which usage is flagged. */
 export const BUDGET_WARN = 0.9;
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { listAllTokens, listUserTokens, mintScopedToken } from './tokens';
+import { listTokens, listUserTokens, mintScopedToken } from './tokens';
 import {
 	NO_TOKEN_FILTERS,
 	parseTokenFilters,
@@ -42,7 +42,7 @@ describe('mintScopedToken', () => {
 	});
 });
 
-describe('listAllTokens', () => {
+describe('listTokens', () => {
 	function seed() {
 		const t = testDatabase({ admin: true });
 		t.seedUser('ada');
@@ -59,7 +59,7 @@ describe('listAllTokens', () => {
 	}
 
 	it('lists every owner newest first, suspending tokens of inactive owners', async () => {
-		const { tokens, hasMore } = await listAllTokens(seed());
+		const { tokens, hasMore } = await listTokens(seed());
 		expect(hasMore).toBe(false);
 		expect(tokens.map((t) => [t.id, t.owner.id, t.status])).toEqual([
 			['t3', 'bob', 'suspended'],
@@ -70,10 +70,10 @@ describe('listAllTokens', () => {
 
 	it('pages with a lookahead row instead of a count', async () => {
 		const db = seed();
-		const first = await listAllTokens(db, { limit: 2, offset: 0 });
+		const first = await listTokens(db, { limit: 2, offset: 0 });
 		expect(first.tokens.map((t) => t.id)).toEqual(['t3', 't2']);
 		expect(first.hasMore).toBe(true);
-		const second = await listAllTokens(db, { limit: 2, offset: 2 });
+		const second = await listTokens(db, { limit: 2, offset: 2 });
 		expect(second.tokens.map((t) => t.id)).toEqual(['t1']);
 		expect(second.hasMore).toBe(false);
 	});
@@ -104,8 +104,13 @@ describe('token filters', () => {
 		insert.run('heldold', 'bob', 'heldold', now - DAY, null, at('2026-03-16'));
 		return t.db;
 	}
-	const filters = (query: string, everyone = true) =>
-		parseTokenFilters(new URLSearchParams(query), everyone);
+	const admin = { id: 'ada', isAdmin: true };
+	// The admin view of everyone's tokens unless the query names owners.
+	const filters = (query: string) => {
+		const params = new URLSearchParams(query);
+		if (!params.has('user')) params.set('user', 'all');
+		return parseTokenFilters(params, admin);
+	};
 	const ids = (tokens: { id: string }[]) => tokens.map((t) => t.id).sort();
 
 	it('labels each token and filters by status with the same rule', async () => {
@@ -121,10 +126,10 @@ describe('token filters', () => {
 			held: 'suspended',
 			heldold: 'expired'
 		};
-		const { tokens } = await listAllTokens(db);
+		const { tokens } = await listTokens(db);
 		expect(Object.fromEntries(tokens.map((t) => [t.id, t.status]))).toEqual(expected);
 		for (const status of TOKEN_STATUSES) {
-			const { tokens } = await listAllTokens(db, { filters: filters(`status=${status}`) });
+			const { tokens } = await listTokens(db, { filters: filters(`status=${status}`) });
 			const want = Object.keys(expected).filter((id) => expected[id] === status);
 			expect(ids(tokens), status).toEqual(want.sort());
 		}
@@ -133,9 +138,9 @@ describe('token filters', () => {
 			['heldold', 'expired'],
 			['held', 'suspended']
 		]);
-		const mine = await listUserTokens(db, 'ada', filters('status=expired', false));
+		const mine = await listUserTokens(db, 'ada', filters('status=expired'));
 		expect(ids(mine)).toEqual(['old']);
-		const { tokens: either } = await listAllTokens(db, {
+		const { tokens: either } = await listTokens(db, {
 			filters: filters('status=revoked&status=suspended')
 		});
 		expect(ids(either)).toEqual(['gone', 'held']);
@@ -143,8 +148,7 @@ describe('token filters', () => {
 
 	it('filters by owner and by inclusive UTC date ranges', async () => {
 		const db = seed();
-		const list = async (q: string) =>
-			ids((await listAllTokens(db, { filters: filters(q) })).tokens);
+		const list = async (q: string) => ids((await listTokens(db, { filters: filters(q) })).tokens);
 		expect(await list('user=bob')).toEqual(['held', 'heldold']);
 		expect(await list('user=bob&user=cy')).toEqual(['gone', 'held', 'heldold', 'zero']);
 		expect(await list('created_from=2026-03-01&created_to=2026-03-31')).toEqual(
@@ -159,15 +163,24 @@ describe('token filters', () => {
 		expect(await list('user=bob&status=suspended')).toEqual(['held']);
 	});
 
-	it('drops malformed values and owner-only filters outside the everyone view', () => {
-		expect(filters('status=bogus&created_from=2026-13-45&expires_to=soon&user=')).toEqual(
-			NO_TOKEN_FILTERS
-		);
-		const own = filters('status=suspended&user=bob&created_from=2026-03-01', false);
-		expect(own).toEqual({ ...NO_TOKEN_FILTERS, createdFrom: '2026-03-01' });
-		expect(filters('user=bob&user=%20bob&user=cy').users).toEqual(['bob', 'cy']);
-		expect(tokenFilterParams(filters('status=revoked&user=bob&user=cy')).toString()).toBe(
-			'status=revoked&user=bob&user=cy'
-		);
+	it('drops malformed values; owners default to the viewer, and only admins pick', () => {
+		const parse = (query: string, viewer = admin) =>
+			parseTokenFilters(new URLSearchParams(query), viewer);
+		const own = { ...NO_TOKEN_FILTERS, users: ['ada'] };
+		expect(parse('status=bogus&created_from=2026-13-45&expires_to=soon&user=')).toEqual(own);
+		expect(parse('user=all').users).toEqual([]);
+		expect(parse('user=bob&user=%20bob&user=cy').users).toEqual(['bob', 'cy']);
+		// A member's list is theirs whatever the URL says.
+		const member = { id: 'bob', isAdmin: false };
+		expect(parse('user=all&user=cy&created_from=2026-03-01', member)).toEqual({
+			...NO_TOKEN_FILTERS,
+			users: ['bob'],
+			createdFrom: '2026-03-01'
+		});
+		// Round trip: the default owner set is implicit, everyone is explicit.
+		const params = (query: string) => tokenFilterParams(parse(query), 'ada').toString();
+		expect(params('status=revoked&user=bob&user=cy')).toBe('status=revoked&user=bob&user=cy');
+		expect(params('status=revoked')).toBe('status=revoked');
+		expect(params('user=all')).toBe('user=all');
 	});
 });

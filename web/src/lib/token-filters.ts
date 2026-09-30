@@ -22,8 +22,8 @@ export const TOKEN_STATUS_SQL = `CASE
 export interface TokenFilters {
 	/** Any of these statuses; empty for any. */
 	statuses: TokenStatus[];
-	/** Owner user ids (any of); empty for everyone. From the URL only in the
-	 *  everyone view; the own view sets it to the viewer. */
+	/** Owner user ids (any of); empty for everyone. Defaults to the viewer,
+	 *  and is always just the viewer for a member. */
 	users: string[];
 	/** Inclusive UTC dates, YYYY-MM-DD. */
 	createdFrom: string | null;
@@ -64,17 +64,25 @@ function parseDate(raw: string | null): string | null {
 	return DATE_RE.test(v) && dayStart(v) !== null ? v : null;
 }
 
+/** The owner value meaning everyone's tokens. Owners default to the viewer,
+ *  so the empty set needs a spelling of its own. */
+export const ALL_OWNERS = 'all';
+
+export interface TokenViewer {
+	id: string;
+	isAdmin: boolean;
+}
+
 /** Filters from the query string; unknown or malformed values are dropped.
- *  Owner and 'suspended' only apply to the everyone view: in your own view
- *  every token is yours, and your account is active. */
-export function parseTokenFilters(params: URLSearchParams, everyone: boolean): TokenFilters {
-	const statuses = [...new Set(params.getAll(PARAMS.statuses))].filter(
-		(s): s is TokenStatus =>
-			(TOKEN_STATUSES as readonly string[]).includes(s) && (everyone || s !== 'suspended')
+ *  Only an admin picks owners: a member's list is always their own. */
+export function parseTokenFilters(params: URLSearchParams, viewer: TokenViewer): TokenFilters {
+	const statuses = [...new Set(params.getAll(PARAMS.statuses))].filter((s): s is TokenStatus =>
+		(TOKEN_STATUSES as readonly string[]).includes(s)
 	);
+	const owners = viewer.isAdmin ? distinctParams(params, PARAMS.users) : [];
 	return {
 		statuses,
-		users: everyone ? distinctParams(params, PARAMS.users) : [],
+		users: owners.includes(ALL_OWNERS) ? [] : owners.length ? owners : [viewer.id],
 		createdFrom: parseDate(params.get(PARAMS.createdFrom)),
 		createdTo: parseDate(params.get(PARAMS.createdTo)),
 		expiresFrom: parseDate(params.get(PARAMS.expiresFrom)),
@@ -82,16 +90,27 @@ export function parseTokenFilters(params: URLSearchParams, everyone: boolean): T
 	};
 }
 
+/** Whether anything past the owner choice narrows the list: owners are a
+ *  view of whose tokens, not a filter "Clear filters" resets. */
 export function hasTokenFilters(f: TokenFilters): boolean {
-	return Object.values(f).some((v) => (Array.isArray(v) ? v.length > 0 : v !== null));
+	return Object.entries(f).some(
+		([k, v]) => k !== 'users' && (Array.isArray(v) ? v.length > 0 : v !== null)
+	);
 }
 
-/** The filters as query parameters (for links that keep them). */
-export function tokenFilterParams(f: TokenFilters): URLSearchParams {
+/** Whether the owner set is just the viewer (the default). */
+export const isOwnOnly = (f: TokenFilters, viewerId: string) =>
+	f.users.length === 1 && f.users[0] === viewerId;
+
+/** The filters as query parameters (for links that keep them), inverse of
+ *  parseTokenFilters for the same viewer. */
+export function tokenFilterParams(f: TokenFilters, viewerId: string): URLSearchParams {
 	const params = new URLSearchParams();
 	for (const [key, param] of Object.entries(PARAMS) as [keyof TokenFilters, string][]) {
 		const v = f[key];
-		if (Array.isArray(v)) for (const item of v) params.append(param, item);
+		if (key === 'users' && f.users.length === 0) params.set(param, ALL_OWNERS);
+		else if (key === 'users' && isOwnOnly(f, viewerId)) continue;
+		else if (Array.isArray(v)) for (const item of v) params.append(param, item);
 		else if (v) params.set(param, v);
 	}
 	return params;

@@ -3,7 +3,7 @@
 	import { toastErrors } from '$lib/enhance';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { formatBits } from '$lib/permission-bits';
-	import { formatDate } from '$lib/format';
+	import { displayName, formatDate } from '$lib/format';
 	import { KeyRound } from '@lucide/svelte';
 	import EmptyState from '$lib/components/layout/empty-state.svelte';
 	import StatusBadge from '$lib/components/layout/status-badge.svelte';
@@ -21,7 +21,7 @@
 			expiresAt: number | null;
 			/** 'suspended': valid but inert while the owner is deactivated. */
 			status: 'active' | 'expired' | 'revoked' | 'suspended';
-			/** Present in the admin everyone view: renders the Owner column and
+			/** Present when other owners are in view: renders the Owner column and
 			 *  posts the owner with a revoke. */
 			owner?: { id: string; name: string; email: string };
 		}[];
@@ -70,7 +70,7 @@
 							<td class="whitespace-nowrap">
 								{#if t.owner}
 									<a href="/users/{t.owner.id}" class="row-link font-normal" title={t.owner.email}
-										>{t.owner.name || t.owner.email}</a
+										>{displayName(t.owner)}</a
 									>
 								{/if}
 							</td>

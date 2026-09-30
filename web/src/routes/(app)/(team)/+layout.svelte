@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { plural } from '$lib/format';
+	import { samePath } from '$lib/nav';
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import TabNav from '$lib/components/layout/tab-nav.svelte';
@@ -12,12 +13,11 @@
 			{
 				label: 'People',
 				href: '/users',
-				route: '/(app)/(team)/users',
 				badge: data.pendingUsers,
 				badgeTitle: plural(data.pendingUsers, 'pending user')
 			},
-			{ label: 'Groups', href: '/groups', route: '/(app)/(team)/groups' }
-		].map((t) => ({ ...t, active: t.route === page.route.id }))
+			{ label: 'Groups', href: '/groups' }
+		].map((t) => ({ ...t, active: samePath(t.href, page.url.pathname) }))
 	);
 	// A person's or group's own page is a drill-down with its own header.
 	const isTab = $derived(tabs.some((t) => t.active));

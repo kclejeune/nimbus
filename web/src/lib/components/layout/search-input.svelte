@@ -34,7 +34,7 @@
 		bind:value
 		{placeholder}
 		aria-label={rest['aria-label'] ?? placeholder}
-		class="h-8 w-full rounded-lg border border-input bg-background pr-3 pl-8 text-sm shadow-(--shadow-panel) transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+		class="search-field"
 		{...rest}
 		oninput={(e) => {
 			rest.oninput?.(e);

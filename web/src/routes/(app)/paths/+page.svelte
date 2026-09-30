@@ -2,7 +2,7 @@
 	import { formatCount } from '$lib/format';
 	import StorePathTable from '$lib/components/store-path-table.svelte';
 	import { replaceQuery } from '$lib/url-state';
-	import { Button } from '$lib/components/ui/button/index.js';
+	import Pager from '$lib/components/layout/pager.svelte';
 	import FilterMenu from '$lib/components/filter-menu.svelte';
 	import { FolderSearch, Search } from '@lucide/svelte';
 	import Page from '$lib/components/layout/page.svelte';
@@ -87,18 +87,7 @@
 					Showing {formatCount(first)}–{formatCount(last)} of {formatCount(data.total)}
 				{/if}
 			</p>
-			<div class="flex items-center gap-2">
-				{#if data.page > 1}
-					<Button variant="outline" size="sm" href={href({ page: data.page - 1 })}>Previous</Button>
-				{:else}
-					<Button variant="outline" size="sm" disabled>Previous</Button>
-				{/if}
-				{#if data.hasMore}
-					<Button variant="outline" size="sm" href={href({ page: data.page + 1 })}>Next</Button>
-				{:else}
-					<Button variant="outline" size="sm" disabled>Next</Button>
-				{/if}
-			</div>
+			<Pager page={data.page} hasMore={data.hasMore} href={(page) => href({ page })} />
 		</div>
 	{/if}
 </Page>

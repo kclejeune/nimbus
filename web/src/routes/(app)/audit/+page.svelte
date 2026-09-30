@@ -12,6 +12,8 @@
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import EmptyState from '$lib/components/layout/empty-state.svelte';
+	import Pager from '$lib/components/layout/pager.svelte';
+	import Segmented from '$lib/components/layout/segmented.svelte';
 
 	let { data } = $props();
 
@@ -193,39 +195,14 @@
 					<span class="text-xs text-muted-foreground">Rows</span>
 					<!-- Changing the page size resets to page 1: the old offset is
 					     meaningless under a different stride. -->
-					<div
-						class="flex divide-x overflow-hidden rounded-lg border bg-background shadow-(--shadow-panel)"
-					>
-						{#each PAGE_SIZES as size (size)}
-							<a
-								href={href(1, size)}
-								data-sveltekit-noscroll
-								aria-current={size === data.pageSize ? 'true' : undefined}
-								class="px-2.5 py-1 text-xs transition-colors {size === data.pageSize
-									? 'bg-accent font-medium text-accent-foreground'
-									: 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'}"
-							>
-								{size}
-							</a>
-						{/each}
-					</div>
+					<Segmented
+						label="Rows per page"
+						options={PAGE_SIZES.map((n) => [String(n), String(n)])}
+						value={String(data.pageSize)}
+						onpick={(size) => replaceQuery(href(1, Number(size)))}
+					/>
 				</div>
-				<div class="flex items-center gap-2">
-					{#if data.page > 1}
-						<Button variant="outline" size="sm" href={href(data.page - 1, data.pageSize)}>
-							Previous
-						</Button>
-					{:else}
-						<Button variant="outline" size="sm" disabled>Previous</Button>
-					{/if}
-					{#if data.hasMore}
-						<Button variant="outline" size="sm" href={href(data.page + 1, data.pageSize)}>
-							Next
-						</Button>
-					{:else}
-						<Button variant="outline" size="sm" disabled>Next</Button>
-					{/if}
-				</div>
+				<Pager page={data.page} hasMore={data.hasMore} href={(p) => href(p, data.pageSize)} />
 			</div>
 		</div>
 	{/if}

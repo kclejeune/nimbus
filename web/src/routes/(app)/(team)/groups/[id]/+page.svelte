@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { toastErrors } from '$lib/enhance';
-	import { plural } from '$lib/format';
+	import { displayName, plural } from '$lib/format';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
@@ -50,7 +50,7 @@
 								aria-hidden="true"
 								class="flex size-7 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-semibold text-accent-foreground"
 							>
-								{(member.name || member.email || '?').slice(0, 1).toUpperCase()}
+								{(displayName(member) || '?').slice(0, 1).toUpperCase()}
 							</span>
 							<div class="min-w-0 flex-1">
 								<div class="flex items-center gap-2 text-sm">

@@ -14,7 +14,7 @@
 	} = $props();
 </script>
 
-<!-- One segmented control for every toggle on the Usage page. Single-select
+<!-- One segmented control for every small either/or toggle. Single-select
      toggle groups deselect on a second click; ignore the resulting empty value
      so one option is always active. -->
 <ToggleGroup.Root

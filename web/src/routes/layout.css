@@ -275,10 +275,40 @@
 		@apply rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs;
 	}
 
-	/* Native <select>, matched to the Input primitive. Kept native (not the
-	   bits-ui Select) so it posts with its form and works without JS. */
+	/* The field shell every toolbar control shares, matched to the Input
+	   primitive (ui/input): one border, fill, shadow and focus ring. */
+	.native-select,
+	.filter-trigger,
+	.search-field,
+	.range-field {
+		@apply h-8 rounded-lg border border-input bg-background text-sm shadow-(--shadow-panel) transition-colors outline-none dark:bg-input/30;
+	}
+	.native-select:focus-visible,
+	.filter-trigger:focus-visible,
+	.search-field:focus-visible,
+	.range-field:focus-within {
+		@apply border-ring ring-3 ring-ring/50;
+	}
+	.native-select:disabled,
+	.filter-trigger:disabled {
+		@apply opacity-50;
+	}
+	/* Native <select>. Kept native (not the bits-ui Select) so it posts with
+	   its form and works without JS. */
 	.native-select {
-		@apply h-8 w-full rounded-lg border border-input bg-background py-0 pr-8 pl-2.5 text-sm shadow-(--shadow-panel) transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-50;
+		@apply w-full py-0 pr-8 pl-2.5;
+	}
+	/* FilterMenu's trigger, sized like a select. */
+	.filter-trigger {
+		@apply inline-flex max-w-52 items-center gap-2 pr-2 pl-2.5;
+	}
+	/* SearchInput's box, room left for its icon. */
+	.search-field {
+		@apply w-full pr-3 pl-8 placeholder:text-muted-foreground;
+	}
+	/* A labeled pair of inputs sharing one border (the tokens date ranges). */
+	.range-field {
+		@apply flex w-full min-w-0 items-stretch overflow-hidden sm:w-auto;
 	}
 	/* A checkbox as a toggleable chip: permission bits read as a set of
 	   switches, and the checked state is visible at a glance. */

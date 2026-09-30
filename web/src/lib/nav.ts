@@ -1,4 +1,4 @@
-import { splitStorePath } from '$lib/format';
+import { displayName, splitStorePath } from '$lib/format';
 // Single source of truth for the app's top-level sections. The sidebar
 // renders these and the header derives the current page title from the same
 // list, so a section can't be navigable but titled "Overview" (or vice versa).
@@ -77,6 +77,12 @@ export function inSection(pathname: string, item: { url: string; match?: string[
 }
 
 /** The section owning `pathname`; subpages inherit their section's. */
+/** Whether two URL paths name the same page, however each is encoded
+ *  (a typed `+` vs a link's `%2B`). */
+export function samePath(a: string, b: string): boolean {
+	return decodeURIComponent(a) === decodeURIComponent(b);
+}
+
 function sectionFor(pathname: string) {
 	return ALL_SECTIONS.find((item) => item.url !== '/' && inSection(pathname, item));
 }
@@ -113,7 +119,7 @@ export function breadcrumbs(pathname: string, data: Record<string, unknown>): Cr
 		if (pathname.split('/').filter(Boolean).length > 1) {
 			if (people) {
 				const subject = data.subject as { name?: string; email?: string } | undefined;
-				crumbs.push({ label: subject?.name || subject?.email || 'User', href: pathname });
+				crumbs.push({ label: (subject && displayName(subject)) || 'User', href: pathname });
 			} else {
 				const group = data.group as { name?: string } | undefined;
 				crumbs.push({ label: group?.name ?? 'Group', href: pathname });

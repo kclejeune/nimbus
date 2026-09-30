@@ -12,13 +12,6 @@
 		mono?: boolean;
 	}
 
-	/** A single-choice entry above the options (e.g. "Mine", "All owners"). */
-	export interface FilterPreset {
-		label: string;
-		active: boolean;
-		onselect: () => void;
-	}
-
 	let {
 		label,
 		noun,
@@ -26,8 +19,6 @@
 		options,
 		selected,
 		onchange,
-		presets,
-		display,
 		disabled = false,
 		class: className
 	}: {
@@ -40,10 +31,6 @@
 		options: FilterOption[];
 		selected: string[];
 		onchange: (values: string[]) => void;
-		/** Replaces the default "all" entry. */
-		presets?: FilterPreset[];
-		/** Overrides the computed trigger text. */
-		display?: string;
 		disabled?: boolean;
 		class?: string;
 	} = $props();
@@ -61,13 +48,12 @@
 	});
 
 	const text = $derived.by(() => {
-		if (display) return display;
 		if (selected.length === 0) return allLabel;
 		if (selected.length > 1) return `${selected.length} ${noun}`;
 		return shown.find((o) => o.value === selected[0])?.label ?? selected[0];
 	});
 	const mono = $derived(
-		!display && selected.length === 1 && (shown.find((o) => o.value === selected[0])?.mono ?? false)
+		selected.length === 1 && (shown.find((o) => o.value === selected[0])?.mono ?? false)
 	);
 
 	// Groups in first-seen order; ungrouped options come first.
@@ -96,14 +82,12 @@
 			<ChevronDown class="size-4 shrink-0 opacity-60" />
 		</DropdownMenu.Trigger>
 		<DropdownMenu.Content align="start" class="w-60">
-			{#each presets ?? [{ label: allLabel, active: selected.length === 0, onselect: () => onchange([]) }] as preset (preset.label)}
-				<DropdownMenu.Item onSelect={preset.onselect}>
-					{preset.label}
-					{#if preset.active}<Check class="ml-auto" />{/if}
-				</DropdownMenu.Item>
-			{/each}
+			<DropdownMenu.Item onSelect={() => onchange([])}>
+				{allLabel}
+				{#if selected.length === 0}<Check class="ml-auto" />{/if}
+			</DropdownMenu.Item>
 			{#if shown.length}
-				<div class="max-h-72 overflow-y-auto">
+				<div class="max-h-72 overflow-x-hidden overflow-y-auto">
 					{#each groups as [group, items] (group)}
 						<DropdownMenu.Separator />
 						{#if group}
@@ -128,27 +112,3 @@
 		</DropdownMenu.Content>
 	</DropdownMenu.Root>
 {/if}
-
-<style>
-	:global(.filter-trigger) {
-		display: inline-flex;
-		height: 2rem;
-		max-width: 13rem;
-		align-items: center;
-		gap: 0.5rem;
-		border-radius: var(--radius-lg);
-		border: 1px solid var(--input);
-		background: var(--background);
-		padding: 0 0.5rem 0 0.625rem;
-		font-size: 0.875rem;
-		box-shadow: var(--shadow-panel);
-		transition: border-color 150ms;
-	}
-	:global(.filter-trigger:focus-visible) {
-		border-color: var(--ring);
-		outline: 3px solid color-mix(in oklab, var(--ring) 50%, transparent);
-	}
-	:global(.filter-trigger:disabled) {
-		opacity: 0.5;
-	}
-</style>

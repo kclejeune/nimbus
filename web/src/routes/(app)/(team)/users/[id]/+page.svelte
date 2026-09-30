@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { displayName } from '$lib/format';
 	import { goto } from '$app/navigation';
 	import { confirmFirst, toastErrors } from '$lib/enhance';
 	import { Button } from '$lib/components/ui/button/index.js';
@@ -20,7 +21,7 @@
 </script>
 
 <Page>
-	<PageHeader title={u.name || u.email}>
+	<PageHeader title={displayName(u)}>
 		{#snippet meta()}
 			<span>{u.email}</span>
 			{#if u.role === 'admin'}
@@ -67,7 +68,7 @@
 				use:enhance={toastErrors(
 					confirmFirst(
 						{
-							title: `Delete ${u.name || u.email}?`,
+							title: `Delete ${displayName(u)}?`,
 							description: 'Removes their grants and group memberships. Their tokens stop working.',
 							confirmLabel: 'Delete user',
 							tone: 'danger'

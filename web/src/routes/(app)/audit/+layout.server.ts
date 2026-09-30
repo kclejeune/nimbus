@@ -1,5 +1,6 @@
 import { error } from '@sveltejs/kit';
 import { requireAdmin } from '$lib/server/auth/guard';
+import { displayName } from '$lib/format';
 import { readSession } from '$lib/server/cache/db';
 import { groupActions } from '$lib/audit-filters';
 import type { LayoutServerLoad } from './$types';
@@ -34,6 +35,6 @@ export const load: LayoutServerLoad = async ({ platform, locals }) => {
 	]);
 	return {
 		actionGroups: groupActions(actions.results.map((a) => a.action)),
-		actors: actors.results.map((u) => ({ id: u.id, label: u.name || u.email || u.id }))
+		actors: actors.results.map((u) => ({ id: u.id, label: displayName(u) }))
 	};
 };

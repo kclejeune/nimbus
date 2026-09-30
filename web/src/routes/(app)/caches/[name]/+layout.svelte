@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { formatBytes } from '$lib/format';
+	import { samePath } from '$lib/nav';
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import TabNav from '$lib/components/layout/tab-nav.svelte';
@@ -13,16 +14,16 @@
 
 	const tabs = $derived(
 		[
-			{ label: 'Paths', href: base, route: '/(app)/caches/[name]' },
-			{ label: 'Connect', href: `${base}/connect`, route: '/(app)/caches/[name]/connect' },
+			{ label: 'Paths', href: base },
+			{ label: 'Connect', href: `${base}/connect` },
 			...(data.cacheViewer.canManage
 				? [
-						{ label: 'Pins', href: `${base}/pins`, route: '/(app)/caches/[name]/pins' },
-						{ label: 'Access', href: `${base}/access`, route: '/(app)/caches/[name]/access' },
-						{ label: 'Settings', href: `${base}/settings`, route: '/(app)/caches/[name]/settings' }
+						{ label: 'Pins', href: `${base}/pins` },
+						{ label: 'Access', href: `${base}/access` },
+						{ label: 'Settings', href: `${base}/settings` }
 					]
 				: [])
-		].map((t) => ({ ...t, active: t.route === page.route.id }))
+		].map((t) => ({ ...t, active: samePath(t.href, page.url.pathname) }))
 	);
 	// A store path's detail page is a drill-down with its own header, not a tab.
 	const isTab = $derived(tabs.some((t) => t.active));

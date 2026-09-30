@@ -2,9 +2,8 @@ import { error, fail } from '@sveltejs/kit';
 import {
 	auditTokenIssue,
 	boundTokenScope,
-	listAllTokens,
-	listUserTokens,
-	ALL_TOKENS_PAGE_SIZE,
+	listTokens,
+	TOKENS_PAGE_SIZE,
 	mintAndStore,
 	TOKEN_NAME_MAX_CHARS,
 	revokeUserToken,
@@ -12,7 +11,7 @@ import {
 } from '$lib/server/tokens';
 import { requireAdmin, tokenMinter } from '$lib/server/auth/guard';
 import { parsePage } from '$lib/pagination';
-import { hasTokenFilters, parseTokenFilters } from '$lib/token-filters';
+import { hasTokenFilters, isOwnOnly, parseTokenFilters } from '$lib/token-filters';
 import type { PageServerLoad, Actions } from './$types';
 
 export const load: PageServerLoad = async ({ platform, locals, url }) => {
@@ -20,25 +19,26 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
-	// ?view=all is the admin-only everyone view; for members the parameter is
-	// ignored and they get their own tokens, same as before.
-	const viewAll = locals.user.role === 'admin' && url.searchParams.get('view') === 'all';
+	const self = locals.user.id;
 	const page = parsePage(url.searchParams.get('page'));
-	const filters = parseTokenFilters(url.searchParams, viewAll);
+	const filters = parseTokenFilters(url.searchParams, {
+		id: self,
+		isAdmin: locals.user.role === 'admin'
+	});
 
 	// Read on the primary: this reloads right after a mint or revoke.
-	const { tokens, hasMore } = viewAll
-		? await listAllTokens(db, {
-				limit: ALL_TOKENS_PAGE_SIZE,
-				offset: (page - 1) * ALL_TOKENS_PAGE_SIZE,
-				filters
-			})
-		: { tokens: await listUserTokens(db, locals.user.id, filters), hasMore: false };
+	const { tokens, hasMore } = await listTokens(db, {
+		limit: TOKENS_PAGE_SIZE,
+		offset: (page - 1) * TOKENS_PAGE_SIZE,
+		filters
+	});
+	const ownOnly = isOwnOnly(filters, self);
 
 	return {
-		view: viewAll ? ('all' as const) : ('mine' as const),
-		tokens,
+		// Your own list has no Owner column (TokenTable shows it when present).
+		tokens: ownOnly ? tokens.map(({ owner: _, ...t }) => t) : tokens,
 		filters,
+		ownOnly,
 		filtered: hasTokenFilters(filters),
 		page,
 		hasMore
@@ -84,7 +84,7 @@ export const actions: Actions = {
 
 		const form = await request.formData();
 		const id = String(form.get('id') ?? '');
-		// The everyone view posts the owner; revoking someone else's token is
+		// Another owner's row posts its owner; revoking someone else's token is
 		// admin-only, the same rule as /users/[id]'s revokeToken. The owner
 		// scope in revokeUserToken keeps a mismatched pair a no-op.
 		const owner = String(form.get('owner') ?? '') || locals.user.id;
