@@ -135,6 +135,8 @@
 				<option value={status}>{status[0].toUpperCase() + status.slice(1)}</option>
 			{/each}
 		</select>
+		<!-- Admins switch between Yours and Everyone: the owner slot stays in
+		     both (fixed to you in Yours) so the other fields don't shift. -->
 		{#if data.view === 'all'}
 			<select
 				aria-label="Filter by owner"
@@ -146,6 +148,10 @@
 				{#each ownerOptions as owner (owner.id)}
 					<option value={owner.id}>{owner.label}</option>
 				{/each}
+			</select>
+		{:else if data.isAdmin}
+			<select aria-label="Owner" class="native-select w-48" disabled>
+				<option>You</option>
 			</select>
 		{/if}
 		{@render dateRange('Created', 'createdFrom', 'createdTo')}
