@@ -58,21 +58,32 @@
 </script>
 
 {#snippet dateRange(label: string, from: keyof TokenFilters, to: keyof TokenFilters)}
-	<fieldset class="flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
+	{@const set = Boolean(data.filters[from] || data.filters[to])}
+	<!-- One control, not three loose parts: the label is the field's prefix
+	     and both dates share its border, so a range reads (and wraps) as a
+	     unit. The label brightens while the range is filtering. -->
+	<fieldset
+		class="flex h-8 w-full min-w-0 items-stretch overflow-hidden rounded-lg border border-input bg-background text-sm shadow-(--shadow-panel) transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 sm:w-auto dark:bg-input/30"
+	>
 		<legend class="sr-only">{label}</legend>
-		<span aria-hidden="true">{label}</span>
-		<Input
+		<span
+			aria-hidden="true"
+			class="flex items-center border-r border-input bg-subtle px-2 sm:px-2.5 {set
+				? 'font-medium text-foreground'
+				: 'text-muted-foreground'}">{label}</span
+		>
+		<input
 			type="date"
 			aria-label="{label} from"
-			class="h-8 w-36"
+			class="range-date"
 			value={data.filters[from] ?? ''}
 			onchange={(e) => applyDate({ [from]: e.currentTarget.value || null })}
 		/>
-		<span aria-hidden="true">–</span>
-		<Input
+		<span aria-hidden="true" class="flex items-center text-muted-foreground">–</span>
+		<input
 			type="date"
 			aria-label="{label} to"
-			class="h-8 w-36"
+			class="range-date"
 			value={data.filters[to] ?? ''}
 			onchange={(e) => applyDate({ [to]: e.currentTarget.value || null })}
 		/>
@@ -102,62 +113,70 @@
 		</div>
 	{/if}
 
-	{#if data.isAdmin}
-		<div
-			role="tablist"
-			aria-label="Whose tokens"
-			class="mb-4 inline-flex rounded-lg border bg-subtle p-0.5 text-sm"
-		>
-			{#each [{ value: 'mine', label: 'Yours', href: '?' }, { value: 'all', label: 'Everyone', href: '?view=all' }] as opt (opt.value)}
-				<a
-					role="tab"
-					aria-selected={data.view === opt.value}
-					href={opt.href}
-					data-sveltekit-noscroll
-					class="rounded-md px-3 py-1 font-medium transition-colors {data.view === opt.value
-						? 'bg-background text-foreground shadow-(--shadow-sheet)'
-						: 'text-muted-foreground hover:text-foreground'}">{opt.label}</a
+	<div class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
+		<!-- Two clusters that wrap whole: who and what, then when. -->
+		<div class="flex flex-wrap items-center gap-2">
+			{#if data.isAdmin}
+				<div
+					role="tablist"
+					aria-label="Whose tokens"
+					class="inline-flex h-8 rounded-lg border bg-subtle p-0.5 text-sm"
 				>
-			{/each}
-		</div>
-	{/if}
-
-	<div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2">
-		<select
-			aria-label="Filter by status"
-			class="native-select w-36"
-			value={data.filters.status ?? ''}
-			onchange={(e) =>
-				applyFilter({ status: (e.currentTarget.value || null) as TokenStatus | null })}
-		>
-			<option value="">Any status</option>
-			{#each statuses as status (status)}
-				<option value={status}>{status[0].toUpperCase() + status.slice(1)}</option>
-			{/each}
-		</select>
-		<!-- Admins switch between Yours and Everyone: the owner slot stays in
-		     both (fixed to you in Yours) so the other fields don't shift. -->
-		{#if data.view === 'all'}
+					{#each [{ value: 'mine', label: 'Yours', href: '?' }, { value: 'all', label: 'Everyone', href: '?view=all' }] as opt (opt.value)}
+						<a
+							role="tab"
+							aria-selected={data.view === opt.value}
+							href={opt.href}
+							data-sveltekit-noscroll
+							class="flex items-center rounded-md px-3 font-medium transition-colors {data.view ===
+							opt.value
+								? 'bg-background text-foreground shadow-(--shadow-sheet)'
+								: 'text-muted-foreground hover:text-foreground'}">{opt.label}</a
+						>
+					{/each}
+				</div>
+				<!-- Scope first, then what narrows it. -->
+				<span aria-hidden="true" class="mx-1 hidden h-5 w-px bg-border sm:block"></span>
+			{/if}
 			<select
-				aria-label="Filter by owner"
-				class="native-select w-48"
-				value={data.filters.user ?? ''}
-				onchange={(e) => applyFilter({ user: e.currentTarget.value || null })}
+				aria-label="Filter by status"
+				class="native-select w-auto"
+				value={data.filters.status ?? ''}
+				onchange={(e) =>
+					applyFilter({ status: (e.currentTarget.value || null) as TokenStatus | null })}
 			>
-				<option value="">Any owner</option>
-				{#each ownerOptions as owner (owner.id)}
-					<option value={owner.id}>{owner.label}</option>
+				<option value="">Any status</option>
+				{#each statuses as status (status)}
+					<option value={status}>{status[0].toUpperCase() + status.slice(1)}</option>
 				{/each}
 			</select>
-		{:else if data.isAdmin}
-			<select aria-label="Owner" class="native-select w-48" disabled>
-				<option>You</option>
-			</select>
-		{/if}
-		{@render dateRange('Created', 'createdFrom', 'createdTo')}
-		{@render dateRange('Expires', 'expiresFrom', 'expiresTo')}
+			<!-- The owner slot stays in both views (fixed to you in Yours) so the
+			     other fields don't shift when switching. -->
+			{#if data.view === 'all'}
+				<select
+					aria-label="Filter by owner"
+					class="native-select w-auto max-w-48"
+					value={data.filters.user ?? ''}
+					onchange={(e) => applyFilter({ user: e.currentTarget.value || null })}
+				>
+					<option value="">Any owner</option>
+					{#each ownerOptions as owner (owner.id)}
+						<option value={owner.id}>{owner.label}</option>
+					{/each}
+				</select>
+			{:else if data.isAdmin}
+				<select aria-label="Owner" class="native-select w-auto max-w-48" disabled>
+					<option>You</option>
+				</select>
+			{/if}
+		</div>
+		<div class="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+			{@render dateRange('Created', 'createdFrom', 'createdTo')}
+			{@render dateRange('Expires', 'expiresFrom', 'expiresTo')}
+		</div>
 		{#if data.filtered}
-			<Button variant="ghost" size="sm" href={cleared} data-sveltekit-noscroll>Clear filters</Button
+			<Button variant="ghost" size="sm" href={cleared} data-sveltekit-noscroll class="ml-auto"
+				>Clear filters</Button
 			>
 		{/if}
 	</div>
@@ -236,3 +255,25 @@
 		</form>
 	</Sheet.Content>
 </Sheet.Root>
+
+<style>
+	/* The date inputs inside a joined range field: the field draws the
+	   border, focus ring and background. */
+	.range-date {
+		flex: 1 1 0;
+		font-size: inherit;
+		min-width: 0;
+		border: 0;
+		background: transparent;
+		padding: 0 0.25rem 0 0.5rem;
+		font-variant-numeric: tabular-nums;
+		outline: none;
+		color: var(--foreground);
+	}
+	@media (min-width: 40rem) {
+		.range-date {
+			flex: none;
+			width: 8.5rem;
+		}
+	}
+</style>
