@@ -14,10 +14,9 @@
 
 	let { data, form } = $props();
 	const u = $derived(data.subject);
-	// Viewer identity comes from the (app) layout's `user`; the server guard
-	// (requireSelfOrAdmin) already enforced admin-or-self.
+	// Viewer identity comes from the (app) layout's `user`; the load already
+	// sent members to /account, so the viewer is an admin.
 	const isSelf = $derived(u.id === data.user.id);
-	const canManage = $derived(data.user.role === 'admin');
 </script>
 
 <Page>
@@ -39,70 +38,63 @@
 			{/if}
 		{/snippet}
 		{#snippet actions()}
-			{#if canManage}
-				<form method="POST" action="?/setRole" use:enhance={toastErrors()}>
-					<input type="hidden" name="userId" value={u.id} />
-					<input type="hidden" name="role" value={u.role === 'admin' ? 'member' : 'admin'} />
-					<Button
-						type="submit"
-						variant="outline"
-						disabled={u.role === 'admin' && (isSelf || u.isOwner)}
-						title={u.role === 'admin' && u.isOwner ? 'Remove owner status first' : undefined}
-					>
-						{u.role === 'admin' ? 'Make member' : 'Make admin'}
-					</Button>
-				</form>
-				<form method="POST" action="?/setStatus" use:enhance={toastErrors()}>
-					<input type="hidden" name="userId" value={u.id} />
-					<input
-						type="hidden"
-						name="status"
-						value={u.status === 'pending' ? 'active' : 'pending'}
-					/>
-					<Button
-						type="submit"
-						variant="outline"
-						disabled={u.status !== 'pending' && (isSelf || u.isOwner)}
-					>
-						{u.status === 'pending' ? 'Activate' : 'Deactivate'}
-					</Button>
-				</form>
-				<form
-					method="POST"
-					action="?/deleteUser"
-					use:enhance={toastErrors(
-						confirmFirst(
-							{
-								title: `Delete ${u.name || u.email}?`,
-								description:
-									'Removes their grants and group memberships. Their tokens stop working.',
-								confirmLabel: 'Delete user',
-								tone: 'danger'
-							},
-							() =>
-								async ({ result, update }) => {
-									if (result.type === 'success') await goto('/users');
-									else await update();
-								}
-						)
-					)}
+			<form method="POST" action="?/setRole" use:enhance={toastErrors()}>
+				<input type="hidden" name="userId" value={u.id} />
+				<input type="hidden" name="role" value={u.role === 'admin' ? 'member' : 'admin'} />
+				<Button
+					type="submit"
+					variant="outline"
+					disabled={u.role === 'admin' && (isSelf || u.isOwner)}
+					title={u.role === 'admin' && u.isOwner ? 'Remove owner status first' : undefined}
 				>
-					<input type="hidden" name="userId" value={u.id} />
-					<Button
-						type="submit"
-						variant="destructive"
-						disabled={isSelf || (u.isOwner && data.lastOwner)}
-						title={isSelf
-							? 'You cannot delete your own account'
-							: u.isOwner && data.lastOwner
-								? 'Add another owner before deleting the last one'
-								: undefined}
-					>
-						<Trash2 />
-						Delete user
-					</Button>
-				</form>
-			{/if}
+					{u.role === 'admin' ? 'Make member' : 'Make admin'}
+				</Button>
+			</form>
+			<form method="POST" action="?/setStatus" use:enhance={toastErrors()}>
+				<input type="hidden" name="userId" value={u.id} />
+				<input type="hidden" name="status" value={u.status === 'pending' ? 'active' : 'pending'} />
+				<Button
+					type="submit"
+					variant="outline"
+					disabled={u.status !== 'pending' && (isSelf || u.isOwner)}
+				>
+					{u.status === 'pending' ? 'Activate' : 'Deactivate'}
+				</Button>
+			</form>
+			<form
+				method="POST"
+				action="?/deleteUser"
+				use:enhance={toastErrors(
+					confirmFirst(
+						{
+							title: `Delete ${u.name || u.email}?`,
+							description: 'Removes their grants and group memberships. Their tokens stop working.',
+							confirmLabel: 'Delete user',
+							tone: 'danger'
+						},
+						() =>
+							async ({ result, update }) => {
+								if (result.type === 'success') await goto('/users');
+								else await update();
+							}
+					)
+				)}
+			>
+				<input type="hidden" name="userId" value={u.id} />
+				<Button
+					type="submit"
+					variant="destructive"
+					disabled={isSelf || (u.isOwner && data.lastOwner)}
+					title={isSelf
+						? 'You cannot delete your own account'
+						: u.isOwner && data.lastOwner
+							? 'Add another owner before deleting the last one'
+							: undefined}
+				>
+					<Trash2 />
+					Delete user
+				</Button>
+			</form>
 		{/snippet}
 	</PageHeader>
 
@@ -129,11 +121,7 @@
 				<ul class="divide-y">
 					{#each data.memberships as membership (membership.id)}
 						<li class="flex items-center gap-2 px-5 py-3 text-sm">
-							{#if canManage}
-								<a href="/groups/{membership.id}" class="row-link">{membership.name}</a>
-							{:else}
-								<span class="font-medium">{membership.name}</span>
-							{/if}
+							<a href="/groups/{membership.id}" class="row-link">{membership.name}</a>
 							{#if membership.source === 'sso'}
 								<StatusBadge title="Membership synced from the SSO groups claim"
 									>Synced from SSO</StatusBadge
@@ -145,13 +133,9 @@
 			{/if}
 		</Panel>
 
-		<GrantEditor grants={data.grants} cacheNames={data.cacheNames} editable={canManage} />
+		<GrantEditor grants={data.grants} cacheNames={data.cacheNames} />
 
-		<Panel
-			title="Access via groups"
-			description={canManage ? "Edit on the group's page." : undefined}
-			flush
-		>
+		<Panel title="Access via groups" description="Edit on the group's page." flush>
 			<div class="relative overflow-x-auto">
 				<table class="data-table">
 					<thead>
@@ -165,21 +149,15 @@
 						{#each data.viaGroups as grant (grant.id)}
 							<tr>
 								<td>
-									<code class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs"
-										>{grant.pattern}</code
-									>
+									<code class="code-chip">{grant.pattern}</code>
 								</td>
 								<td class="text-muted-foreground">
 									{formatGrantActions(grant.actions)}
 								</td>
 								<td>
-									{#if canManage}
-										<a href="/groups/{grant.group_id}" class="row-link">
-											{grant.group_name}
-										</a>
-									{:else}
-										<span class="font-medium">{grant.group_name}</span>
-									{/if}
+									<a href="/groups/{grant.group_id}" class="row-link">
+										{grant.group_name}
+									</a>
 								</td>
 							</tr>
 						{:else}

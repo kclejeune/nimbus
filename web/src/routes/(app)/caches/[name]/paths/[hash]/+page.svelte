@@ -188,14 +188,14 @@
 				{#if data.pins.named.length > 0}
 					<Button variant="ghost" size="sm" href="{cacheHref}/pins">Manage pins</Button>
 				{:else if data.pins.anonymous}
-					<form method="POST" action="{cacheHref}?/unpin" use:enhance={pinSubmit()}>
+					<form method="POST" action="{cacheHref}?/unpinMany" use:enhance={pinSubmit()}>
 						<input type="hidden" name="hash" value={o.hash} />
 						<Button type="submit" variant="outline" size="sm" disabled={pinning}>
 							<PinOff /> Unpin
 						</Button>
 					</form>
 				{:else}
-					<form method="POST" action="{cacheHref}?/pin" use:enhance={pinSubmit()}>
+					<form method="POST" action="{cacheHref}?/pinMany" use:enhance={pinSubmit()}>
 						<input type="hidden" name="hash" value={o.hash} />
 						<Button type="submit" variant="outline" size="sm" disabled={pinning}>
 							<Pin /> Pin
@@ -296,9 +296,7 @@
 					{#each data.pins.named as pin (pin.name)}
 						<li class="flex flex-wrap items-center gap-2">
 							<Pin class="size-3.5 text-primary" />
-							<code class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs"
-								>{pin.name}</code
-							>
+							<code class="code-chip">{pin.name}</code>
 							<span class="text-muted-foreground"
 								>Revision from {formatIsoDateTime(pin.createdAt)}</span
 							>

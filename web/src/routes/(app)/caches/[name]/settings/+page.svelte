@@ -10,9 +10,10 @@
 	import StatusBadge from '$lib/components/layout/status-badge.svelte';
 
 	let { data, form } = $props();
-	const c = $derived(data.cache);
+	const c = $derived(data.cacheHeader);
 	// Destroy-only (cd) holders can view but not save configuration.
-	const canConfigure = $derived(data.permissions.canConfigure);
+	const canConfigure = $derived(data.cacheViewer.canConfigure);
+	const isAdmin = $derived(data.user.role === 'admin');
 	let submitting = $state(false);
 	let renaming = $state(false);
 	let deleting = $state(false);
@@ -38,7 +39,7 @@
 				<fieldset>
 					<legend class="mb-2 text-sm font-medium">
 						Visibility
-						{#if !data.isAdmin}
+						{#if !isAdmin}
 							<span class="font-normal text-muted-foreground">(admins only)</span>
 						{/if}
 					</legend>
@@ -50,7 +51,7 @@
 							name="is_public"
 							type="checkbox"
 							checked={c.isPublic}
-							disabled={!canConfigure || !data.isAdmin}
+							disabled={!canConfigure || !isAdmin}
 							class="mt-0.5 size-4 rounded border-input text-primary focus:ring-0 focus:ring-offset-0"
 						/>
 						<span>
@@ -63,7 +64,7 @@
 							</span>
 						</span>
 					</label>
-					{#if !data.isAdmin}
+					{#if !isAdmin}
 						<!-- Disabled checkboxes don't submit; preserve the current value. -->
 						{#if c.isPublic}<input type="hidden" name="is_public" value="on" />{/if}
 					{/if}
@@ -135,15 +136,15 @@
 		<SettingsSection title="Upstream caches" flush>
 			{#snippet description()}
 				Paths an enabled upstream already has are skipped on push and served through this cache.
-				Persist keeps a re-signed copy here, safe from upstream GC. Upstreams are server-wide{#if data.isAdmin},
+				Persist keeps a re-signed copy here, safe from upstream GC. Upstreams are server-wide{#if isAdmin},
 					managed in <a
 						href="/upstreams"
 						class="font-medium text-foreground underline-offset-4 hover:underline">Upstreams</a
 					>{/if}.
 			{/snippet}
-			{#if c.upstreams.length > 0}
+			{#if data.upstreams.length > 0}
 				<ul class="divide-y">
-					{#each c.upstreams as upstream (upstream.id)}
+					{#each data.upstreams as upstream (upstream.id)}
 						<li class="flex flex-wrap items-center gap-3 px-5 py-3">
 							<div class="min-w-48 flex-1">
 								<div class="flex items-center gap-2">
@@ -169,8 +170,8 @@
 								<option value="inherit">Default ({upstream.defaultMode})</option>
 								<option value="off" disabled={upstream.enforced}>Off</option>
 								<option value="redirect">Redirect</option>
-								<option value="persist" disabled={!data.isAdmin}>
-									Persist into this cache{data.isAdmin ? '' : ' (admins only)'}
+								<option value="persist" disabled={!isAdmin}>
+									Persist into this cache{isAdmin ? '' : ' (admins only)'}
 								</option>
 							</select>
 						</li>
@@ -239,7 +240,7 @@
 			</SettingsSection>
 		{/if}
 
-		{#if data.permissions.canDestroy}
+		{#if data.cacheViewer.canDestroy}
 			<SettingsSection
 				title="Delete cache"
 				tone="danger"

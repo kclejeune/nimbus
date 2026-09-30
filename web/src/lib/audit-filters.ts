@@ -1,6 +1,6 @@
 // Audit log filtering and target resolution, kept pure so the SQL shape and
 // the action → entity mapping are testable without a database.
-import { escapeLike } from '$lib/utils';
+import { distinctParams, escapeLike } from '$lib/utils';
 
 export interface AuditFilters {
 	/** User ids (any of), SYSTEM_USER for entries with no acting user. */
@@ -16,19 +16,25 @@ export const SYSTEM_USER = 'system';
 const ACTION_RE = /^[a-z_]+(\.[a-z_]+)*$/;
 const FAMILY_RE = /^[a-z_]+\.\*$/;
 
-/** Most values one filter takes (a URL is not a query language). */
-const MAX_VALUES = 50;
-
-const distinct = (values: string[]) =>
-	[...new Set(values.map((v) => v.trim()))].filter(Boolean).slice(0, MAX_VALUES);
+/** Query parameter per filter field, shared by the parser and link builder. */
+const PARAMS = { users: 'user', actions: 'action', q: 'q' } as const;
 
 export function parseAuditFilters(params: URLSearchParams): AuditFilters {
 	// Unknown action shapes are dropped rather than matched literally.
-	const actions = distinct(params.getAll('action')).filter(
+	const actions = distinctParams(params, PARAMS.actions).filter(
 		(a) => ACTION_RE.test(a) || FAMILY_RE.test(a)
 	);
-	const q = (params.get('q') ?? '').trim().slice(0, 200);
-	return { users: distinct(params.getAll('user')), actions, q };
+	const q = (params.get(PARAMS.q) ?? '').trim().slice(0, 200);
+	return { users: distinctParams(params, PARAMS.users), actions, q };
+}
+
+/** The filters as query parameters (for links that keep them). */
+export function auditFilterParams(f: AuditFilters): URLSearchParams {
+	const params = new URLSearchParams();
+	for (const u of f.users) params.append(PARAMS.users, u);
+	for (const a of f.actions) params.append(PARAMS.actions, a);
+	if (f.q) params.set(PARAMS.q, f.q);
+	return params;
 }
 
 export function hasFilters(f: AuditFilters): boolean {

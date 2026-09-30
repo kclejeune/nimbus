@@ -1,5 +1,11 @@
 <script lang="ts">
-	import { formatBytes, formatCount, formatRelativeTime, storageSavings } from '$lib/format';
+	import {
+		BUDGET_WARN,
+		formatBytes,
+		formatCount,
+		formatRelativeTime,
+		storageSavings
+	} from '$lib/format';
 	import UnifiedEndpointCard from '$lib/components/unified-endpoint-card.svelte';
 	import CopyField from '$lib/components/copy-field.svelte';
 	import Page from '$lib/components/layout/page.svelte';
@@ -221,7 +227,9 @@
 				)} saved by deduplication"
 			>
 				<div
-					class="h-full {usagePct != null && usagePct >= 90 ? 'bg-warning' : 'bg-primary'}"
+					class="h-full {usagePct != null && usagePct >= BUDGET_WARN * 100
+						? 'bg-warning'
+						: 'bg-primary'}"
 					style="width: {storedW}%"
 				></div>
 				{#if savedW > 0}

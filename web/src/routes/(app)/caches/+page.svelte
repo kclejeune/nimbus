@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { formatBytes, formatCount } from '$lib/format';
+	import { BUDGET_WARN, formatBytes, formatCount } from '$lib/format';
 	import { Skeleton } from '$lib/components/ui/skeleton/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import Page from '$lib/components/layout/page.svelte';
@@ -24,7 +24,7 @@
 				title="{Math.round(pct)}% of size budget"
 			>
 				<div
-					class="h-full rounded-full {pct >= 90 ? 'bg-warning' : 'bg-primary'}"
+					class="h-full rounded-full {pct >= BUDGET_WARN * 100 ? 'bg-warning' : 'bg-primary'}"
 					style="width: {Math.min(100, pct)}%"
 				></div>
 			</div>

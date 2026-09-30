@@ -5,7 +5,7 @@
 	import type { PageData } from './$types';
 	type StorageData = NonNullable<Extract<PageData, { view: 'storage' }>['storage']>;
 	import { formatBytes, formatCount, formatRelativeTime, storageSavings } from '$lib/format';
-	import { goto } from '$app/navigation';
+	import { replaceQuery } from '$lib/url-state';
 	import AreaChart from '$lib/components/charts/area-chart.svelte';
 	import Panel from '$lib/components/layout/panel.svelte';
 	import EmptyState from '$lib/components/layout/empty-state.svelte';
@@ -50,7 +50,7 @@
 		const params = new URLSearchParams({ view: 'storage' });
 		if (range !== 'all') params.set('range', range);
 		if (granularity !== 'week') params.set('granularity', granularity);
-		goto(`?${params}`, { replaceState: true, noScroll: true, keepFocus: true });
+		replaceQuery(params);
 	}
 </script>
 

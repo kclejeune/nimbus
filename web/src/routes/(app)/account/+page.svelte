@@ -103,9 +103,7 @@
 					{#each accessRows as row (row.id)}
 						<tr>
 							<td>
-								<code class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs"
-									>{row.pattern === '*' ? 'All caches' : row.pattern}</code
-								>
+								<code class="code-chip">{row.pattern === '*' ? 'All caches' : row.pattern}</code>
 							</td>
 							<td class="text-muted-foreground">{formatGrantActions(row.actions)}</td>
 							<td>

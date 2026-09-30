@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
+	import { replaceQuery } from '$lib/url-state';
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import TabNav from '$lib/components/layout/tab-nav.svelte';
@@ -16,7 +16,7 @@
 	function pickWindow(key: string) {
 		const params = new URLSearchParams();
 		if (key !== '24h') params.set('window', key);
-		goto(params.size ? `?${params}` : '?', { replaceState: true, noScroll: true, keepFocus: true });
+		replaceQuery(params);
 	}
 </script>
 

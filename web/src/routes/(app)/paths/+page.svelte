@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { formatCount } from '$lib/format';
 	import StorePathTable from '$lib/components/store-path-table.svelte';
-	import { goto } from '$app/navigation';
+	import { replaceQuery } from '$lib/url-state';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import FilterMenu from '$lib/components/filter-menu.svelte';
 	import { FolderSearch, Search } from '@lucide/svelte';
@@ -28,14 +28,7 @@
 
 	function applyFilters(next: { caches?: string[]; q?: string }) {
 		// Any filter change resets to page 1 — the old offset is meaningless.
-		goto(href(next), { replaceState: true, keepFocus: true, noScroll: true });
-	}
-
-	let debounce: ReturnType<typeof setTimeout>;
-	function onSearchInput(e: Event & { currentTarget: HTMLInputElement }) {
-		const v = e.currentTarget.value;
-		clearTimeout(debounce);
-		debounce = setTimeout(() => applyFilters({ q: v }), 300);
+		replaceQuery(href(next));
 	}
 </script>
 
@@ -51,7 +44,11 @@
 			selected={data.cacheFilter}
 			onchange={(caches) => applyFilters({ caches })}
 		/>
-		<SearchInput value={data.q} oninput={onSearchInput} aria-label="Filter paths by name" />
+		<SearchInput
+			value={data.q}
+			onsearch={(q) => applyFilters({ q })}
+			aria-label="Filter paths by name"
+		/>
 		<span class="ms-auto text-sm whitespace-nowrap text-muted-foreground tabular-nums">
 			{formatCount(data.total)}{data.q ? ' matching' : ' paths'}
 		</span>

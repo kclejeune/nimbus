@@ -11,7 +11,7 @@
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import * as Sheet from '$lib/components/ui/sheet/index.js';
-	import { goto } from '$app/navigation';
+	import { replaceQuery } from '$lib/url-state';
 	import {
 		TOKEN_STATUSES,
 		tokenFilterParams,
@@ -37,7 +37,7 @@
 
 	/** A filter change starts over at page 1. */
 	function applyFilter(patch: Partial<TokenFilters>, view: 'mine' | 'all' = data.view) {
-		goto(href(1, patch, view), { replaceState: true, keepFocus: true, noScroll: true });
+		replaceQuery(href(1, patch, view));
 	}
 
 	// A date input reports every valid intermediate value while a year is
@@ -77,18 +77,14 @@
 		statuses.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))
 	);
 
-	// Every owner, you marked as such; an owner from a shared link who isn't
-	// listed still gets an entry, so the menu reflects the filter.
-	const ownerOptions = $derived([
-		...data.owners.map((o) => ({
+	// Every owner, you marked as such.
+	const ownerOptions = $derived(
+		data.owners.map((o) => ({
 			value: o.id,
 			label: o.id === data.user.id ? `${o.label} (you)` : o.label,
 			group: 'Owners'
-		})),
-		...data.filters.users
-			.filter((u) => !data.owners.some((o) => o.id === u))
-			.map((u) => ({ value: u, label: u, group: 'Owners' }))
-	]);
+		}))
+	);
 </script>
 
 {#snippet dateRange(label: string, from: keyof TokenFilters, to: keyof TokenFilters)}

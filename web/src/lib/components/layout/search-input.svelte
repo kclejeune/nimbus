@@ -7,8 +7,21 @@
 		value = $bindable(),
 		class: className,
 		placeholder = 'Filter by name',
+		onsearch,
 		...rest
-	}: Omit<HTMLInputAttributes, 'type'> = $props();
+	}: Omit<HTMLInputAttributes, 'type'> & {
+		/** The trimmed value, once typing pauses: for URL-driven filters that
+		 *  re-run a load, so each keystroke doesn't. */
+		onsearch?: (q: string) => void;
+	} = $props();
+
+	let timer: ReturnType<typeof setTimeout>;
+	function search(e: Event & { currentTarget: HTMLInputElement }) {
+		if (!onsearch) return;
+		const q = e.currentTarget.value.trim();
+		clearTimeout(timer);
+		timer = setTimeout(() => onsearch(q), 300);
+	}
 </script>
 
 <div class={cn('relative w-72 max-w-full', className)}>
@@ -23,5 +36,9 @@
 		aria-label={rest['aria-label'] ?? placeholder}
 		class="h-8 w-full rounded-lg border border-input bg-background pr-3 pl-8 text-sm shadow-(--shadow-panel) transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
 		{...rest}
+		oninput={(e) => {
+			rest.oninput?.(e);
+			search(e);
+		}}
 	/>
 </div>

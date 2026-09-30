@@ -41,9 +41,7 @@
 							{#if grant.direct}
 								<span class="text-muted-foreground">This cache</span>
 							{:else}
-								<code class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs"
-									>{grant.pattern}</code
-								>
+								<code class="code-chip">{grant.pattern}</code>
 								<span class="ml-1 text-xs text-muted-foreground"
 									>Pattern grant. Edit on the subject's page.</span
 								>

@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { formatBytes, formatCount, shortStorePath, splitStorePath } from '$lib/format';
-	import { goto } from '$app/navigation';
+	import { formatBytes, formatCount, plural, shortStorePath, splitStorePath } from '$lib/format';
+	import { replaceQuery } from '$lib/url-state';
 	import { enhance } from '$app/forms';
 	import { confirmFirst, toastErrors } from '$lib/enhance';
 	import EmptyState from '$lib/components/layout/empty-state.svelte';
@@ -27,7 +27,7 @@
 	type SortKey = 'name' | 'date' | 'size';
 
 	let { data, form } = $props();
-	const c = $derived(data.cache);
+	const c = $derived(data.cacheHeader);
 	const pinnedSet = $derived(new Set(data.pinnedHashes));
 
 	// RFC3339 timestamp → YYYY-MM-DD.
@@ -56,7 +56,7 @@
 	});
 
 	// --- Bulk selection: only offered when there's a bulk action to take. ---
-	const canSelect = $derived(data.viewer.canRetention || data.viewer.canDelete);
+	const canSelect = $derived(data.cacheViewer.canConfigure || data.canDelete);
 	const selected = new SvelteSet<string>();
 	const allSelected = $derived(rows.length > 0 && rows.every((r) => selected.has(r.hash)));
 	const someSelected = $derived(selected.size > 0 && !allSelected);
@@ -84,9 +84,9 @@
 		const n = selected.size;
 		if (kind === 'prune') {
 			const ok = await ask({
-				title: `Remove ${n} ${n === 1 ? 'path' : 'paths'}?`,
+				title: `Remove ${plural(n, 'path')}?`,
 				description: 'They stop being served now. Paths that others still depend on are kept.',
-				confirmLabel: `Remove ${n} ${n === 1 ? 'path' : 'paths'}`,
+				confirmLabel: `Remove ${plural(n, 'path')}`,
 				tone: 'danger'
 			});
 			if (!ok) {
@@ -104,9 +104,7 @@
 				extra = [];
 				appended = false;
 			} else {
-				toast.success(
-					`${kind === 'pin' ? 'Pinned' : 'Unpinned'} ${n} ${n === 1 ? 'path' : 'paths'}`
-				);
+				toast.success(`${kind === 'pin' ? 'Pinned' : 'Unpinned'} ${plural(n, 'path')}`);
 			}
 		};
 	};
@@ -119,15 +117,7 @@
 		if (sort !== 'date') params.set('sort', sort);
 		if (dir !== 'desc') params.set('dir', dir);
 		if (q) params.set('q', q);
-		const qs = params.toString();
-		goto(qs ? `?${qs}` : '?', { replaceState: true, keepFocus: true, noScroll: true });
-	}
-
-	let debounce: ReturnType<typeof setTimeout>;
-	function onSearchInput(e: Event & { currentTarget: HTMLInputElement }) {
-		const v = e.currentTarget.value;
-		clearTimeout(debounce);
-		debounce = setTimeout(() => applyParams({ q: v }), 300);
+		replaceQuery(params);
 	}
 
 	function toggleSort(key: SortKey) {
@@ -213,7 +203,11 @@
 		<p class="text-sm text-muted-foreground tabular-nums">
 			{formatCount(data.total)}{data.q ? ' matching' : ' store paths'}
 		</p>
-		<SearchInput value={data.q} oninput={onSearchInput} aria-label="Filter store paths by name" />
+		<SearchInput
+			value={data.q}
+			onsearch={(q) => applyParams({ q })}
+			aria-label="Filter store paths by name"
+		/>
 	</div>
 
 	{#if form && 'pruned' in form}
@@ -289,10 +283,10 @@
 								<div
 									class="flex items-center justify-end gap-0.5 opacity-60 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
 								>
-									{#if data.viewer.canRetention}
+									{#if data.cacheViewer.canConfigure}
 										<form
 											method="POST"
-											action={isPinned ? '?/unpin' : '?/pin'}
+											action={isPinned ? '?/unpinMany' : '?/pinMany'}
 											use:enhance={toastErrors()}
 										>
 											<input type="hidden" name="hash" value={p.hash} />
@@ -308,10 +302,10 @@
 											</button>
 										</form>
 									{/if}
-									{#if data.viewer.canDelete}
+									{#if data.canDelete}
 										<form
 											method="POST"
-											action="?/prune"
+											action="?/pruneMany"
 											use:enhance={toastErrors(
 												confirmFirst(
 													{
@@ -386,7 +380,7 @@
 					<span class="text-xs text-warning">Select at most {data.bulkMax} at a time</span>
 				{/if}
 				<span class="mx-1 h-5 w-px bg-border" aria-hidden="true"></span>
-				{#if data.viewer.canRetention}
+				{#if data.cacheViewer.canConfigure}
 					{#if selectedPinned < selected.size}
 						<Button
 							type="submit"
@@ -406,7 +400,7 @@
 						>
 					{/if}
 				{/if}
-				{#if data.viewer.canDelete}
+				{#if data.canDelete}
 					<Button
 						type="submit"
 						variant="ghost"

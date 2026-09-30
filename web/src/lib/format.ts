@@ -72,6 +72,9 @@ export function storageSavings(
 	};
 }
 
+/** Share of a size budget or limit past which usage is flagged. */
+export const BUDGET_WARN = 0.9;
+
 /** "1 path", "3 paths". */
 export function plural(n: number, one: string, many = one + 's'): string {
 	return `${n} ${n === 1 ? one : many}`;

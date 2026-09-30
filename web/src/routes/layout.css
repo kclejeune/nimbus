@@ -42,11 +42,6 @@
 	--border: oklch(0.915 0.009 264);
 	--input: oklch(0.885 0.011 264);
 	--ring: oklch(0.52 0.155 264);
-	--chart-1: oklch(0.52 0.155 264);
-	--chart-2: oklch(0.7 0.11 220);
-	--chart-3: oklch(0.62 0.12 165);
-	--chart-4: oklch(0.72 0.13 75);
-	--chart-5: oklch(0.6 0.16 310);
 	--sidebar: var(--canvas);
 	--sidebar-foreground: oklch(0.33 0.028 272);
 	--sidebar-primary: oklch(0.52 0.155 264);
@@ -98,11 +93,6 @@
 	--border: oklch(0.3 0.02 268);
 	--input: oklch(0.34 0.022 268);
 	--ring: oklch(0.7 0.13 262);
-	--chart-1: oklch(0.7 0.13 262);
-	--chart-2: oklch(0.78 0.1 220);
-	--chart-3: oklch(0.74 0.12 165);
-	--chart-4: oklch(0.8 0.13 75);
-	--chart-5: oklch(0.72 0.14 310);
 	--sidebar: var(--canvas);
 	--sidebar-foreground: oklch(0.8 0.015 266);
 	--sidebar-primary: oklch(0.7 0.13 262);
@@ -148,11 +138,6 @@
 		--border: oklch(0.3 0.02 268);
 		--input: oklch(0.34 0.022 268);
 		--ring: oklch(0.7 0.13 262);
-		--chart-1: oklch(0.7 0.13 262);
-		--chart-2: oklch(0.78 0.1 220);
-		--chart-3: oklch(0.74 0.12 165);
-		--chart-4: oklch(0.8 0.13 75);
-		--chart-5: oklch(0.72 0.14 310);
 		--sidebar: var(--canvas);
 		--sidebar-foreground: oklch(0.8 0.015 266);
 		--sidebar-primary: oklch(0.7 0.13 262);
@@ -204,11 +189,6 @@
 	--color-border: var(--border);
 	--color-input: var(--input);
 	--color-ring: var(--ring);
-	--color-chart-1: var(--chart-1);
-	--color-chart-2: var(--chart-2);
-	--color-chart-3: var(--chart-3);
-	--color-chart-4: var(--chart-4);
-	--color-chart-5: var(--chart-5);
 	--color-sidebar: var(--sidebar);
 	--color-sidebar-foreground: var(--sidebar-foreground);
 	--color-sidebar-primary: var(--sidebar-primary);
@@ -289,6 +269,10 @@
 	/* Row links: the name cell is the row's primary target. */
 	.row-link {
 		@apply font-medium text-foreground underline-offset-4 hover:text-primary hover:underline;
+	}
+	/* Inline monospace identifier: grant patterns, action ids, token scopes. */
+	.code-chip {
+		@apply rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs;
 	}
 
 	/* Native <select>, matched to the Input primitive. Kept native (not the

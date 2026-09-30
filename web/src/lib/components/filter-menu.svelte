@@ -48,22 +48,32 @@
 		class?: string;
 	} = $props();
 
+	// A selected value missing from `options` (an id from a shared link that
+	// isn't listed) still gets an entry, under the last group, so the menu
+	// always reflects the active filter.
+	const shown = $derived.by((): FilterOption[] => {
+		const known = new Set(options.map((o) => o.value));
+		const group = options.at(-1)?.group;
+		return [
+			...options,
+			...selected.filter((v) => !known.has(v)).map((v) => ({ value: v, label: v, group }))
+		];
+	});
+
 	const text = $derived.by(() => {
 		if (display) return display;
 		if (selected.length === 0) return allLabel;
 		if (selected.length > 1) return `${selected.length} ${noun}`;
-		return options.find((o) => o.value === selected[0])?.label ?? selected[0];
+		return shown.find((o) => o.value === selected[0])?.label ?? selected[0];
 	});
 	const mono = $derived(
-		!display &&
-			selected.length === 1 &&
-			(options.find((o) => o.value === selected[0])?.mono ?? false)
+		!display && selected.length === 1 && (shown.find((o) => o.value === selected[0])?.mono ?? false)
 	);
 
 	// Groups in first-seen order; ungrouped options come first.
 	const groups = $derived.by(() => {
 		const out = new Map<string, FilterOption[]>();
-		for (const o of options) out.set(o.group ?? '', [...(out.get(o.group ?? '') ?? []), o]);
+		for (const o of shown) out.set(o.group ?? '', [...(out.get(o.group ?? '') ?? []), o]);
 		return [...out];
 	});
 
@@ -92,7 +102,7 @@
 					{#if preset.active}<Check class="ml-auto" />{/if}
 				</DropdownMenu.Item>
 			{/each}
-			{#if options.length}
+			{#if shown.length}
 				<div class="max-h-72 overflow-y-auto">
 					{#each groups as [group, items] (group)}
 						<DropdownMenu.Separator />

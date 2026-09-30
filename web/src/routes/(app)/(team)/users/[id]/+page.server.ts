@@ -1,6 +1,5 @@
 import { error, redirect } from '@sveltejs/kit';
 import { requireSelfOrAdmin } from '$lib/server/auth/guard';
-import { isActiveUser } from '$lib/server/auth/types';
 import { annotateGrantMatches, grantActions } from '$lib/server/auth/grants';
 import { ownerCount, userAdminActions } from '$lib/server/auth/user-admin';
 import { listUserTokens, revokeUserToken } from '$lib/server/tokens';
@@ -16,7 +15,6 @@ export const load: PageServerLoad = async ({ platform, locals, params }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
-	const isAdmin = locals.user!.role === 'admin';
 	const [user, access, owners, cacheNames, tokens] = await Promise.all([
 		db
 			.prepare('SELECT id, name, email, role, is_owner, status FROM user WHERE id = ?1')
@@ -32,16 +30,11 @@ export const load: PageServerLoad = async ({ platform, locals, params }) => {
 		// Groups, direct grants, and access inherited through groups, so "what
 		// can this user touch?" is answerable from this one page.
 		loadUserAccess(db, params.id),
-		// Only the admin-only delete button reads the owner count.
-		isAdmin ? ownerCount(db) : null,
+		ownerCount(db),
 		listCacheNames(db),
 		listUserTokens(db, params.id)
 	]);
 	if (!user) throw error(404, 'User not found');
-
-	// Suspension mirrors isTokenDisabled in cache/db.ts: a non-active owner's
-	// tokens are inert and resume on reactivation.
-	const suspended = !isActiveUser(user);
 
 	return {
 		subject: {
@@ -52,15 +45,13 @@ export const load: PageServerLoad = async ({ platform, locals, params }) => {
 			isOwner: user.is_owner === 1,
 			status: user.status
 		},
-		lastOwner: (owners ?? 0) <= 1,
+		lastOwner: owners <= 1,
 		memberships: access.memberships,
 		grants: annotateGrantMatches(access.grants, cacheNames),
 		viaGroups: access.viaGroups,
 		cacheNames,
-		tokens: tokens.map((t) => ({
-			...t,
-			status: suspended && t.status === 'active' ? ('suspended' as const) : t.status
-		}))
+		// Already 'suspended' for a non-active owner (TOKEN_STATUS_SQL).
+		tokens
 	};
 };
 

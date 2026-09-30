@@ -2,7 +2,7 @@
 // the page's loader gathers the facts; this turns them into reasons that
 // mirror what gc.ts actually does (see the rule notes on each branch).
 import { TOUCH_GRANULARITY_MS } from './db';
-import { plural } from '$lib/format';
+import { formatBytes, formatIsoDate, plural } from '$lib/format';
 
 const DAY_MS = 86400_000;
 
@@ -134,7 +134,7 @@ export function explainRetention(f: RetentionFacts): RetentionExplanation {
 			reasons.push({
 				tone: 'info',
 				title: `Expires ${plural(f.retentionDays, 'day')} after its last use`,
-				detail: `Last ${verb} ${formatAgo(f.now - lastUsed)}. Eligible for removal after ${eligible.toISOString().slice(0, 10)} unless it or a dependent is pulled again.`
+				detail: `Last ${verb} ${formatAgo(f.now - lastUsed)}. Eligible for removal after ${formatIsoDate(eligible.toISOString())} unless it or a dependent is pulled again.`
 			});
 		} else if (f.freshAncestor) {
 			reasons.push({
@@ -171,14 +171,14 @@ export function explainRetention(f: RetentionFacts): RetentionExplanation {
 	if (f.retentionMaxBytes != null) {
 		reasons.push({
 			tone: 'info',
-			title: `If the cache exceeds its ${formatGiB(f.retentionMaxBytes)} limit`,
+			title: `If the cache exceeds its ${formatBytes(f.retentionMaxBytes)} limit`,
 			detail: sizeDetail
 		});
 	}
 	if (f.globalMaxBytes != null) {
 		reasons.push({
 			tone: 'info',
-			title: `If the instance exceeds its ${formatGiB(f.globalMaxBytes)} storage limit`,
+			title: `If the instance exceeds its ${formatBytes(f.globalMaxBytes)} storage limit`,
 			detail: sizeDetail
 		});
 	}
@@ -196,9 +196,4 @@ function formatAgo(ms: number): string {
 	if (days <= 0) return 'today';
 	if (days === 1) return 'yesterday';
 	return `${days} days ago`;
-}
-
-function formatGiB(bytes: number): string {
-	const gib = bytes / 1024 ** 3;
-	return `${gib >= 10 ? Math.round(gib) : Number(gib.toFixed(1))} GiB`;
 }

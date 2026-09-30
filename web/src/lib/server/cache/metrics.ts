@@ -81,9 +81,10 @@ export function edgeEvent(cfCacheStatus: string | null): EdgeEvent {
  * Guard refusals share their sampling because they also scale with abuse.
  *
  * A sampled point carries its divisor as double1, so it stands for that many
- * events; every writer here sets double1 to its weight and traffic.ts sums
- * `_sample_interval * double1`. Unset or <= 1 records everything, which is the
- * development default; deployment configs sample 1-in-100.
+ * events; every writer here sets double1 to its weight and
+ * observability/query.ts sums `_sample_interval * double1`. Unset or <= 1
+ * records everything, which is the development default; deployment configs
+ * sample 1-in-100.
  */
 export function readSampleRate(env: Env): number {
 	const raw = Number(env.CACHE_METRICS_SAMPLE);

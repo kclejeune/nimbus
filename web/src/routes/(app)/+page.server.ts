@@ -10,7 +10,7 @@ import { instanceStatsSnapshot } from '$lib/server/cache/stats';
 import { canOnCache } from '$lib/server/auth/permissions';
 import { browsableCaches } from '$lib/server/cache/cache-page';
 import { listUserTokens } from '$lib/server/tokens';
-import { plural } from '$lib/format';
+import { BUDGET_WARN, plural, storageSavings } from '$lib/format';
 import type { PageServerLoad } from './$types';
 
 export interface AttentionItem {
@@ -28,7 +28,6 @@ const TOKEN_WARN_DAYS = 14;
 
 /** Whether each user has pushed anything (see the onboarding query below). */
 const hasPushed = new AsyncMemo<boolean>(60_000, 1_000);
-const BUDGET_WARN = 0.9;
 
 export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 	const db = platform?.env.ATTIC_DB;
@@ -58,7 +57,7 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 			: null,
 		allLiveUpstreams(read),
 		browsableCaches(locals, db, read),
-		listUserTokens(db, user.id),
+		listUserTokens(read, user.id),
 		parent()
 	]);
 
@@ -76,11 +75,8 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 	// browse.
 	const [recent, budgetBytes, pushed] = await Promise.all([
 		newestAcrossCaches(read, ids, 6),
-		// Same accounting as /caches; only caches with a budget are scanned.
-		cacheSizes(
-			read,
-			budgeted.map((c) => c.id)
-		),
+		// Same accounting (and memo) as /caches; skipped with no budget to check.
+		budgeted.length === 0 ? new Map<number, number>() : cacheSizes(read),
 		// created_by is the pushing token's subject (the user id). Unindexed,
 		// so a viewer who never pushed scans every object in their writable
 		// caches — skipped when they hold no token, since then the push step
@@ -144,7 +140,7 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 	if (isAdmin && globalMaxBytes && stats.storageBytes >= globalMaxBytes * BUDGET_WARN) {
 		attention.push({
 			tone: stats.storageBytes >= globalMaxBytes ? 'danger' : 'warning',
-			title: `Storage is at ${Math.round((stats.storageBytes / globalMaxBytes) * 100)}% of the instance limit`,
+			title: `Storage is at ${storageSavings(stats, globalMaxBytes).usagePct}% of the instance limit`,
 			detail: 'Over the limit, the least recently used closures are evicted from every cache.',
 			href: '/settings',
 			action: 'Adjust limit'

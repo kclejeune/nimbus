@@ -37,9 +37,9 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	// Read-only viewer; an entry lagging one replica tick is fine.
 	const read = readSession(db);
 
-	// One row past the page detects "next" without a second scan per request;
-	// the total (under the same filters) drives the "X–Y of N" footer.
-	const [{ results }, total] = await Promise.all([
+	// The total (under the same filters) drives both the "X–Y of N" footer
+	// and whether there's a next page.
+	const [{ results: rows }, total] = await Promise.all([
 		read
 			.prepare(
 				`SELECT a.id, a.action, a.target, a.detail, a.created_at, a.user_id,
@@ -50,7 +50,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 				 ORDER BY a.created_at DESC, a.id DESC
 				 LIMIT ? OFFSET ?`
 			)
-			.bind(...where.binds, limit + 1, (page - 1) * limit)
+			.bind(...where.binds, limit, (page - 1) * limit)
 			.all<AuditRow>(),
 		read
 			.prepare(`SELECT COUNT(*) AS n FROM audit_log a ${where.sql}`)
@@ -58,7 +58,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 			.first<{ n: number }>()
 	]);
 
-	const rows = results.slice(0, limit);
+	const count = total?.n ?? 0;
 
 	// Resolve this page's targets to live entities in one bounded query per
 	// kind; anything unresolved (deleted, renamed) renders as plain text.
@@ -135,8 +135,8 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 	return {
 		page,
 		pageSize: limit,
-		total: total?.n ?? 0,
-		hasMore: results.length > limit,
+		total: count,
+		hasMore: page * limit < count,
 		filters,
 		filtered: hasFilters(filters),
 		entries: rows.map((r) => ({

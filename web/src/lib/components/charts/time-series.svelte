@@ -7,6 +7,20 @@
 		/** null = no data in that bucket: lines break there instead of dropping to zero. */
 		values: (number | null)[];
 	}
+
+	const DAY_FMT = new Intl.DateTimeFormat('en-US', {
+		month: 'short',
+		day: 'numeric',
+		timeZone: 'UTC'
+	});
+	const TIME_FMT = new Intl.DateTimeFormat('en-US', {
+		hour: '2-digit',
+		minute: '2-digit',
+		hour12: false,
+		timeZone: 'UTC'
+	});
+	const dayLabel = (iso: string) => DAY_FMT.format(new Date(iso));
+	const timeLabel = (iso: string) => TIME_FMT.format(new Date(iso));
 </script>
 
 <script lang="ts">
@@ -109,22 +123,12 @@
 		return out;
 	});
 
-	const dayLabel = (iso: string) =>
-		new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-	const timeLabel = (iso: string) =>
-		new Date(iso).toLocaleTimeString('en-US', {
-			hour: '2-digit',
-			minute: '2-digit',
-			hour12: false,
-			timeZone: 'UTC'
-		});
-	const xLabel = (iso: string) =>
-		stepSeconds >= 86400 ? dayLabel(iso) : stepSeconds >= 3600 ? dayLabel(iso) : timeLabel(iso);
+	const xLabel = (iso: string) => (stepSeconds >= 3600 ? dayLabel(iso) : timeLabel(iso));
 	const fullLabel = (iso: string) =>
 		stepSeconds >= 86400 ? dayLabel(iso) : `${dayLabel(iso)}, ${timeLabel(iso)} UTC`;
-	const xTicks = $derived(
-		tickIndices(t.map(xLabel), 6).map((i) => ({ x: xAt(i), label: xLabel(t[i]) }))
-	);
+	// Formatted once per data change, not again on every resize (xAt tracks width).
+	const labels = $derived(t.map(xLabel));
+	const xTicks = $derived(tickIndices(labels, 6).map((i) => ({ x: xAt(i), label: labels[i] })));
 
 	type Pt = readonly [number, number | null];
 	// A null starts a new subpath, so gaps render as gaps.

@@ -1,14 +1,14 @@
 <script lang="ts">
 	import { formatCount, formatIsoDateTime } from '$lib/format';
 	import { Button } from '$lib/components/ui/button/index.js';
-	import { goto } from '$app/navigation';
+	import { replaceQuery } from '$lib/url-state';
 	import { page as pageState } from '$app/state';
 	import { PAGE_SIZES } from '$lib/pagination';
 	import { fitPageSize } from './page-size';
 	import { ScrollText, SearchX } from '@lucide/svelte';
 	import SearchInput from '$lib/components/layout/search-input.svelte';
 	import FilterMenu from '$lib/components/filter-menu.svelte';
-	import { SYSTEM_USER } from '$lib/audit-filters';
+	import { SYSTEM_USER, auditFilterParams } from '$lib/audit-filters';
 	import Page from '$lib/components/layout/page.svelte';
 	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import EmptyState from '$lib/components/layout/empty-state.svelte';
@@ -24,11 +24,7 @@
 	 *  patched); limit is always explicit so pagination never drifts back to the
 	 *  server default mid-session. */
 	function href(page: number, limit: number, patch: FilterPatch = {}): string {
-		const f = { ...data.filters, ...patch };
-		const params = new URLSearchParams();
-		for (const u of f.users) params.append('user', u);
-		for (const a of f.actions) params.append('action', a);
-		if (f.q) params.set('q', f.q);
+		const params = auditFilterParams({ ...data.filters, ...patch });
 		if (page > 1) params.set('page', String(page));
 		params.set('limit', String(limit));
 		return `?${params}`;
@@ -37,25 +33,13 @@
 	/** Any filter change starts over at page 1: the old offset is meaningless
 	 *  once the matching set changes. */
 	function applyFilter(patch: FilterPatch) {
-		goto(href(1, data.pageSize, patch), { replaceState: true, keepFocus: true, noScroll: true });
+		replaceQuery(href(1, data.pageSize, patch));
 	}
 
-	let debounce: ReturnType<typeof setTimeout>;
-	function onSearchInput(e: Event & { currentTarget: HTMLInputElement }) {
-		const v = e.currentTarget.value.trim();
-		clearTimeout(debounce);
-		debounce = setTimeout(() => applyFilter({ q: v }), 300);
-	}
-
-	// System first, then everyone who has acted; a user id from a shared link
-	// that isn't in the actor list still gets an entry, so the menu reflects
-	// the active filter.
+	// System first, then everyone who has acted.
 	const userOptions = $derived([
 		{ value: SYSTEM_USER, label: 'System' },
-		...data.actors.map((a) => ({ value: a.id, label: a.label, group: 'Users' })),
-		...data.filters.users
-			.filter((u) => u !== SYSTEM_USER && !data.actors.some((a) => a.id === u))
-			.map((u) => ({ value: u, label: u, group: 'Users' }))
+		...data.actors.map((a) => ({ value: a.id, label: a.label, group: 'Users' }))
 	]);
 	// A family entry (`cache.*`) heads each group; picking it covers the
 	// family, picking single actions narrows to those.
@@ -80,10 +64,11 @@
 		// Space from the table's top to the viewport bottom, minus the header row
 		// and the pagination footer below the table.
 		const top = tableBox.getBoundingClientRect().top;
-		const available = window.innerHeight - top - 34 /* thead */ - 56; /* footer */
+		const available =
+			window.innerHeight - top - 37 /* .data-table thead: h-9 + border */ - 56; /* footer */
 		const best = fitPageSize(available);
 		if (best !== data.pageSize) {
-			goto(href(1, best), { replaceState: true, keepFocus: true, noScroll: true });
+			replaceQuery(href(1, best));
 		}
 	});
 </script>
@@ -111,7 +96,7 @@
 			/>
 			<SearchInput
 				value={data.filters.q}
-				oninput={onSearchInput}
+				onsearch={(q) => applyFilter({ q })}
 				placeholder="Search target or detail"
 				class="w-64"
 			/>
@@ -166,10 +151,7 @@
 								{/if}
 							</td>
 							<td>
-								<code
-									class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs whitespace-nowrap"
-									>{entry.action}</code
-								>
+								<code class="code-chip whitespace-nowrap">{entry.action}</code>
 							</td>
 							<td class="max-w-56 truncate text-xs" title={entry.target}>
 								{#if entry.targetLink}

@@ -67,9 +67,7 @@
 							<td class="num">{group.members}</td>
 							<td>
 								{#if group.oidcGroup}
-									<code class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs"
-										>{group.oidcGroup}</code
-									>
+									<code class="code-chip">{group.oidcGroup}</code>
 								{:else}
 									<span class="text-muted-foreground">Managed manually</span>
 								{/if}

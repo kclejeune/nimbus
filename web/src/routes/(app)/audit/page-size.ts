@@ -3,7 +3,8 @@
 
 import { PAGE_SIZES } from '$lib/pagination';
 
-/** Approximate rendered height of one table row (px) — matches py-3 rows. */
+/** Approximate rendered height of one .data-table row (px): py-2.5 padding,
+ *  a text-sm line and the 1px border (layout.css). */
 export const ROW_HEIGHT = 41;
 
 /** Largest allowed page size whose rows fit in `availablePx`, clamped to the

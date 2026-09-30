@@ -32,13 +32,10 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 	const env = platform?.env;
 	if (!env) throw error(500, 'Platform bindings unavailable');
 
-	const { cache, canConfigure, canDestroy } = await requireCacheManage(
-		locals,
-		env.ATTIC_DB,
-		params.name
-	);
+	// The cache's settings and the viewer's bits come from the [name] layout
+	// (cacheHeader, cacheViewer); this only adds the upstream picker.
+	const { cache } = await requireCacheManage(locals, env.ATTIC_DB, params.name);
 
-	const isAdmin = locals.user!.role === 'admin';
 	const [registry, overrides] = await Promise.all([
 		listRegistry(env.ATTIC_DB),
 		cacheUpstreamOverrides(env.ATTIC_DB, cache.id)
@@ -57,19 +54,7 @@ export const load: PageServerLoad = async ({ platform, params, locals }) => {
 		mode: overrides.get(u.id) ?? ('inherit' as const)
 	}));
 
-	return {
-		cache: {
-			name: cache.name,
-			isPublic: cache.is_public !== 0,
-			priority: cache.priority,
-			compression: cache.compression,
-			retentionDays: cache.retention_period,
-			retentionMaxBytes: cache.retention_max_bytes,
-			upstreams
-		},
-		permissions: { canConfigure, canDestroy },
-		isAdmin
-	};
+	return { upstreams };
 };
 
 export const actions: Actions = {

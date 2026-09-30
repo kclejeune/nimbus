@@ -1,5 +1,5 @@
 import { error, json } from '@sveltejs/kit';
-import { browsableCaches } from '$lib/server/cache/cache-page';
+import { browsableCaches, IN_IDS } from '$lib/server/cache/cache-page';
 import { readSession } from '$lib/server/cache/db';
 import { likeTerm } from '$lib/server/store-paths';
 import type { SearchResults } from '$lib/search';
@@ -24,27 +24,29 @@ export const GET: RequestHandler = async ({ url, platform, locals }) => {
 	const hashPrefix = /^[0-9a-z]{4,32}$/.test(q) ? `${q}%` : '';
 	const isAdmin = locals.user!.role === 'admin';
 
-	const { caches: inScope } = await browsableCaches(locals, db, read);
-	const needle = q.toLowerCase();
-
-	const [paths, users, groups] = await Promise.all([
-		inScope.length === 0
-			? []
-			: read
-					.prepare(
-						`SELECT o.store_path, o.store_path_hash, c.name AS cache_name
-						 FROM object o JOIN cache c ON c.id = o.cache_id
-						 WHERE o.cache_id IN (SELECT value FROM json_each(?))
-						   AND (substr(o.store_path, instr(o.store_path, o.store_path_hash) + 33)
-						          LIKE ? ESCAPE '\\'
-						        OR o.store_path_hash LIKE ? ESCAPE '\\')
-						 ORDER BY o.created_at DESC LIMIT 8`
-					)
-					// Match the name after `<hash>-`, not inside the random hash —
-					// except as a prefix, for someone pasting a hash.
-					.bind(JSON.stringify(inScope.map((c) => c.id)), like, hashPrefix)
-					.all<{ store_path: string; store_path_hash: string; cache_name: string }>()
-					.then((r) => r.results),
+	// Only the path search waits on the cache scope; people and groups don't.
+	const scope = browsableCaches(locals, db, read);
+	const [inScope, paths, users, groups] = await Promise.all([
+		scope.then((s) => s.caches),
+		scope.then(({ caches }) =>
+			caches.length === 0
+				? []
+				: read
+						.prepare(
+							`SELECT o.store_path, o.store_path_hash, c.name AS cache_name
+							 FROM object o JOIN cache c ON c.id = o.cache_id
+							 WHERE o.cache_id ${IN_IDS}
+							   AND (substr(o.store_path, instr(o.store_path, o.store_path_hash) + 33)
+							          LIKE ?2 ESCAPE '\\'
+							        OR o.store_path_hash LIKE ?3 ESCAPE '\\')
+							 ORDER BY o.created_at DESC LIMIT 8`
+						)
+						// Match the name after `<hash>-`, not inside the random hash —
+						// except as a prefix, for someone pasting a hash.
+						.bind(JSON.stringify(caches.map((c) => c.id)), like, hashPrefix)
+						.all<{ store_path: string; store_path_hash: string; cache_name: string }>()
+						.then((r) => r.results)
+		),
 		isAdmin
 			? read
 					.prepare(
@@ -67,6 +69,7 @@ export const GET: RequestHandler = async ({ url, platform, locals }) => {
 			: []
 	]);
 
+	const needle = q.toLowerCase();
 	return json({
 		caches: inScope
 			.filter((c) => c.name.toLowerCase().includes(needle))

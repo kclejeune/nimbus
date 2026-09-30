@@ -49,13 +49,11 @@
 							{#if !isGlob(grant.pattern) && grant.matches > 0}
 								<a
 									href="/caches/{grant.pattern}/access"
-									class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs underline-offset-4 hover:text-primary hover:underline"
+									class="code-chip underline-offset-4 hover:text-primary hover:underline"
 									>{grant.pattern}</a
 								>
 							{:else}
-								<code class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs"
-									>{grant.pattern}</code
-								>
+								<code class="code-chip">{grant.pattern}</code>
 							{/if}
 						</td>
 						<td class="text-muted-foreground">{formatGrantActions(grant.actions)}</td>

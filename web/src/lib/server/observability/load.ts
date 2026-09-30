@@ -63,7 +63,7 @@ async function queryObservability(env: Env, windowKey: WindowKey): Promise<Obser
 	}
 
 	const queries = buildQueries(w);
-	const run = async <T>(sql: string): Promise<T[]> => {
+	const run = async (sql: string): Promise<unknown[]> => {
 		const response = await fetch(
 			`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`,
 			{
@@ -76,24 +76,17 @@ async function queryObservability(env: Env, windowKey: WindowKey): Promise<Obser
 		if (!response.ok) {
 			throw new Error(`Analytics Engine returned ${response.status}: ${await response.text()}`);
 		}
-		return ((await response.json()) as { data: T[] }).data;
+		return ((await response.json()) as { data: unknown[] }).data;
 	};
 
 	try {
-		const [series, overall, routes, edge, colos, regions, events] = await Promise.all([
-			run<RawResults['series'][number]>(queries.series),
-			run<RawResults['overall'][number]>(queries.overall),
-			run<RawResults['routes'][number]>(queries.routes),
-			run<RawResults['edge'][number]>(queries.edge),
-			run<RawResults['colos'][number]>(queries.colos),
-			run<RawResults['regions'][number]>(queries.regions),
-			run<RawResults['events'][number]>(queries.events)
-		]);
-		return {
-			status: 'ok',
-			data: summarize(w, { series, overall, routes, edge, colos, regions, events }),
-			sample: false
-		};
+		// One result per query, under the query's own key.
+		const results = Object.fromEntries(
+			await Promise.all(
+				Object.entries(queries).map(async ([key, sql]) => [key, await run(sql)] as const)
+			)
+		) as unknown as RawResults;
+		return { status: 'ok', data: summarize(w, results), sample: false };
 	} catch (e) {
 		console.warn(`observability query failed: ${e}`);
 		return { status: 'error', message: e instanceof Error ? e.message : String(e) };

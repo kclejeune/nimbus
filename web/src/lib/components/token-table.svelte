@@ -81,10 +81,7 @@
 									{#if entry.cache === '*'}
 										<span class="text-muted-foreground">All caches</span>
 									{:else}
-										<code
-											class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs whitespace-nowrap"
-											>{entry.cache}</code
-										>
+										<code class="code-chip whitespace-nowrap">{entry.cache}</code>
 									{/if}
 								{/each}
 							</div>

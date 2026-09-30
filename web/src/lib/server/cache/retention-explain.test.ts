@@ -92,12 +92,12 @@ describe('explainRetention', () => {
 		const top = explainRetention(facts({ retentionMaxBytes: 10 * 1024 ** 3 }));
 		expect(top.reasons.map((r) => r.title)).toEqual([
 			'No age limit',
-			'If the cache exceeds its 10 GiB limit'
+			'If the cache exceeds its 10.0 GiB limit'
 		]);
 		expect(top.reasons[1].detail).toContain('Nothing depends on this path');
 
 		const dep = explainRetention(facts({ globalMaxBytes: 250 * 1024 ** 3, referrers: 3 }));
-		expect(dep.reasons[1].title).toBe('If the instance exceeds its 250 GiB storage limit');
+		expect(dep.reasons[1].title).toBe('If the instance exceeds its 250.0 GiB storage limit');
 		expect(dep.reasons[1].detail).toContain('3 paths depend on this one');
 	});
 });

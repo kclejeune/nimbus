@@ -14,6 +14,12 @@ export function escapeLike(s: string): string {
 	return s.replace(/[%_\\]/g, (m) => '\\' + m);
 }
 
+/** A multi-value query parameter (`?user=a&user=b`): trimmed, deduplicated,
+ *  empties dropped, and capped (a URL is not a query language). */
+export function distinctParams(params: URLSearchParams, key: string, max = 50): string[] {
+	return [...new Set(params.getAll(key).map((v) => v.trim()))].filter(Boolean).slice(0, max);
+}
+
 export const CACHE_NAME_HINT = 'Letters, digits, and - _ +, up to 50 characters.';
 
 export type WithoutChild<T> = T extends { child?: unknown } ? Omit<T, 'child'> : T;

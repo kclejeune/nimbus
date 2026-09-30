@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { toastErrors } from '$lib/enhance';
+	import { plural } from '$lib/format';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
@@ -22,16 +23,12 @@
 	<PageHeader title={data.group.name} description={data.group.description || undefined}>
 		{#snippet meta()}
 			<span class="tabular-nums">
-				{data.members.length}
-				{data.members.length === 1 ? 'member' : 'members'}
+				{plural(data.members.length, 'member')}
 			</span>
 			{#if data.group.oidcGroup}
 				<span>
 					Synced from
-					<code
-						class="rounded-[5px] border bg-subtle px-1.5 py-px font-mono text-xs text-foreground"
-						>{data.group.oidcGroup}</code
-					>
+					<code class="code-chip text-foreground">{data.group.oidcGroup}</code>
 				</span>
 			{/if}
 		{/snippet}

@@ -17,6 +17,7 @@ import {
 } from './db';
 import { allLiveUpstreams, filterUpstreamPaths, VERDICT_ABSENT } from './missing-paths';
 import { type ExecutionContext } from './platform';
+import { AsyncMemo } from './async-memo';
 import { PURGE_TAG_LIMIT } from './purge';
 import { instanceStats, type InstanceStats } from './stats';
 import { refreshIngestRollup } from './ingest';
@@ -550,25 +551,28 @@ const CACHE_SIZE_SQL =
 	'JOIN (SELECT cr.nar_id, SUM(ch.file_size) AS bytes FROM chunkref cr ' +
 	'JOIN chunk ch ON ch.id = cr.chunk_id GROUP BY cr.nar_id) sz ON sz.nar_id = o.nar_id';
 
+const cacheSizesMemo = new AsyncMemo<Map<number, number>>(5 * 60_000, 1, 10_000);
+
 /**
- * Deduplicated NAR bytes per cache, CACHE_SIZE_SQL's accounting for many
- * caches at once: a NAR shared by several paths in one cache counts once;
- * caches sharing content each count it. `ids` bounds the scan (omit for all).
+ * Deduplicated NAR bytes per cache, CACHE_SIZE_SQL's accounting for every
+ * cache at once: a NAR shared by several paths in one cache counts once;
+ * caches sharing content each count it. The walk touches every object's
+ * chunks (590 ms, 243k rows on prod), so /caches and the dashboard's budget
+ * warnings share one result for five minutes.
  */
-export async function cacheSizes(db: D1, ids?: number[]): Promise<Map<number, number>> {
-	if (ids?.length === 0) return new Map();
-	const { results } = await db
-		.prepare(
-			`SELECT o.cache_id, SUM(ch.file_size) AS bytes
-			 FROM (SELECT DISTINCT cache_id, nar_id FROM object
-			       ${ids ? 'WHERE cache_id IN (SELECT value FROM json_each(?1))' : ''}) o
-			 JOIN chunkref cr ON cr.nar_id = o.nar_id
-			 JOIN chunk ch ON ch.id = cr.chunk_id
-			 GROUP BY o.cache_id`
-		)
-		.bind(...(ids ? [JSON.stringify(ids)] : []))
-		.all<{ cache_id: number; bytes: number }>();
-	return new Map(results.map((r) => [r.cache_id, r.bytes]));
+export function cacheSizes(db: D1): Promise<Map<number, number>> {
+	return cacheSizesMemo.get('all', async () => {
+		const { results } = await db
+			.prepare(
+				`SELECT o.cache_id, SUM(ch.file_size) AS bytes
+				 FROM (SELECT DISTINCT cache_id, nar_id FROM object) o
+				 JOIN chunkref cr ON cr.nar_id = o.nar_id
+				 JOIN chunk ch ON ch.id = cr.chunk_id
+				 GROUP BY o.cache_id`
+			)
+			.all<{ cache_id: number; bytes: number }>();
+		return new Map(results.map((r) => [r.cache_id, r.bytes]));
+	});
 }
 
 export interface ProtectingRoot {

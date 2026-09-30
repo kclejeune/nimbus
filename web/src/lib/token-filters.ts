@@ -1,6 +1,8 @@
 // Token list filtering for /tokens, kept pure so the parsing and the SQL
 // shape are testable without a database (same split as audit-filters.ts).
 
+import { distinctParams } from '$lib/utils';
+
 export const TOKEN_STATUSES = ['active', 'expired', 'revoked', 'suspended'] as const;
 export type TokenStatus = (typeof TOKEN_STATUSES)[number];
 
@@ -72,9 +74,7 @@ export function parseTokenFilters(params: URLSearchParams, everyone: boolean): T
 	);
 	return {
 		statuses,
-		users: everyone
-			? [...new Set(params.getAll(PARAMS.users).map((u) => u.trim()))].filter(Boolean).slice(0, 50)
-			: [],
+		users: everyone ? distinctParams(params, PARAMS.users) : [],
 		createdFrom: parseDate(params.get(PARAMS.createdFrom)),
 		createdTo: parseDate(params.get(PARAMS.createdTo)),
 		expiresFrom: parseDate(params.get(PARAMS.expiresFrom)),
