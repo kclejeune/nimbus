@@ -9,7 +9,10 @@ export const GET: RequestHandler = async ({ platform, params, url, locals }) => 
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 	// Scroll/filter fetches for the store-path browser: read-heavy and
-	// lag-tolerant, so they stay off the primary.
+	// lag-tolerant, so they stay off the primary — the access check included.
+	// A just-revoked grant can pass here until the replica catches up; that
+	// brief window is accepted to keep per-scroll load off the primary (the
+	// page load and every write still authorize against it).
 	const read = readSession(db);
 
 	await requireCacheBrowse(locals, read, params.name);

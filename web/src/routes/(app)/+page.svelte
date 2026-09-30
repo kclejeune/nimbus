@@ -14,6 +14,7 @@
 	import StorePath from '$lib/components/layout/store-path.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Check, CircleAlert, TriangleAlert, Info } from '@lucide/svelte';
+	import { serverAlias } from '$lib/utils';
 
 	let { data } = $props();
 	const s = $derived(data.stats);
@@ -55,17 +56,9 @@
 		}
 	}
 	const endpoint = $derived(data.cacheBaseUrl ?? 'https://cache.example.com');
-	// A short server alias for `nimbus login`, from the cache host: the first
-	// label that isn't a generic "cache"/"app"/"www" prefix.
-	const alias = $derived.by(() => {
-		try {
-			const labels = new URL(endpoint).hostname.split('.');
-			return labels.find((l) => !['cache', 'app', 'www', 'nix'].includes(l)) ?? 'nimbus';
-		} catch {
-			return 'nimbus';
-		}
-	});
-	const cacheArg = $derived(ob.firstCache ?? 'my-cache');
+	// The login's alias qualifies every later command (see serverAlias).
+	const alias = $derived(serverAlias(endpoint));
+	const cacheArg = $derived(`${alias}:${ob.firstCache ?? 'my-cache'}`);
 	const steps = $derived([
 		{
 			done: ob.hasCache,

@@ -20,6 +20,22 @@ export function distinctParams(params: URLSearchParams, key: string, max = 50): 
 	return [...new Set(params.getAll(key).map((v) => v.trim()))].filter(Boolean).slice(0, max);
 }
 
+/**
+ * A short server alias for the generated `nimbus login` command, from the
+ * cache host: its first label that isn't a generic prefix. Commands after the
+ * login name caches as `${alias}:${cache}`, because `nimbus login` only makes
+ * a server the default when none exists yet, and a bare cache name resolves
+ * against that default, which may be a different deployment.
+ */
+export function serverAlias(cacheBase: string): string {
+	try {
+		const labels = new URL(cacheBase).hostname.split('.');
+		return labels.find((l) => !['cache', 'app', 'www', 'nix'].includes(l)) ?? 'nimbus';
+	} catch {
+		return 'nimbus';
+	}
+}
+
 export const CACHE_NAME_HINT = 'Letters, digits, and - _ +, up to 50 characters.';
 
 export type WithoutChild<T> = T extends { child?: unknown } ? Omit<T, 'child'> : T;

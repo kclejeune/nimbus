@@ -42,10 +42,14 @@
 
 	const rows = $derived(appended ? [...data.paths, ...extra] : data.paths);
 	const hasMore = $derived(appended ? extraHasMore : data.hasMore);
-	const queryKey = $derived(`${data.sort}\u0000${data.dir}\u0000${data.q}`);
+	// The cache is part of the key: navigating straight from one cache to
+	// another reuses this component, and neither its scrolled-in rows nor its
+	// selection (which bulk actions post against the current cache) carry over.
+	const queryKey = $derived(`${c.name}\u0000${data.sort}\u0000${data.dir}\u0000${data.q}`);
 
-	// Any change to sort/dir/search reloads the first page — drop accumulated
-	// rows, and the selection with them (it may name rows no longer shown).
+	// Any change of cache or sort/dir/search reloads the first page — drop
+	// accumulated rows, and the selection with them (it may name rows no
+	// longer shown).
 	$effect(() => {
 		queryKey;
 		extra = [];

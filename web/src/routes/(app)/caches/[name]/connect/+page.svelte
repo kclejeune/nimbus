@@ -4,6 +4,7 @@
 	import UnifiedEndpointCard from '$lib/components/unified-endpoint-card.svelte';
 	import Panel from '$lib/components/layout/panel.svelte';
 	import { nixConfSnippet } from '$lib/nix-conf';
+	import { serverAlias } from '$lib/utils';
 
 	let { data } = $props();
 	const c = $derived(data.cache);
@@ -17,16 +18,9 @@
 	// Entries flagged as Nix defaults never appear (already in every nix.conf).
 	const snippetUpstreams = $derived(data.upstreams.filter((u) => !u.nixDefault));
 
-	// The CLI resolves caches against a server saved by `nimbus login`; the
-	// alias here is only a suggestion, derived from the cache host.
-	const alias = $derived.by(() => {
-		try {
-			const labels = new URL(data.cacheBase).hostname.split('.');
-			return labels.find((l) => !['cache', 'app', 'www', 'nix'].includes(l)) ?? 'nimbus';
-		} catch {
-			return 'nimbus';
-		}
-	});
+	// The login's alias qualifies every later command (see serverAlias).
+	const alias = $derived(serverAlias(data.cacheBase));
+	const ref = $derived(`${alias}:${c.name}`);
 	const cli = $derived([
 		{
 			label: 'Sign in once per machine',
@@ -36,12 +30,12 @@
 			label: c.isPublic
 				? 'Add this cache to nix.conf'
 				: 'Add this cache to nix.conf and your token to netrc',
-			command: `nimbus use ${c.name}`
+			command: `nimbus use ${ref}`
 		},
-		{ label: 'Push a build and its closure', command: `nimbus push ${c.name} ./result` },
+		{ label: 'Push a build and its closure', command: `nimbus push ${ref} ./result` },
 		{
 			label: 'Push everything a command adds to the store',
-			command: `nimbus watch-exec ${c.name} nix build`
+			command: `nimbus watch-exec ${ref} nix build`
 		}
 	]);
 </script>
