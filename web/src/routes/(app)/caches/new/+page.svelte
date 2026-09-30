@@ -15,7 +15,7 @@
 	const v = $derived(form?.values);
 </script>
 
-<Page width="narrow">
+<Page>
 	<PageHeader title="New cache" description="A signing keypair is generated automatically." />
 
 	<form

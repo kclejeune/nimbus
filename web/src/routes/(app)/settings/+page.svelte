@@ -39,7 +39,7 @@
 	);
 </script>
 
-<Page width="narrow">
+<Page>
 	<PageHeader title="Settings" description="Instance-wide storage policy and maintenance." />
 
 	<div class="grid grid-cols-1 gap-6">

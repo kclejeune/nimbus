@@ -63,7 +63,7 @@
 	}
 </script>
 
-<Page width="narrow">
+<Page>
 	<PageHeader title={me.name || me.email || 'Profile'}>
 		{#snippet meta()}
 			{#if me.email && me.name}<span>{me.email}</span>{/if}
