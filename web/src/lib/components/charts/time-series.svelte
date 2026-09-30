@@ -48,7 +48,7 @@
 		/** Fixed ceiling (e.g. 1 for ratios); otherwise a clean number above the data. */
 		yMax?: number;
 		/** `log` for measures spanning orders of magnitude (latency percentiles):
-		 *  a tail spike no longer flattens the typical values against zero. */
+		 *  a tail spike doesn't flatten the typical values against zero. */
 		scale?: 'linear' | 'log';
 		height?: number;
 		ariaLabel: string;
@@ -206,7 +206,6 @@
 		class="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
 	>
 		<svg viewBox="0 0 {W} {H}" class="w-full overflow-visible" role="img" aria-label={ariaLabel}>
-			(hovered = null)} >
 			{#each ticks as tick (tick.v)}
 				<line
 					x1={padL}
