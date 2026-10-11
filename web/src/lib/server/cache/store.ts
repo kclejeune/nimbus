@@ -37,7 +37,7 @@ import { clearAbsent, getProxyKeypair } from './proxy';
 import { purgeCoalesced } from './purge';
 import { RateBudget } from './rate-budget';
 import { TtlMemo } from './ttl-memo';
-import { withR2Retry, type ExecutionContext } from './platform';
+import { withR2Retry, newFixedLengthStream, type ExecutionContext } from './platform';
 import { measure, countLoopbackFallback, streamObservation } from './latency';
 import { stripSha256 } from '../attic/nix-base32';
 
@@ -790,7 +790,14 @@ async function serveNar(
 	// Cache individual chunks when the assembled response cannot be cached.
 	const chunkStore =
 		totalSize === null || totalSize > 512 * 1024 * 1024 ? ctx?.exports?.CachedStore : undefined;
-	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+	// A known wire length lets the runtime reject incomplete responses.
+	const { readable, writable } =
+		totalSize === null
+			? new TransformStream<Uint8Array, Uint8Array>()
+			: newFixedLengthStream(totalSize);
+	if (totalSize === null || totalSize > 512 * 1024 * 1024) {
+		baseHeaders.set('Cache-Control', 'no-store');
+	}
 	const stream = streamObservation(keys.length, totalSize);
 	const pump = async () => {
 		// Queue of gets for chunks not yet piped, in key order; fill() tops it
@@ -827,7 +834,9 @@ async function serveNar(
 				fill();
 				if (!object) throw new Error(`File not found in storage: ${keys[i]}`);
 				await (object.body as unknown as ReadableStream<Uint8Array>).pipeTo(writable, {
-					preventClose: true
+					preventClose: true,
+					// The pump's catch owns aborting the response stream.
+					preventAbort: true
 				});
 			}
 			await writable.close();

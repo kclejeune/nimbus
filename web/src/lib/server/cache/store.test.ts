@@ -11,10 +11,19 @@ import {
 	stageChunk
 } from './db';
 import { AdmissionError, CLIENT_IP_HEADER } from './admission';
+import { newFixedLengthStream } from './platform';
+
+// The actual Workers primitive is exercised separately in workerd. Node's
+// streams still let these tests cover pump errors and the caching policy.
+vi.mock('./platform', async (importOriginal) => ({
+	...(await importOriginal<typeof import('./platform')>()),
+	newFixedLengthStream: vi.fn(() => new TransformStream<Uint8Array, Uint8Array>())
+}));
 
 describe('store hardening', () => {
 	const fixture = testDatabase();
 	afterEach(() => {
+		vi.clearAllMocks();
 		fixture.sqlite.exec(
 			'DELETE FROM object; DELETE FROM chunkref; DELETE FROM nar; DELETE FROM chunk; DELETE FROM cache'
 		);
@@ -27,6 +36,7 @@ describe('store hardening', () => {
 		);
 		expect(new Set(keys).size).toBe(1);
 		expect(keys[0]).not.toContain('?');
+		expect(new URL(keys[0]).pathname).toBe(`/_nar_v2/${hash}.nar`);
 		const privateUrl = (id: number) =>
 			narStoreUrl(request, { id, is_public: 0 }, hash + '.nar').href;
 		expect(privateUrl(1)).not.toBe(privateUrl(2));
@@ -114,6 +124,8 @@ describe('store hardening', () => {
 			ctx
 		);
 		expect(await response.text()).toBe('chunkchunk');
+		expect(newFixedLengthStream).toHaveBeenCalledWith(600 * 1024 * 1024);
+		expect(response.headers.get('Cache-Control')).toBe('no-store');
 		await Promise.all(tasks);
 		expect(
 			fetch.mock.calls
@@ -124,5 +136,87 @@ describe('store hardening', () => {
 			'https://cache.internal/_chunk/chunk%2F1'
 		]);
 		expect(get).not.toHaveBeenCalled();
+	});
+	async function streamResponse(sizes: (number | null)[], bodies: (ReadableStream | null)[]) {
+		const hash = 'b'.repeat(64);
+		const chunks = sizes.map((file_size, seq) => ({
+			file_size,
+			remote_file: JSON.stringify({ key: `chunk/${seq}` }),
+			remote_file_id: `chunk/${seq}`
+		}));
+		const tasks: Promise<unknown>[] = [];
+		const ctx = {
+			exports: {
+				CachedStore: {
+					fetch: async (request: Request) => {
+						const path = new URL(request.url).pathname;
+						if (path.startsWith('/_chunk/')) {
+							const key = decodeURIComponent(path.slice('/_chunk/'.length));
+							return new Response(bodies[Number(key.split('/')[1])]);
+						}
+						return Response.json({
+							nar: { nar_hash: `sha256:${hash}`, num_chunks: chunks.length },
+							chunks
+						});
+					}
+				}
+			},
+			waitUntil: (p: Promise<unknown>) => tasks.push(p)
+		} as unknown as import('./platform').ExecutionContext;
+		const env = {
+			CACHE_BUCKET: {
+				get: async (key: string) => {
+					const body = bodies[Number(key.split('/')[1])];
+					return body ? { body } : null;
+				}
+			}
+		} as unknown as App.Platform['env'];
+		return {
+			response: await serveStore(new Request(`https://cache.test/_nar_v2/${hash}.nar`), env, ctx),
+			tasks
+		};
+	}
+
+	it('enforces the compressed total for cacheable multi-chunk responses', async () => {
+		const { response, tasks } = await streamResponse(
+			[3, 3],
+			[new Response('one').body!, new Response('two').body!]
+		);
+		expect(response.headers.get('Content-Length')).toBe('6');
+		expect(response.headers.get('Cache-Control')).toContain('immutable');
+		expect(await response.text()).toBe('onetwo');
+		await Promise.all(tasks);
+		expect(newFixedLengthStream).toHaveBeenCalledWith(6);
+	});
+
+	it('does not cache assembled bodies without a known compressed length', async () => {
+		const { response, tasks } = await streamResponse(
+			[null, 3],
+			[new Response('one').body!, new Response('two').body!]
+		);
+		expect(response.headers.get('Cache-Control')).toBe('no-store');
+		expect(response.headers.has('Content-Length')).toBe(false);
+		expect(await response.text()).toBe('onetwo');
+		await Promise.all(tasks);
+		expect(newFixedLengthStream).not.toHaveBeenCalled();
+	});
+
+	it('errors the response body when an R2 chunk disconnects mid-transfer', async () => {
+		let reads = 0;
+		const broken = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (reads++ === 0) controller.enqueue(new TextEncoder().encode('part'));
+				else controller.error(new Error('Network connection lost'));
+			}
+		});
+		const { response, tasks } = await streamResponse([3, 8], [new Response('one').body!, broken]);
+		await expect(response.arrayBuffer()).rejects.toThrow('Network connection lost');
+		await Promise.all(tasks);
+	});
+
+	it('errors the response body when a later stored chunk is missing', async () => {
+		const { response, tasks } = await streamResponse([3, 3], [new Response('one').body!, null]);
+		await expect(response.arrayBuffer()).rejects.toThrow('File not found in storage');
+		await Promise.all(tasks);
 	});
 });

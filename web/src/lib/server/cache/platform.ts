@@ -39,6 +39,15 @@ export function newDigestStream(): DigestStreamLike {
 	return new workersCrypto.DigestStream('SHA-256');
 }
 
+/** Workers ignores a manually set Content-Length on an ordinary stream.
+ * FixedLengthStream sets the wire length and rejects short/long writes. */
+export function newFixedLengthStream(size: number): TransformStream<Uint8Array, Uint8Array> {
+	const runtime = globalThis as unknown as {
+		FixedLengthStream: new (size: number) => TransformStream<Uint8Array, Uint8Array>;
+	};
+	return new runtime.FixedLengthStream(size);
+}
+
 /** A timer is a request's own I/O and thus the only context-safe wait on
  * Workers (see Semaphore below); every delay in this package routes through
  * here so that invariant has one home. */
