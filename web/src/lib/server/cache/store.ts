@@ -21,6 +21,7 @@ import {
 import { errorResponse, withVisibility } from '../attic/http';
 import { buildNarInfo } from '../attic/narinfo';
 import { extractPublicKey } from '../attic/signing';
+import { hedgedReplicaRead } from './read-hedge';
 import { findCacheCached } from './cache-lookup';
 import { CLIENT_IP_HEADER } from './admission';
 import * as db from './db';
@@ -303,12 +304,13 @@ export async function serveStore(
 			request,
 			env,
 			segments[1] as 'path' | 'nar',
-			decodeURIComponent(segments[2])
+			decodeURIComponent(segments[2]),
+			ctx
 		);
 	if (segments.length === 3 && segments[0] === '_touch' && /^\d+$/.test(segments[1]))
 		return serveTouch(env, Number(segments[1]), decodeURIComponent(segments[2]));
 	if (segments.length === 3 && segments[0] === '_manifest' && /^(public|\d+)$/.test(segments[1]))
-		return serveManifest(env, segments[1], decodeURIComponent(segments[2]));
+		return serveManifest(env, segments[1], decodeURIComponent(segments[2]), ctx);
 	// Charges its own budget, and only when there are upstreams to probe.
 	if (segments[0] === UPSTREAM_NAR_PREFIX) {
 		// Root: /_upstream_nar/~/<file>; per cache: /_upstream_nar/<name>/<id>/<file>.
@@ -350,7 +352,7 @@ export async function serveStore(
 	// Root-proxy narinfo: same object, re-signed with the proxy keypair, cached
 	// under a distinct internal path so per-cache entries never collide.
 	if (segments.length === 3 && segments[0] === '_proxy' && segments[2].endsWith('.narinfo')) {
-		return serveProxyNarInfo(env, segments[1], segments[2].slice(0, -'.narinfo'.length));
+		return serveProxyNarInfo(env, ctx, segments[1], segments[2].slice(0, -'.narinfo'.length));
 	}
 	// NARs are content-addressed and shared across PUBLIC caches, so their
 	// route carries no cache name: every public cache referencing a NAR hits
@@ -373,15 +375,17 @@ export async function serveStore(
 
 async function serveProxyNarInfo(
 	env: Env,
+	ctx: ExecutionContext | undefined,
 	cacheName: string,
 	storePathHash: string
 ): Promise<Response> {
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
-	const session = db.readSession(env.ATTIC_DB);
 	const [cache, found, keypair] = await Promise.all([
-		findCacheCached(session, cacheName),
-		db.findObjectWithChunks(session, cacheName, storePathHash),
+		findCacheCached(env.ATTIC_DB, cacheName, ctx),
+		hedgedReplicaRead(env.ATTIC_DB, ctx, (source) =>
+			db.findObjectWithChunks(source, cacheName, storePathHash)
+		),
 		getProxyKeypair(env).catch((e) => {
 			console.warn(`proxy keypair unavailable, serving stored sigs: ${e}`);
 			return null;
@@ -415,7 +419,7 @@ async function serveRootUpstreamNarInfo(
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
 	const session = db.readSession(env.ATTIC_DB);
-	const upstreams = await allLiveUpstreams(session);
+	const upstreams = await allLiveUpstreams(env.ATTIC_DB, ctx);
 	// The cache-wide ~upstream tag lets registry changes purge every root
 	// passthrough in one call, like cacheTag() does for a real cache.
 	const tag = `${narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash)},${ROOT_UPSTREAM_TAG}`;
@@ -667,8 +671,10 @@ async function serveNarInfo(
 
 	const session = db.readSession(env.ATTIC_DB);
 	const [cache, found] = await Promise.all([
-		findCacheCached(session, cacheName),
-		db.findObjectWithChunks(session, cacheName, storePathHash)
+		findCacheCached(env.ATTIC_DB, cacheName, ctx),
+		hedgedReplicaRead(env.ATTIC_DB, ctx, (source) =>
+			db.findObjectWithChunks(source, cacheName, storePathHash)
+		)
 	]);
 	if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
 	const isPublic = cache.is_public === 1;
@@ -683,7 +689,7 @@ async function serveNarInfo(
 		// closure needs the upstream's narinfo served through this cache. A
 		// persist-mode subscription resolves into this cache (upstreamsForCache
 		// sets persistInto).
-		const upstreams = await upstreamsForCache(session, cache);
+		const upstreams = await upstreamsForCache(env.ATTIC_DB, cache, ctx);
 		const hit = await fetchUpstreamNarInfo(session, upstreams, storePathHash, ctx, {
 			env,
 			ip: request.headers.get('CF-Connecting-IP')
@@ -833,11 +839,15 @@ async function serveNar(
 				const object = await stream.wait(inFlight.shift()!);
 				fill();
 				if (!object) throw new Error(`File not found in storage: ${keys[i]}`);
-				await (object.body as unknown as ReadableStream<Uint8Array>).pipeTo(writable, {
-					preventClose: true,
-					// The pump's catch owns aborting the response stream.
-					preventAbort: true
-				});
+				await stream.pipe(
+					() =>
+						(object.body as unknown as ReadableStream<Uint8Array>).pipeTo(writable, {
+							preventClose: true,
+							// The pump's catch owns aborting the response stream.
+							preventAbort: true
+						}),
+					chunks[i].file_size
+				);
 			}
 			await writable.close();
 		} catch (e) {

@@ -15,6 +15,8 @@
 
 import type { D1Database } from '@cloudflare/workers-types';
 import { findCache, readSession, type CacheRow } from './db';
+import { hedgedReplicaRead } from './read-hedge';
+import type { ExecutionContext } from './platform';
 import { AsyncMemo } from './async-memo';
 
 const CACHE_ROW_TTL_MS = 30_000;
@@ -71,13 +73,14 @@ export async function listLiveCachesCached(
 export async function findCacheCached(
 	db: D1Database,
 	name: string,
+	ctx?: ExecutionContext,
 	admit?: () => Promise<void>
 ): Promise<CacheRow | null> {
 	return cacheRowMemo.get(
 		name,
 		async () => {
 			if (admit) await admit();
-			return findCache(readSession(db), name);
+			return hedgedReplicaRead(db, ctx, (session) => findCache(session, name));
 		},
 		(row) => (row ? CACHE_ROW_TTL_MS : CACHE_ROW_MISS_TTL_MS)
 	);

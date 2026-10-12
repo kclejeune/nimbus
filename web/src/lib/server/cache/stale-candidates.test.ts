@@ -2,7 +2,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { handleCacheApi } from './router';
 import { testDatabase } from './test-db';
 import { invalidateCacheRow } from './cache-lookup';
-import { candidateTag, clearCandidateMemos, serveCandidates } from './metadata';
+import { candidateTag, clearCandidateMemos, confirmCandidates, serveCandidates } from './metadata';
+import type { D1Database, D1Result } from '@cloudflare/workers-types';
 import type { ExecutionContext } from './platform';
 
 vi.mock('./compression', async () => (await import('./test-db')).fakeCompression());
@@ -119,8 +120,52 @@ it('serves empty candidate entries stale, but never stale on error', async () =>
 	expect(await response.json()).toEqual([]);
 	expect(Number(response.headers.get('X-Nimbus-Filled-At'))).toBeGreaterThan(0);
 	expect(response.headers.get('Cache-Control')).toBe(
-		'public, max-age=30, stale-while-revalidate=86400, stale-if-error=0'
+		'public, max-age=30, stale-while-revalidate=604800, stale-if-error=0'
 	);
+});
+
+it('recovers a cold candidate read from the primary while its replica stalls', async () => {
+	vi.useFakeTimers();
+	try {
+		const hash = freshHash();
+		holdLocally(hash, `nar${hash}`);
+		let resolve!: (result: D1Result) => void;
+		const pending = new Promise<D1Result>((done) => (resolve = done));
+		const statement = { bind: () => statement, all: () => pending };
+		const replica = { prepare: () => statement } as unknown as D1Database;
+		const sessions = vi
+			.spyOn(fixture.db, 'withSession')
+			.mockImplementation(
+				(constraint) => (constraint === 'first-primary' ? fixture.db : replica) as never
+			);
+		const tasks: Promise<unknown>[] = [];
+		const ctx = {
+			waitUntil: (task: Promise<unknown>) => void tasks.push(task)
+		} as ExecutionContext;
+		const reading = serveCandidates(new Request('https://cache.test'), env, 'path', hash, ctx);
+		await vi.advanceTimersByTimeAsync(500);
+		const response = await reading;
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual([{ id: 1, name: 'test', is_public: 1, priority: 40 }]);
+		expect(sessions).toHaveBeenCalledWith('first-primary');
+		resolve(await fixture.db.prepare('SELECT 1 WHERE 0').all());
+		await Promise.all(tasks);
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+it('keeps membership confirmations on the primary', async () => {
+	const hash = freshHash();
+	holdLocally(hash, `nar${hash}`);
+	const sessions = vi.spyOn(fixture.db, 'withSession');
+	const { ctx } = store('fresh');
+	expect(
+		await confirmCandidates(env, ctx, new Request('https://cache.test'), 'path', hash, [])
+	).toEqual([{ id: 1, name: 'test', is_public: 1, priority: 40 }]);
+	// Membership itself is primary-required. The subsequent cache-visibility
+	// lookup may use a replica, as it did before read hedging was introduced.
+	expect(sessions.mock.calls[0]).toEqual(['first-primary']);
 });
 
 it('confirms a stale empty entry before a root narinfo 404, finding a fresh upload', async () => {
@@ -134,6 +179,21 @@ it('confirms a stale empty entry before a root narinfo 404, finding a fresh uplo
 	const paths = fetch.mock.calls.map(([r]) => new URL(r.url).pathname);
 	expect(paths).toContain(`/_proxy/test/${hash}.narinfo`);
 	// The confirmed membership evicts the stale empty entry.
+	expect(purged).toContain(candidateTag('path', hash));
+});
+
+it('confirms a week-old empty entry before deciding a freshly uploaded path is missing', async () => {
+	const hash = freshHash();
+	holdLocally(hash, `nar${hash}`);
+	const { ctx, purged } = store('stale', 'miss', {
+		meta: Response.json([], {
+			headers: {
+				'CF-Cache-Status': 'UPDATING',
+				'X-Nimbus-Filled-At': String(Date.now() - 7 * 24 * 60 * 60 * 1000)
+			}
+		})
+	});
+	expect((await get(ctx, `${hash}.narinfo`)).status).toBe(200);
 	expect(purged).toContain(candidateTag('path', hash));
 });
 

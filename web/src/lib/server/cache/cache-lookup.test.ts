@@ -43,10 +43,12 @@ describe('findCacheCached', () => {
 		const refuse = vi.fn(async () => {
 			throw new Error('budget exhausted');
 		});
-		await expect(findCacheCached(db, 'guarded', refuse)).rejects.toThrow('budget exhausted');
+		await expect(findCacheCached(db, 'guarded', undefined, refuse)).rejects.toThrow(
+			'budget exhausted'
+		);
 		expect(reads()).toBe(0);
 		await findCacheCached(db, 'guarded');
-		await expect(findCacheCached(db, 'guarded', refuse)).resolves.toEqual(ROW);
+		await expect(findCacheCached(db, 'guarded', undefined, refuse)).resolves.toEqual(ROW);
 		expect(reads()).toBe(1);
 		expect(refuse).toHaveBeenCalledOnce();
 	});

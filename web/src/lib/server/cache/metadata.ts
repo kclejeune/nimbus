@@ -3,6 +3,7 @@ import * as db from './db';
 import { AdmissionError, CLIENT_IP_HEADER, clientKey, requireBudget } from './admission';
 import type { ExecutionContext } from './platform';
 import { stripSha256 } from '../attic/nix-base32';
+import { hedgedReplicaRead } from './read-hedge';
 import { findCacheCached } from './cache-lookup';
 import { AsyncMemo } from './async-memo';
 import { countLoopbackFallback, measure, candidateMetadata } from './latency';
@@ -64,9 +65,14 @@ export function internalRequest(
 // default.
 // The NAR manifest stays must-revalidate — a re-upload after GC changes its
 // chunk keys.
-const LONG_CACHE_CONTROL = 'public, max-age=3600, stale-while-revalidate=86400';
+// A week covers daily and weekend CI gaps. The 2026-09-30–10-11 samples
+// still spent 61% of narinfo header time resolving candidates; empty entries
+// served UPDATING had a 16 ms median versus 322 ms EXPIRED. Freshness and
+// confirmation policies below are unchanged; only background reuse grows.
+const CANDIDATE_STALE_SECONDS = 7 * 24 * 60 * 60;
+const LONG_CACHE_CONTROL = `public, max-age=3600, stale-while-revalidate=${CANDIDATE_STALE_SECONDS}`;
 const EMPTY_MAX_AGE_MS = 30_000;
-const EMPTY_CACHE_CONTROL = `public, max-age=${EMPTY_MAX_AGE_MS / 1000}, stale-while-revalidate=86400, stale-if-error=0`;
+const EMPTY_CACHE_CONTROL = `public, max-age=${EMPTY_MAX_AGE_MS / 1000}, stale-while-revalidate=${CANDIDATE_STALE_SECONDS}, stale-if-error=0`;
 const SHORT_CACHE_CONTROL = 'public, max-age=30, must-revalidate';
 
 // When a candidate list was read from D1. The edge keeps it with the entry,
@@ -151,10 +157,13 @@ export async function serveCandidates(
 	request: Request,
 	env: App.Platform['env'],
 	kind: 'nar' | 'path',
-	hash: string
+	hash: string,
+	ctx?: ExecutionContext
 ): Promise<Response> {
 	await chargeBackendRead(env, request);
-	const rows = await readCandidateRows(db.readSession(env.ATTIC_DB), kind, hash);
+	const rows = await hedgedReplicaRead(env.ATTIC_DB, ctx, (session) =>
+		readCandidateRows(session, kind, hash)
+	);
 	const response = cachedJson(
 		rows,
 		candidateTag(kind, hash),
@@ -202,7 +211,7 @@ export async function loadCandidates(
 		request.headers.get('CF-Connecting-IP')
 	);
 	const response = await measure('candidateLoopback', () =>
-		viaStore(ctx, internal, () => serveCandidates(internal, env, kind, canonical))
+		viaStore(ctx, internal, () => serveCandidates(internal, env, kind, canonical, ctx))
 	);
 	const rows = await internalJson<db.LiveCacheRow[]>(
 		response,
@@ -211,7 +220,7 @@ export async function loadCandidates(
 	const stale = rows.length === 0 && pastEmptyMaxAge(response.headers);
 	candidateMetadata(response.headers.get('CF-Cache-Status') ?? 'NONE', rows.length > 0);
 	return {
-		rows: await measure('candidateVisibility', () => withCurrentVisibility(env, rows)),
+		rows: await measure('candidateVisibility', () => withCurrentVisibility(env, rows, ctx)),
 		listed: rows.length > 0,
 		confirmEmpty: async () =>
 			stale ? refreshEmptyCandidates(env, ctx, request, kind, canonical) : null
@@ -250,13 +259,18 @@ async function rereadCandidates(
 	env: App.Platform['env'],
 	ctx: ExecutionContext | undefined,
 	request: Request,
-	session: D1Database,
+	consistency: 'replica' | 'primary',
 	kind: 'nar' | 'path',
 	canonical: string,
 	cached: db.LiveCacheRow[]
 ): Promise<db.LiveCacheRow[]> {
 	await chargeClientRead(env, request.headers.get('CF-Connecting-IP'));
-	const rows = await readCandidateRows(session, kind, canonical);
+	const rows =
+		consistency === 'replica'
+			? await hedgedReplicaRead(env.ATTIC_DB, ctx, (replica) =>
+					readCandidateRows(replica, kind, canonical)
+				)
+			: await readCandidateRows(db.primarySession(env.ATTIC_DB), kind, canonical);
 	const ids = (list: db.LiveCacheRow[]) =>
 		list
 			.map((r) => r.id)
@@ -281,10 +295,10 @@ export async function confirmCandidates(
 	const key = `${kind}:${canonical}`;
 	const rows = await measure('candidateConfirm', () =>
 		confirmedCandidates.get(key, () =>
-			rereadCandidates(env, ctx, request, db.primarySession(env.ATTIC_DB), kind, canonical, cached)
+			rereadCandidates(env, ctx, request, 'primary', kind, canonical, cached)
 		)
 	);
-	return measure('candidateVisibility', () => withCurrentVisibility(env, rows));
+	return measure('candidateVisibility', () => withCurrentVisibility(env, rows, ctx));
 }
 
 // Stale empty entries re-read on a replica: the same read, budget and
@@ -312,11 +326,11 @@ async function refreshEmptyCandidates(
 	const rows = await measure('candidateRefresh', () =>
 		refreshedEmpty.get(
 			`${kind}:${canonical}`,
-			() => rereadCandidates(env, ctx, request, db.readSession(env.ATTIC_DB), kind, canonical, []),
+			() => rereadCandidates(env, ctx, request, 'replica', kind, canonical, []),
 			(rows) => (rows.length ? REFRESHED_FOUND_MS : EMPTY_MAX_AGE_MS)
 		)
 	);
-	return measure('candidateVisibility', () => withCurrentVisibility(env, rows));
+	return measure('candidateVisibility', () => withCurrentVisibility(env, rows, ctx));
 }
 
 /**
@@ -329,11 +343,12 @@ async function refreshEmptyCandidates(
  */
 async function withCurrentVisibility(
 	env: App.Platform['env'],
-	rows: db.LiveCacheRow[]
+	rows: db.LiveCacheRow[],
+	ctx?: ExecutionContext
 ): Promise<db.LiveCacheRow[]> {
 	const current = await Promise.all(
 		rows.map(async (row) => {
-			const cache = await findCacheCached(env.ATTIC_DB, row.name);
+			const cache = await findCacheCached(env.ATTIC_DB, row.name, ctx);
 			return cache && cache.id === row.id ? { ...row, is_public: cache.is_public } : null;
 		})
 	);
@@ -368,12 +383,15 @@ export async function touchViaStore(
 export async function serveManifest(
 	env: App.Platform['env'],
 	scope: string,
-	hash: string
+	hash: string,
+	ctx?: ExecutionContext
 ): Promise<Response> {
-	const found = await db.findNarWithChunks(
-		db.readSession(env.ATTIC_DB),
-		[`sha256:${hash}`, hash],
-		scope === 'public' ? undefined : Number(scope)
+	const found = await hedgedReplicaRead(env.ATTIC_DB, ctx, (session) =>
+		db.findNarWithChunks(
+			session,
+			[`sha256:${hash}`, hash],
+			scope === 'public' ? undefined : Number(scope)
+		)
 	);
 	return cachedJson(found, candidateTag('nar', hash), SHORT_CACHE_CONTROL);
 }
@@ -387,7 +405,7 @@ export async function loadManifest(
 	const scope = cacheId === undefined ? 'public' : String(cacheId);
 	const request = internalRequest(env, `/_manifest/${scope}/${encodeURIComponent(hash)}`);
 	return internalJson(
-		await viaStore(ctx, request, () => serveManifest(env, scope, hash)),
+		await viaStore(ctx, request, () => serveManifest(env, scope, hash, ctx)),
 		'NAR manifest temporarily unavailable'
 	);
 }

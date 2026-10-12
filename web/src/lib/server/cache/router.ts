@@ -24,6 +24,7 @@ import {
 	renameCache
 } from './cache-config';
 import { findCacheCached } from './cache-lookup';
+import { hedgedReplicaRead } from './read-hedge';
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import { readDeviceCode, readMissingPaths } from './request-input';
 import { RequestBodyError, isRecord, JSON_LIMITS, readJson } from '../request-body';
@@ -120,8 +121,16 @@ const VERIFY_TTL_MS = 30_000;
 const VERIFY_MEMO_MAX_ENTRIES = 2_000;
 const verifiedTokens = new TtlMemo<VerifiedToken>(VERIFY_TTL_MS, VERIFY_MEMO_MAX_ENTRIES);
 
-async function isJtiDisabled(env: Env, jti: string): Promise<boolean> {
-	return revocationMemo.get(jti, () => db.isTokenDisabled(db.readSession(env.ATTIC_DB), jti));
+async function isJtiDisabled(
+	env: Env,
+	jti: string,
+	ctx: ExecutionContext | undefined
+): Promise<boolean> {
+	// The gateway runs this even on edge hits, so a stalled replica on a memo
+	// miss would stall a response the edge already holds.
+	return revocationMemo.get(jti, () =>
+		hedgedReplicaRead(env.ATTIC_DB, ctx, (session) => db.isTokenDisabled(session, jti))
+	);
 }
 
 /** Requests whose authorization must reflect the primary right now. */
@@ -144,10 +153,18 @@ function authFailure(e: unknown): Response {
 	return errorResponse(401, `Authentication failed: ${e instanceof Error ? e.message : e}`);
 }
 
-function verifyRequestToken(request: Request, env: Env): Promise<VerifiedToken | null> {
-	return measure('auth', () => verifyRequestTokenInner(request, env));
+function verifyRequestToken(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined
+): Promise<VerifiedToken | null> {
+	return measure('auth', () => verifyRequestTokenInner(request, env, ctx));
 }
-async function verifyRequestTokenInner(request: Request, env: Env): Promise<VerifiedToken | null> {
+async function verifyRequestTokenInner(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined
+): Promise<VerifiedToken | null> {
 	const bearer = parseAuthToken(request.headers.get('Authorization'));
 	if (!bearer) return null;
 	if (!env.JWT_HS256_SECRET_BASE64 && !env.JWT_RS256_PUBKEY_BASE64) {
@@ -181,7 +198,7 @@ async function verifyRequestTokenInner(request: Request, env: Env): Promise<Veri
 		try {
 			disabled = await (isPrivileged(request)
 				? db.isTokenDisabled(env.ATTIC_DB, token.jti)
-				: isJtiDisabled(env, token.jti));
+				: isJtiDisabled(env, token.jti, ctx));
 		} catch {
 			throw new AdmissionError('Authorization temporarily unavailable', 2);
 		}
@@ -199,7 +216,8 @@ async function verifyRequestTokenInner(request: Request, env: Env): Promise<Veri
 async function authorizeCacheRead(
 	request: Request,
 	env: Env,
-	cacheName: string
+	cacheName: string,
+	ctx?: ExecutionContext
 ): Promise<{ cache: db.CacheRow } | { response: Response }> {
 	// The cache row is token-independent, so its lookup runs concurrently with
 	// token verification: each is a replica round-trip on its memo-miss window
@@ -209,14 +227,14 @@ async function authorizeCacheRead(
 	// failure surfaces as before; the side .catch only marks the rejection
 	// handled during the token-verification window so workerd doesn't report
 	// it as unhandled in the interim.
-	const cachePromise = findCacheCached(env.ATTIC_DB, cacheName, () =>
+	const cachePromise = findCacheCached(env.ATTIC_DB, cacheName, ctx, () =>
 		requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request))
 	);
 	cachePromise.catch(() => {});
 	let permission: Permission;
 	let authError: unknown = null;
 	try {
-		const token = await verifyRequestToken(request, env);
+		const token = await verifyRequestToken(request, env, ctx);
 		permission = permissionForCache(token, cacheName);
 	} catch (e) {
 		authError = e;
@@ -245,10 +263,11 @@ async function authorizeCacheRead(
 async function handleNixCacheInfo(
 	request: Request,
 	env: Env,
+	ctx: ExecutionContext | undefined,
 	cacheName: string,
 	head: boolean
 ): Promise<Response> {
-	const auth = await authorizeCacheRead(request, env, cacheName);
+	const auth = await authorizeCacheRead(request, env, cacheName, ctx);
 	if ('response' in auth) return auth.response;
 	const cache = auth.cache;
 
@@ -357,7 +376,7 @@ async function handleNarInfo(
 	const storePathHash = filename.slice(0, -'.narinfo'.length);
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
-	const auth = await authorizeCacheRead(request, env, cacheName);
+	const auth = await authorizeCacheRead(request, env, cacheName, ctx);
 	if ('response' in auth) return auth.response;
 
 	// The narinfo body embeds a signature from the cache keypair, so the edge
@@ -481,7 +500,7 @@ async function handleNar(
 	const narHashRaw = filename.split('.')[0];
 	if (!narHashRaw) return errorResponse(400, 'Invalid NAR path');
 
-	const auth = await authorizeCacheRead(request, env, cacheName);
+	const auth = await authorizeCacheRead(request, env, cacheName, ctx);
 	if ('response' in auth) return auth.response;
 
 	// Public caches share one content-addressed edge key, so the body of a NAR
@@ -549,9 +568,13 @@ function handleProxyNixCacheInfo(head: boolean): Response {
 }
 
 /** Invalid tokens degrade to anonymous, like authorizeCacheRead on public reads. */
-async function proxyToken(request: Request, env: Env): Promise<VerifiedToken | null> {
+async function proxyToken(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined
+): Promise<VerifiedToken | null> {
 	try {
-		return await verifyRequestToken(request, env);
+		return await verifyRequestToken(request, env, ctx);
 	} catch {
 		return null;
 	}
@@ -590,7 +613,7 @@ async function handleProxyNarInfo(
 	// off D1: the winner determines the edge key, so this resolution runs on
 	// every root read, cached or not.
 	const [token, cached] = await Promise.all([
-		proxyToken(request, env),
+		proxyToken(request, env, ctx),
 		measure('candidates', () => loadCandidates(env, ctx, request, 'path', storePathHash))
 	]);
 	let candidates = cached.rows;
@@ -697,7 +720,7 @@ async function handleProxyNar(
 
 	// Same concurrent shape (and memo rationale) as handleProxyNarInfo above.
 	const [token, cached] = await Promise.all([
-		proxyToken(request, env),
+		proxyToken(request, env, ctx),
 		measure('candidates', () => loadCandidates(env, ctx, request, 'nar', narHashRaw))
 	]);
 	let narCandidates = cached.rows;
@@ -780,7 +803,7 @@ async function handleGetMissingPaths(
 ): Promise<Response> {
 	let token: VerifiedToken | null;
 	try {
-		token = await verifyRequestToken(request, env);
+		token = await verifyRequestToken(request, env, ctx);
 	} catch (e) {
 		return authFailure(e);
 	}
@@ -800,11 +823,12 @@ async function handleGetMissingPaths(
 		1 + Math.ceil(body.hashes.length / 1000)
 	);
 
-	// Replica reads throughout: staleness at worst re-reports a just-pushed
+	// Bulk path and verdict scans stay on a replica: staleness re-reports a just-pushed
 	// path as missing, and the upload path dedups the re-push. Keeps this
 	// run-start read burst (nix-fast-build checks every path up front) off the
 	// write primary, which is where the push writes contend. The cache row
-	// rides the same memo as the serve and upload paths.
+	// rides the same memo as the serve and upload paths; only small config/row
+	// lookups may use their bounded slow-replica fallback.
 	//
 	// The three reads are only partially dependent — the existing-paths scan
 	// keys on the cache NAME while the upstream list needs the row — so the
@@ -817,13 +841,13 @@ async function handleGetMissingPaths(
 	const hashes = body.hashes;
 	const existingPromise = findExistingPaths(session, body.cache, hashes);
 	existingPromise.catch(() => {});
-	const cache = await findCacheCached(env.ATTIC_DB, body.cache);
+	const cache = await findCacheCached(env.ATTIC_DB, body.cache, ctx);
 	if (!cache) {
 		await existingPromise.catch(() => {});
 		return errorResponse(404, `Cache not found: ${body.cache}`, 'NoSuchCache');
 	}
 
-	const upstreams = body.ignoreUpstream ? [] : await upstreamsForCache(session, cache);
+	const upstreams = body.ignoreUpstream ? [] : await upstreamsForCache(env.ATTIC_DB, cache, ctx);
 	const existing = await existingPromise;
 	const missing = hashes.filter((h) => !existing.has(h));
 	// deferred_paths: the subset of missing_paths no upstream could be asked
@@ -865,7 +889,7 @@ async function handleGcTrigger(
 ): Promise<Response> {
 	let token: VerifiedToken | null;
 	try {
-		token = await verifyRequestToken(request, env);
+		token = await verifyRequestToken(request, env, ctx);
 	} catch (e) {
 		return authFailure(e);
 	}
@@ -901,10 +925,11 @@ async function handleGcTrigger(
 async function handleCacheInfo(
 	request: Request,
 	env: Env,
+	ctx: ExecutionContext | undefined,
 	cacheName: string,
 	baseUrl: string
 ): Promise<Response> {
-	const auth = await authorizeCacheRead(request, env, cacheName);
+	const auth = await authorizeCacheRead(request, env, cacheName, ctx);
 	if ('response' in auth) return auth.response;
 	return withVisibility(jsonResponse(cacheInfo(auth.cache, baseUrl)), auth.cache.is_public === 1);
 }
@@ -927,10 +952,11 @@ async function readRootBody(
 /** Require an authenticated token; returns a Response on failure. */
 async function requireToken(
 	request: Request,
-	env: Env
+	env: Env,
+	ctx: ExecutionContext | undefined
 ): Promise<{ token: VerifiedToken } | { response: Response }> {
 	try {
-		const token = await verifyRequestToken(request, env);
+		const token = await verifyRequestToken(request, env, ctx);
 		if (!token) return { response: errorResponse(401, 'No token provided') };
 		return { token };
 	} catch (e) {
@@ -1009,14 +1035,14 @@ async function handleV1(
 		}
 	}
 	if (method === 'GET' && route === 'cache-config' && segments.length === 4) {
-		return handleCacheInfo(request, env, segments[3], apiBase(env, url));
+		return handleCacheInfo(request, env, ctx, segments[3], apiBase(env, url));
 	}
 	if (method === 'GET' && route === 'caches' && segments.length === 3) {
 		// Optional auth, like the read path: an invalid token degrades to
 		// anonymous (public caches only) rather than failing the request.
 		let token: VerifiedToken | null = null;
 		try {
-			token = await verifyRequestToken(request, env);
+			token = await verifyRequestToken(request, env, ctx);
 		} catch {
 			token = null;
 		}
@@ -1033,7 +1059,7 @@ async function handleV1(
 	}
 
 	// Everything below requires a token.
-	const auth = await requireToken(request, env);
+	const auth = await requireToken(request, env, ctx);
 	if ('response' in auth) return auth.response;
 	const token = auth.token;
 	const canPush = (cacheName: string) => permissionForCache(token, cacheName).push;
@@ -1359,12 +1385,12 @@ async function handleCacheApiInner(
 	if ((method === 'GET' || method === 'HEAD') && segments.length === 2) {
 		const [cacheName, rest] = segments;
 		if (rest === 'nix-cache-info') {
-			return handleNixCacheInfo(request, env, cacheName, method === 'HEAD');
+			return handleNixCacheInfo(request, env, ctx, cacheName, method === 'HEAD');
 		}
 		if (rest === 'attic-cache-info') {
 			const limited = await chargeApiBudget(request, env);
 			if (limited) return limited;
-			return handleCacheInfo(request, env, cacheName, apiBase(env, url));
+			return handleCacheInfo(request, env, ctx, cacheName, apiBase(env, url));
 		}
 		if (rest.endsWith('.narinfo')) {
 			return handleNarInfo(request, env, ctx, cacheName, rest);

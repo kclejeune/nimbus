@@ -383,6 +383,58 @@ describe('concurrent upstream probing', () => {
 		expect(result).toMatchObject({ upstream: { id: 2 } });
 	});
 
+	it.each([200, 503])(
+		'probes after 250 ms of D1 wait and ignores late absent hints (%s)',
+		async (status) => {
+			vi.useFakeTimers();
+			const tasks: Promise<unknown>[] = [];
+			const ctx = { waitUntil: (task: Promise<unknown>) => void tasks.push(task) } as never;
+			let finishRead!: (value: unknown) => void;
+			const read = new Promise((resolve) => (finishRead = resolve));
+			const db = {
+				prepare: () => ({ bind: () => ({ all: () => read }) }),
+				batch: async (stmts: unknown[]) => stmts.map(() => ({ results: [] }))
+			} as never;
+			const hash = freshHash();
+			const spy = stubFetch(() =>
+				status === 200
+					? new Response(
+							`StorePath: /nix/store/${hash}-test\nNarHash: sha256:${'a'.repeat(64)}\nNarSize: 1`
+						)
+					: new Response(null, { status })
+			);
+			try {
+				const response = fetchUpstreamNarInfo(
+					db,
+					[upstream({ url: `https://deadline-${status}.example` })],
+					hash,
+					ctx
+				);
+				await vi.advanceTimersByTimeAsync(249);
+				expect(spy).not.toHaveBeenCalled();
+				await vi.advanceTimersByTimeAsync(51);
+				const result = await response;
+				expect(spy).toHaveBeenCalledOnce();
+				expect(result).toEqual(
+					status === 200
+						? expect.objectContaining({ upstream: expect.any(Object) })
+						: UPSTREAM_UNAVAILABLE
+				);
+				finishRead({
+					results: [
+						{ upstream_id: 1, present: VERDICT_ABSENT, checked_at: new Date().toISOString() }
+					]
+				});
+				await vi.advanceTimersByTimeAsync(100);
+				await Promise.all(tasks);
+				expect(await response).toBe(result);
+			} finally {
+				finishRead({ results: [] });
+				vi.useRealTimers();
+			}
+		}
+	);
+
 	it('fetchUpstreamNarInfo skips known-absent upstreams entirely', async () => {
 		const spy = stubFetch(
 			(url) =>
@@ -409,8 +461,8 @@ describe('filterUpstreamPaths', () => {
 	const h1 = 'a'.repeat(32);
 	const h2 = 'b'.repeat(32);
 
-	/** A db whose upstream_check reads answer per upstream id (the statement's
-	 * first bound param); verdict writes vanish. */
+	/** A db whose combined upstream_check reads answer only the requested
+	 * upstream ids and hashes; verdict writes vanish. */
 	function dbWithUpstreamVerdicts(rowsByUpstream: Record<number, Record<string, number>>) {
 		const checkedAt = new Date().toISOString();
 		return {
@@ -420,12 +472,17 @@ describe('filterUpstreamPaths', () => {
 			batch: async (stmts: { sql: string; params: unknown[] }[]) =>
 				stmts.map((s) => ({
 					results: s.sql.includes('FROM upstream_check')
-						? Object.entries(rowsByUpstream[s.params[0] as number] ?? {}).map(
-								([store_path_hash, present]) => ({
-									store_path_hash,
-									present,
-									checked_at: checkedAt
-								})
+						? (JSON.parse(s.params[0] as string) as number[]).flatMap((upstream_id) =>
+								Object.entries(rowsByUpstream[upstream_id] ?? {})
+									.filter(([hash]) =>
+										(JSON.parse(s.params[1] as string) as string[]).includes(hash)
+									)
+									.map(([store_path_hash, present]) => ({
+										upstream_id,
+										store_path_hash,
+										present,
+										checked_at: checkedAt
+									}))
 							)
 						: []
 				}))
@@ -456,6 +513,19 @@ describe('filterUpstreamPaths', () => {
 		expect((await filterUpstreamPaths(db, ups, [h1, h2])).missing).toEqual([h2]);
 		// h1 was covered by upstream 1's cached verdict — no probe anywhere.
 		for (const call of spy.mock.calls) expect(call[0]).not.toContain(h1);
+	});
+
+	it('a later cached hit saves earlier live probes and their budget', async () => {
+		const spy = stubFetch(() => new Response(null, { status: 503 }));
+		const db = dbWithUpstreamVerdicts({ 2: { [h1]: VERDICT_PRESENT } });
+		expect(
+			await filterUpstreamPaths(
+				db,
+				[upstream({ url: 'https://a.example' }), upstream({ id: 2, url: 'https://b.example' })],
+				[h1]
+			)
+		).toEqual({ missing: [], deferred: [] });
+		expect(spy).not.toHaveBeenCalled();
 	});
 
 	it('unpersistable verdicts cover for redirect upstreams but not persist ones', async () => {

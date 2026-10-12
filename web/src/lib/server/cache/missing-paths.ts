@@ -14,12 +14,14 @@
 // present if its narinfo carries a valid signature from that key.
 
 import { measure } from './latency';
+import { withSpan } from './tracing';
 import { AsyncMemo } from './async-memo';
+import { hedgedReplicaRead } from './read-hedge';
 import { UpstreamCooldown } from './upstream-cooldown';
 import { parseNarInfo, parsedNarInfoSignatureValid, type ParsedNarInfo } from '../attic/narinfo';
 import { dbAll, dbBatch, readSession, runBatched } from './db';
 import { recordGuard } from './metrics';
-import { mapConcurrent, readAll, sleep, type ExecutionContext } from './platform';
+import { mapConcurrent, readAll, sleep, withinMs, type ExecutionContext } from './platform';
 import { TtlMemo } from './ttl-memo';
 import { AdmissionError, clientKey, requireBudget, takeBudget, takeBudgetUnits } from './admission';
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
@@ -141,6 +143,7 @@ export async function findExistingPaths(
 	hashes: string[]
 ): Promise<Set<string>> {
 	const existing = new Set<string>();
+	if (hashes.length === 0) return existing;
 	const stmts: D1PreparedStatement[] = [];
 	for (let i = 0; i < hashes.length; i += HASHES_PER_STATEMENT) {
 		const batch = hashes.slice(i, i + HASHES_PER_STATEMENT);
@@ -176,31 +179,36 @@ function verdictFresh(
 	return checkedAt >= Date.now() - presentTtlSecs * 1000;
 }
 
-/** Cached upstream verdicts for a batch of hashes: hash -> verdict. */
+/** Cached verdicts for every upstream in one batch. Combining upstream ids
+ * in each hash window avoids repeating its JSON and one D1 call per upstream;
+ * the (upstream_id, store_path_hash) primary key still bounds every lookup. */
 async function cachedVerdicts(
 	db: D1,
-	upstream: Upstream,
+	upstreams: Upstream[],
 	hashes: string[]
-): Promise<Map<string, Verdict>> {
-	const verdicts = new Map<string, Verdict>();
-	const ttlSecs = upstreamTtlSecs(upstream);
+): Promise<Map<number, Map<string, Verdict>>> {
+	const verdicts = new Map<number, Map<string, Verdict>>();
+	if (upstreams.length === 0 || hashes.length === 0) return verdicts;
+	const ids = JSON.stringify(upstreams.map((u) => u.id));
 	const stmts: D1PreparedStatement[] = [];
 	for (let i = 0; i < hashes.length; i += HASHES_PER_STATEMENT) {
 		const batch = hashes.slice(i, i + HASHES_PER_STATEMENT);
 		stmts.push(
 			db
 				.prepare(
-					'SELECT store_path_hash, present, checked_at FROM upstream_check ' +
-						'WHERE upstream_id = ?1 AND store_path_hash IN (SELECT value FROM json_each(?2))'
+					'SELECT upstream_id, store_path_hash, present, checked_at FROM upstream_check ' +
+						'WHERE upstream_id IN (SELECT value FROM json_each(?1)) ' +
+						'AND store_path_hash IN (SELECT value FROM json_each(?2))'
 				)
-				.bind(upstream.id, JSON.stringify(batch))
+				.bind(ids, JSON.stringify(batch))
 		);
 	}
-	type Row = { store_path_hash: string; present: number; checked_at: string };
-	for (const result of await dbBatch<Row>(db, stmts)) {
-		for (const row of result.results) {
-			if (verdictFresh(row, ttlSecs)) verdicts.set(row.store_path_hash, row.present as Verdict);
-		}
+	type Row = VerdictRow & { store_path_hash: string };
+	const rows = (await dbBatch<Row>(db, stmts)).flatMap((r) => r.results);
+	for (const row of freshRows(rows, upstreams)) {
+		let entries = verdicts.get(row.upstream_id);
+		if (!entries) verdicts.set(row.upstream_id, (entries = new Map()));
+		entries.set(row.store_path_hash, row.present as Verdict);
 	}
 	return verdicts;
 }
@@ -229,19 +237,46 @@ async function cachedVerdictsAcrossUpstreams(
 	return freshVerdicts(results, upstreams);
 }
 
+/** Verdicts prune probes; live responses still decide availability and trust.
+ * A slow replica must not serialize a fast upstream behind seconds of D1
+ * wait. Let the read finish in this request's background context, while the
+ * existing probe budgets and upstream cooldown continue to bound fallback.
+ * Batch preflights keep their awaited verdict reads and write behavior. */
+async function serveVerdicts(
+	db: D1,
+	upstreams: Upstream[],
+	hash: string,
+	ctx: ExecutionContext | undefined
+): Promise<Map<number, Verdict>> {
+	if (upstreams.length === 0) return new Map();
+	if (!ctx) return cachedVerdictsAcrossUpstreams(db, upstreams, hash);
+	const lookup = withSpan(ctx, 'upstream verdict lookup', () =>
+		cachedVerdictsAcrossUpstreams(db, upstreams, hash)
+	).catch(() => null);
+	const verdicts = await measure('verdicts', () => withinMs(lookup, 250));
+	if (verdicts) return verdicts;
+	const reason = verdicts === null ? 'error' : 'timeout';
+	if (reason === 'timeout') ctx.waitUntil(lookup);
+	console.log(JSON.stringify({ event: 'nimbus.verdict_fallback', reason }));
+	return new Map();
+}
+
 type VerdictRow = { upstream_id: number; present: number; checked_at: string };
+
+/** The rows still fresh for one of `upstreams`. */
+function freshRows<R extends VerdictRow>(rows: R[], upstreams: Upstream[]): R[] {
+	const ttlById = new Map(upstreams.map((u) => [u.id, upstreamTtlSecs(u)]));
+	return rows.filter((row) => {
+		const ttlSecs = ttlById.get(row.upstream_id);
+		return ttlSecs !== undefined && verdictFresh(row, ttlSecs);
+	});
+}
 
 /** The rows' verdicts that are still fresh for one of `upstreams`, by id. */
 function freshVerdicts(rows: VerdictRow[], upstreams: Upstream[]): Map<number, Verdict> {
-	const ttlById = new Map(upstreams.map((u) => [u.id, upstreamTtlSecs(u)]));
-	const verdicts = new Map<number, Verdict>();
-	for (const row of rows) {
-		const ttlSecs = ttlById.get(row.upstream_id);
-		if (ttlSecs !== undefined && verdictFresh(row, ttlSecs)) {
-			verdicts.set(row.upstream_id, row.present as Verdict);
-		}
-	}
-	return verdicts;
+	return new Map(
+		freshRows(rows, upstreams).map((row) => [row.upstream_id, row.present as Verdict])
+	);
 }
 
 /** Batched, awaited verdict writes — for batch and background paths
@@ -556,18 +591,22 @@ export async function filterUpstreamPaths(
 	// transient probe failure): uncertainty, not absence.
 	const deferred = new Set<string>();
 
-	// Prefetch every upstream's cached verdicts concurrently, over the full
-	// missing set, before the sequential filter loop: fetched per upstream
-	// inside the loop, upstream N+1's verdict READ waited on upstream N's live
-	// probes (worst case seconds against the 5s timeout) for no reason. The
-	// cost is reading verdict rows for paths an earlier upstream ends up
-	// covering — replica reads, cheap next to the round-trips saved.
-	const verdictsByUpstream = new Map<number, Map<string, Verdict>>();
-	await Promise.all(
-		upstreams.map(async (u) => {
-			verdictsByUpstream.set(u.id, await cachedVerdicts(db, u, missing));
-		})
+	// Read all upstreams together before live probes. The entire closure scan
+	// stays on its existing replica session; a large batch is never duplicated
+	// on the primary by the single-read serving fallback.
+	const verdictsByUpstream = await withSpan(ctx, 'preflight verdict lookup', () =>
+		measure('preflightRead', () => cachedVerdicts(db, upstreams, missing))
 	);
+	// Preflight asks whether ANY upstream covers a path, unlike serving where
+	// priority determines whose signed narinfo wins. A later cached hit saves
+	// probes against earlier upstreams too, without spending the probe budget.
+	const cachedCoverage = new Set<string>();
+	for (const upstream of upstreams) {
+		for (const [hash, verdict] of verdictsByUpstream.get(upstream.id) ?? []) {
+			if (filtersPath(upstream, verdict)) cachedCoverage.add(hash);
+		}
+	}
+	remaining = missing.filter((hash) => !cachedCoverage.has(hash));
 
 	for (const upstream of upstreams) {
 		if (remaining.length === 0 || signal.aborted) break;
@@ -608,7 +647,6 @@ export async function filterUpstreamPaths(
 		}
 
 		const covered = new Set<string>();
-		for (const [hash, v] of cached) if (filtersPath(upstream, v)) covered.add(hash);
 		for (const p of probed) if (filtersPath(upstream, p.verdict)) covered.add(p.hash);
 		remaining = remaining.filter((h) => !covered.has(h));
 	}
@@ -642,7 +680,7 @@ export async function fetchUpstreamNarInfo(
 	ctx: ExecutionContext | undefined,
 	guard?: ProbeGuard
 ): Promise<{ text: string; upstream: Upstream } | null | UpstreamUncertain> {
-	const cached = await cachedVerdictsAcrossUpstreams(db, upstreams, storePathHash);
+	const cached = await serveVerdicts(db, upstreams, storePathHash, ctx);
 	const candidates = upstreams.filter((u) => cached.get(u.id) !== VERDICT_ABSENT);
 	if (candidates.length === 0) return null;
 	const attempt = async (
@@ -737,7 +775,7 @@ export async function findUpstreamNar(
 	cached?: Map<number, Verdict>
 ): Promise<string | null | UpstreamUncertain> {
 	const key = `nar:${narPath}`;
-	cached ??= await cachedVerdictsAcrossUpstreams(db, upstreams, key);
+	cached ??= await serveVerdicts(db, upstreams, key, ctx);
 	// A cached non-absent verdict is trusted without a live probe, so only the
 	// unknowns ranked above the first such upstream need probing at all; it
 	// doubles as the fallback when they all miss.
@@ -810,28 +848,36 @@ export async function resolveUpstreamNar(
 	filename: string,
 	ip?: string | null
 ): Promise<string | null | undefined> {
-	const session = readSession(env.ATTIC_DB);
 	const narPath = `nar/${filename}`;
 	// One round trip: the registry (fresh, not the per-isolate config memo —
 	// this fills an hour-long edge entry, and a memo up to ten minutes stale
 	// in this isolate would refill a redirect that a registry, subscription
 	// or cache-lifecycle edit had just purged, an edit other isolates' memos
 	// never hear about) plus every upstream's verdict for this NAR.
-	const [upstreamRows, subs, caches, verdictRows] = await dbBatch(session, [
-		...upstreamConfigStatements(session),
-		session
-			.prepare(
-				'SELECT upstream_id, present, checked_at FROM upstream_check WHERE store_path_hash = ?1'
+	const [upstreamRows, subs, caches, verdictRows] = await withSpan(
+		ctx,
+		'upstream redirect lookup',
+		() =>
+			hedgedReplicaRead(env.ATTIC_DB, ctx, (session) =>
+				dbBatch(session, [
+					...upstreamConfigStatements(session),
+					session
+						.prepare(
+							'SELECT upstream_id, present, checked_at FROM upstream_check WHERE store_path_hash = ?1'
+						)
+						.bind(`nar:${narPath}`)
+				])
 			)
-			.bind(`nar:${narPath}`)
-	]);
+	);
+	// The config is in hand, so the session below only carries verdict writes.
+	const session = readSession(env.ATTIC_DB);
 	const config = parseUpstreamConfig([upstreamRows, subs, caches]);
 	// The cache was deleted, or its name reused, since the gateway resolved it.
 	if (cache && !config.caches.some((c) => c.id === cache.id && c.name === cache.name))
 		return undefined;
 	const upstreams = cache
-		? await upstreamsForCache(session, cache, config)
-		: await allLiveUpstreams(session, config);
+		? await upstreamsForCache(session, cache, undefined, config)
+		: await allLiveUpstreams(session, undefined, config);
 	// The work worth charging is the fan-out below, so a cache with no
 	// upstreams keeps its plain 404 even under budget pressure.
 	if (upstreams.length > 0) {
@@ -948,8 +994,10 @@ function parseUpstreamConfig([upstreams, subs, caches]: { results: unknown[] }[]
 	};
 }
 
-function upstreamConfig(db: D1): Promise<UpstreamConfig> {
-	return configMemo.get('config', () => fetchUpstreamConfig(db));
+function upstreamConfig(db: D1, ctx?: ExecutionContext): Promise<UpstreamConfig> {
+	return configMemo.get('config', () =>
+		withSpan(ctx, 'upstream config lookup', () => hedgedReplicaRead(db, ctx, fetchUpstreamConfig))
+	);
 }
 
 /**
@@ -970,9 +1018,10 @@ export function effectiveUpstreamMode(
 export async function upstreamsForCache(
 	db: D1,
 	cache: { id: number; name: string },
+	ctx?: ExecutionContext,
 	config?: UpstreamConfig
 ): Promise<Upstream[]> {
-	config ??= await upstreamConfig(db);
+	config ??= await upstreamConfig(db, ctx);
 	const overrides = config.overrides.get(cache.id);
 	const out: Upstream[] = [];
 	for (const entry of config.upstreams) {
@@ -997,8 +1046,12 @@ export async function upstreamsForCache(
  * (by priority, name) whose effective mode is persist. With no live caches,
  * enforced/default-enabled entries still serve the root.
  */
-export async function allLiveUpstreams(db: D1, config?: UpstreamConfig): Promise<Upstream[]> {
-	config ??= await upstreamConfig(db);
+export async function allLiveUpstreams(
+	db: D1,
+	ctx?: ExecutionContext,
+	config?: UpstreamConfig
+): Promise<Upstream[]> {
+	config ??= await upstreamConfig(db, ctx);
 	const out: Upstream[] = [];
 	for (const entry of config.upstreams) {
 		let enabled = config.caches.length === 0 && effectiveUpstreamMode(entry, undefined) !== 'off';
