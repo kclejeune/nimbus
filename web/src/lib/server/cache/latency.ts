@@ -7,6 +7,8 @@ type Stage =
 	| 'candidates'
 	| 'store'
 	| 'upstream'
+	| 'verdicts'
+	| 'preflightRead'
 	| 'admission'
 	| 'd1'
 	| 'r2'
@@ -24,7 +26,8 @@ type Stage =
 	| 'cdcRead'
 	| 'cdcVerify'
 	| 'cdcPublish'
-	| 'chunkRelease';
+	| 'chunkRelease'
+	| 'chunkRead';
 interface Sample {
 	timings: Partial<Record<Stage, number>>;
 	d1: number;
@@ -79,6 +82,7 @@ export function uploadShape(chunks: number, rawBytes: number, compressedBytes?: 
  * a slow client stretches through backpressure. */
 export interface StreamObserver {
 	wait<T>(get: Promise<T>): Promise<T>;
+	pipe(work: () => Promise<void>, bytes: number | null): Promise<void>;
 	finish(status: 'ok' | 'error'): void;
 }
 
@@ -87,7 +91,10 @@ export interface StreamObserver {
  * sample. Logged for every stream, sampled or not — multi-chunk NARs are
  * rare and are the tail this event exists to explain. Retry and fallback
  * counts come from the header sample, so only sampled streams carry them.
- * `bytes` is the stored (compressed) size, null when a chunk's is unknown.
+ * `bytes` and `completedBytes` use stored compressed sizes, not wire byte
+ * counters. Status describes the pump: runtime length enforcement and client
+ * disconnects can fail a transfer after the pump closed. Start/progress events
+ * also survive an invocation killed before its completion log.
  */
 export function streamObservation(chunks: number, bytes: number | null): StreamObserver {
 	const sample = current.getStore();
@@ -96,8 +103,38 @@ export function streamObservation(chunks: number, bytes: number | null): StreamO
 	const fallbacks = sample?.loopbackFallbacks ?? 0;
 	let waitMs = 0;
 	let maxWaitMs = 0;
+	let completedChunks = 0;
+	let completedBytes: number | null = 0;
+	let phase = 'get';
+	let lastProgressMs = 0;
+	const emit = (event: string, status?: string) => {
+		const ms = performance.now() - started;
+		console.log(
+			JSON.stringify({
+				event,
+				route: 'GET /_nar/:hash',
+				layer: 'store',
+				status,
+				chunks,
+				bytes,
+				completedChunks,
+				completedBytes,
+				phase,
+				lastProgressMs,
+				ms,
+				waitMs,
+				maxWaitMs,
+				pipeMs: ms - waitMs,
+				sampled: !!sample,
+				retries: sample && sample.retries - retries,
+				loopbackFallbacks: sample && sample.loopbackFallbacks - fallbacks
+			})
+		);
+	};
+	emit('nimbus.stream.start');
 	return {
 		async wait(get) {
+			phase = 'get';
 			const start = performance.now();
 			try {
 				return await get;
@@ -107,25 +144,17 @@ export function streamObservation(chunks: number, bytes: number | null): StreamO
 				maxWaitMs = Math.max(maxWaitMs, waited);
 			}
 		},
+		async pipe(work, bytes) {
+			phase = 'pipe';
+			await work();
+			completedChunks++;
+			completedBytes = completedBytes !== null && bytes !== null ? completedBytes + bytes : null;
+			lastProgressMs = performance.now() - started;
+			phase = 'close';
+			if (completedChunks % 16 === 0) emit('nimbus.stream.progress');
+		},
 		finish(status) {
-			const ms = performance.now() - started;
-			console.log(
-				JSON.stringify({
-					event: 'nimbus.stream',
-					route: 'GET /_nar/:hash',
-					layer: 'store',
-					status,
-					chunks,
-					bytes,
-					ms,
-					waitMs,
-					maxWaitMs,
-					pipeMs: ms - waitMs,
-					sampled: !!sample,
-					retries: sample && sample.retries - retries,
-					loopbackFallbacks: sample && sample.loopbackFallbacks - fallbacks
-				})
-			);
+			emit('nimbus.stream', status);
 		}
 	};
 }

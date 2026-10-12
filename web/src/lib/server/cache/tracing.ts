@@ -1,4 +1,4 @@
-type Span = { setAttribute(key: string, value: string): unknown };
+type Span = { setAttribute(key: string, value: string | number | boolean): unknown };
 interface Tracing {
 	getActiveSpan?(): Span | undefined;
 	enterSpan?<T>(name: string, fn: (span: Span) => Promise<T>): Promise<T>;
@@ -30,10 +30,25 @@ export function withRequestSpan<T>(
 		span?.setAttribute('http.route', route);
 		span?.setAttribute('nimbus.layer', layer);
 	};
-	annotate(tracing?.getActiveSpan?.());
-	if (typeof tracing?.enterSpan !== 'function') return fn();
+	const root = tracing?.getActiveSpan?.();
+	annotate(root);
+	const run = async (span?: Span) => {
+		const started = performance.now();
+		const result = await fn();
+		if (result instanceof Response) {
+			const headerMs = performance.now() - started;
+			for (const target of [root, span]) {
+				target?.setAttribute('nimbus.header_ms', headerMs);
+				target?.setAttribute('http.response.status_code', result.status);
+				const length = result.headers.get('Content-Length');
+				if (length !== null) target?.setAttribute('nimbus.response_bytes', Number(length));
+			}
+		}
+		return result;
+	};
+	if (typeof tracing?.enterSpan !== 'function') return run();
 	return tracing.enterSpan(`${layer} ${template}`, (span) => {
 		annotate(span);
-		return fn();
+		return run(span);
 	});
 }

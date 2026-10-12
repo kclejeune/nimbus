@@ -39,3 +39,34 @@ it('serves with tracing disabled or without the new root span API', async () => 
 	);
 	expect(fn).toHaveBeenCalledTimes(2);
 });
+
+it('records response header latency on the root without consuming a streaming body', async () => {
+	const root = { setAttribute: vi.fn() };
+	const child = { setAttribute: vi.fn() };
+	let pulling = false;
+	const body = new ReadableStream(
+		{
+			pull() {
+				pulling = true;
+			}
+		},
+		{ highWaterMark: 0 }
+	);
+	const response = new Response(body, { headers: { 'Content-Length': '123' } });
+	const ctx = {
+		tracing: {
+			getActiveSpan: () => root,
+			enterSpan: (_name: string, fn: (span: typeof child) => Promise<Response>) => fn(child)
+		}
+	};
+	expect(await withRequestSpan(ctx, 'GET /nar/:file', 'store', async () => response)).toBe(
+		response
+	);
+	for (const span of [root, child]) {
+		expect(span.setAttribute).toHaveBeenCalledWith('nimbus.header_ms', expect.any(Number));
+		expect(span.setAttribute).toHaveBeenCalledWith('http.response.status_code', 200);
+		expect(span.setAttribute).toHaveBeenCalledWith('nimbus.response_bytes', 123);
+	}
+	expect(pulling).toBe(false);
+	await body.cancel();
+});

@@ -99,3 +99,28 @@ it('logs stream completion even for unsampled requests', async () => {
 	expect(event).toMatchObject({ event: 'nimbus.stream', chunks: 48, sampled: false });
 	expect(event).not.toHaveProperty('retries');
 });
+
+it('records the completed prefix and pipe phase when a later chunk fails', async () => {
+	const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+	const stream = streamObservation(2, 6);
+	await stream.wait(Promise.resolve());
+	await stream.pipe(async () => {}, 3);
+	await stream.wait(Promise.resolve());
+	await expect(
+		stream.pipe(async () => {
+			throw new Error('disconnected');
+		}, 3)
+	).rejects.toThrow('disconnected');
+	stream.finish('error');
+	expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({
+		event: 'nimbus.stream.start',
+		completedChunks: 0
+	});
+	expect(JSON.parse(log.mock.calls.at(-1)![0])).toMatchObject({
+		event: 'nimbus.stream',
+		status: 'error',
+		completedChunks: 1,
+		completedBytes: 3,
+		phase: 'pipe'
+	});
+});
