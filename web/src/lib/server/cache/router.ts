@@ -1117,9 +1117,8 @@ async function handleV1(
 		// Only bodies that get buffered or decompressed take the memory slot:
 		// the CDC manifests are ≤1 MiB JSON; gating them behind chunk PUTs
 		// stalled the client's pipeline.
-		// Completion re-reads chunks one at a time under wasmMemorySlots, so
-		// it takes no upload slot: holding one for a multi-GB verification
-		// would let two completions stall every push on the isolate.
+		// Completion reserves memory per chunk and releases it between chunks,
+		// so a multi-GB verification never owns a slot for the whole NAR.
 		const narRoute =
 			method !== 'PUT'
 				? null
@@ -1146,7 +1145,7 @@ async function handleV1(
 				const cacheName = url.searchParams.get('cache');
 				if (!cacheName) return errorResponse(400, 'Missing cache parameter');
 				if (!canPush(cacheName)) return errorResponse(403, 'Permission denied: push');
-				return await handleCdcChunkPut(request, env, segments[4], cacheName, ctx);
+				return await handleCdcChunkPut(request, env, segments[4], cacheName, ctx, release);
 			} else if (
 				method === 'POST' &&
 				segments[3] === 'chunks' &&

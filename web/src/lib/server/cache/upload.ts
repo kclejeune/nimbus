@@ -28,6 +28,9 @@ import {
 	type CompressionKind
 } from './compression';
 import { measure, uploadShape } from './latency';
+import { withSpan } from './tracing';
+import { prefetchInOrder } from './prefetch';
+import { hedgedReplicaRead } from './read-hedge';
 import { findCacheCached } from './cache-lookup';
 import * as db from './db';
 import { recordPush, recordStoreWrite } from './metrics';
@@ -85,11 +88,34 @@ export function uploadWeight(declared: number | null): number {
 	return Math.min(UPLOAD_SLOT_BYTES, 2 * declared + 1024 * 1024);
 }
 
+export type UploadAdmission = (() => void) & { shrink(bytes: number): void };
+
+async function acquireUpload(weight: number, waitMs: number): Promise<UploadAdmission> {
+	if (!(await measure('admission', () => uploadMemory.acquireBounded(weight, 64, waitMs))))
+		throw new AdmissionError('Upload memory busy; retry shortly', 5);
+	let held = weight;
+	let released = false;
+	const release = () => {
+		if (released) return;
+		released = true;
+		uploadMemory.release(held);
+	};
+	release.shrink = (bytes: number) => {
+		if (released) return;
+		uploadMemory.shrink(held, bytes);
+		held = bytes;
+	};
+	return release;
+}
+
 /** Admit a NAR-carrying request against the isolate's upload memory, or
  * throw a retryable AdmissionError. Returns the release. A chunk PUT is
  * charged a full slot: its compressed length does not bound its
  * decompressed size. */
-export async function admitUpload(request: Request, route: 'path' | 'chunk'): Promise<() => void> {
+export async function admitUpload(
+	request: Request,
+	route: 'path' | 'chunk'
+): Promise<UploadAdmission> {
 	const declared = route === 'path' ? declaredLength(request) : null;
 	const weight = uploadWeight(declared);
 	// A path upload without Content-Length is the stock attic client, which
@@ -98,9 +124,7 @@ export async function admitUpload(request: Request, route: 'path' | 'chunk'): Pr
 	// whose client disconnected holds the queue head until its deadline.
 	const waitMs =
 		route === 'path' && declared === null ? STREAMED_ADMISSION_WAIT_MS : ADMISSION_WAIT_MS;
-	if (!(await measure('admission', () => uploadMemory.acquireBounded(weight, 64, waitMs))))
-		throw new AdmissionError('Upload memory busy; retry shortly', 5);
-	return () => uploadMemory.release(weight);
+	return acquireUpload(weight, waitMs);
 }
 
 /** The request's Content-Length, or null when absent (chunked encoding). */
@@ -235,8 +259,14 @@ export async function tryLockNarProbed(
 }
 
 /** tryLockNarProbed's replica read, startable ahead of the lock. */
-export function probeNar(env: Env, narHash: string): Promise<db.NarRow | null> {
-	return db.findValidNar(db.readSession(env.ATTIC_DB), narHash);
+export function probeNar(
+	env: Env,
+	narHash: string,
+	ctx?: ExecutionContext
+): Promise<db.NarRow | null> {
+	return withSpan(ctx, 'upload dedup probe', () =>
+		hedgedReplicaRead(env.ATTIC_DB, ctx, (session) => db.findValidNar(session, narHash))
+	);
 }
 
 /** Hands work to the request's waitUntil (see publishThenRelease). */
@@ -393,7 +423,7 @@ async function processNarChunk(
 		};
 	}
 
-	const compressed = await withWasmSlot(() => compressBuffer(raw, kind));
+	const compressed = await withWasmSlot(() => compressBuffer(raw, kind, hash));
 	const key = versionedKey('chunk', hash, kind);
 	const stored = await storeChunk(
 		env,
@@ -657,8 +687,8 @@ export async function handleUploadPath(
 	// a create-then-push or affects tolerant fields (compression choice).
 	// The dedup probe only needs the hash, so it overlaps the cache lookup;
 	// the lock still waits for the cache.
-	const probe = probeNar(env, info.nar_hash);
-	const [cache] = await Promise.all([findCacheCached(env.ATTIC_DB, info.cache), probe]);
+	const probe = probeNar(env, info.nar_hash, ctx);
+	const [cache] = await Promise.all([findCacheCached(env.ATTIC_DB, info.cache, ctx), probe]);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
 
 	const defer = deferTo(ctx);
@@ -685,7 +715,7 @@ export async function handleUploadPath(
 
 		if (narLength != null && narLength <= MAX_BUFFERED_SIZE) {
 			// Capped at the declared length: admission charged for exactly that.
-			const body = await readAll(narBody, narLength);
+			const body = await readAll(narBody, narLength, narLength);
 			if (!body) return errorResponse(400, 'Body exceeds declared Content-Length');
 			response = await handleBufferedUpload(env, info, cache.id, kind, body, defer);
 		} else {
@@ -959,7 +989,7 @@ export async function handleCdcQuery(
 	const denied = validateManifest(body);
 	if (denied) return denied;
 	const info = body.nar_info;
-	const cache = await findCacheCached(env.ATTIC_DB, info.cache);
+	const cache = await findCacheCached(env.ATTIC_DB, info.cache, ctx);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
 
 	if (
@@ -1001,40 +1031,44 @@ export async function handleCdcQuery(
 }
 
 /**
- * Buffer and verify one uploaded chunk under a wasmMemorySlots slot:
- * decompress (the bomb guard caps output at the chunker's MAX_CHUNK) and
- * check the raw sha256 against the claimed hash. The slot is taken before
- * the body is buffered, so queued requests keep their bytes in the platform
- * stream, not the JS heap; the raw bytes live only inside the slot and just
- * the length escapes.
+ * The caller reserves upload memory before buffering. Only decompression
+ * and hashing hold a WASM slot; slow body transfers cannot block completion
+ * or another admitted chunk's verification. Just the raw length escapes.
  */
 async function verifyChunk(
 	request: Request,
-	hash: string
+	hash: string,
+	ctx?: ExecutionContext
 ): Promise<{ compressed: Uint8Array; rawLength: number } | Response> {
-	return withWasmSlot(async () => {
-		const maxCompressed = CDC_MAX_CHUNK + 1024 * 1024;
-		if (Number(request.headers.get('content-length')) > maxCompressed) {
-			await request.body?.cancel().catch(() => {});
-			return errorResponse(413, 'Compressed chunk too large');
-		}
-		if (!request.body) return errorResponse(400, 'Empty chunk body');
-		const compressed = await readAll(request.body, maxCompressed);
-		if (!compressed) return errorResponse(413, 'Compressed chunk too large');
-		if (compressed.length === 0) return errorResponse(400, 'Empty chunk body');
-		await initZstd();
-		let raw: Uint8Array;
-		try {
-			raw = zstdDecompress(compressed, CDC_MAX_CHUNK);
-		} catch (e) {
-			return errorResponse(400, `Invalid zstd chunk: ${e}`);
-		}
-		const actual = toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource));
-		if (actual !== hash) {
-			return errorResponse(400, `Chunk hash mismatch: expected ${hash}, got ${actual}`);
-		}
-		return { compressed, rawLength: raw.length };
-	});
+	const maxCompressed = CDC_MAX_CHUNK + 1024 * 1024;
+	if (Number(request.headers.get('content-length')) > maxCompressed) {
+		await request.body?.cancel().catch(() => {});
+		return errorResponse(413, 'Compressed chunk too large');
+	}
+	if (!request.body) return errorResponse(400, 'Empty chunk body');
+	const compressed = await withSpan(ctx, 'upload chunk read', () =>
+		measure('chunkRead', () =>
+			readAll(request.body!, maxCompressed, declaredLength(request) ?? undefined)
+		)
+	);
+	if (!compressed) return errorResponse(413, 'Compressed chunk too large');
+	if (compressed.length === 0) return errorResponse(400, 'Empty chunk body');
+	await initZstd();
+	return withWasmSlot(() =>
+		withSpan(ctx, 'upload chunk verify', async () => {
+			let raw: Uint8Array;
+			try {
+				raw = zstdDecompress(compressed, CDC_MAX_CHUNK);
+			} catch (e) {
+				return errorResponse(400, `Invalid zstd chunk: ${e}`);
+			}
+			const actual = toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource));
+			if (actual !== hash) {
+				return errorResponse(400, `Chunk hash mismatch: expected ${hash}, got ${actual}`);
+			}
+			return { compressed, rawLength: raw.length };
+		})
+	);
 }
 
 /**
@@ -1048,10 +1082,11 @@ export async function handleCdcChunkPut(
 	env: Env,
 	hash: string,
 	cacheName: string,
-	ctx?: ExecutionContext
+	ctx?: ExecutionContext,
+	admission?: UploadAdmission | null
 ): Promise<Response> {
 	if (!HEX64.test(hash)) return errorResponse(400, `Invalid chunk hash: ${hash}`);
-	const cache = await findCacheCached(env.ATTIC_DB, cacheName);
+	const cache = await findCacheCached(env.ATTIC_DB, cacheName, ctx);
 	if (!cache) return errorResponse(400, 'Missing or invalid cache');
 	// The dedup lookup depends only on the hash, so its round trip hides
 	// behind the body read, decompression and digest. A replica read: a stale
@@ -1062,8 +1097,11 @@ export async function handleCdcChunkPut(
 	// failed.
 	const lookup = db.findChunk(db.readSession(env.ATTIC_DB), `sha256:${hash}`, 'zstd');
 	lookup.catch(() => {});
-	const verified = await verifyChunk(request, hash);
+	const verified = await verifyChunk(request, hash, ctx);
 	if (verified instanceof Response) return verified;
+	// Verification dropped its raw buffer. Retain only compressed bytes and
+	// stream slack while D1/R2 persist them, keeping the active-request cap.
+	admission?.shrink(Math.min(UPLOAD_SLOT_BYTES, verified.compressed.byteLength + 1024 * 1024));
 	const existing = await lookup;
 	const { compressed, rawLength } = verified;
 	const proof = await issueChunkProof(env, cache, hash, rawLength);
@@ -1188,7 +1226,7 @@ export async function handleCdcComplete(
 	if (denied) return denied;
 	uploadShape(body.chunks.length, body.nar_size);
 	const info = body.nar_info;
-	const cache = await findCacheCached(env.ATTIC_DB, info.cache);
+	const cache = await findCacheCached(env.ATTIC_DB, info.cache, ctx);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
 	const invalidate = () =>
 		ctx?.waitUntil(invalidateAfterUpload(ctx, cache, info.store_path_hash, info.nar_hash));
@@ -1269,8 +1307,9 @@ export async function handleCdcComplete(
 	}
 
 	// A SHA-256 of the ordered bytes cannot be inferred from chunk hashes.
-	// Each chunk is read back under a WASM slot, one at a time, so peak
-	// memory is one raw chunk plus its compressed form regardless of NAR size.
+	// Read one chunk at a time under the shared upload memory budget, with
+	// one R2 header fetch ahead. Only verification holds a WASM slot; network
+	// reads cannot monopolize it. Buffered bytes stay bounded regardless of NAR size.
 	// Storage outcomes map to the client's recovery paths: a chunk that
 	// vanished (GC raced the upload, or the row outlived its object) or whose
 	// stored bytes fail verification is a 409 naming the hash — the row is
@@ -1285,59 +1324,86 @@ export async function handleCdcComplete(
 	let verified = false;
 	let compressedBytes = 0;
 	try {
-		for (const chunk of body.chunks) {
-			const row = lockedRows.get(`sha256:${chunk.hash}`)!;
-			const key = db.chunkKey(row);
-			if (!key) {
+		const loads = prefetchInOrder(
+			body.chunks,
+			1,
+			async (chunk) => {
+				const row = lockedRows.get(`sha256:${chunk.hash}`)!;
+				const key = db.chunkKey(row);
+				try {
+					const object = key
+						? await withSpan(ctx, 'complete chunk get', () =>
+								withR2Retry(() => env.CACHE_BUCKET.get(key))
+							)
+						: null;
+					return { chunk, row, object };
+				} catch {
+					throw new AdmissionError('Chunk storage temporarily unavailable', 5);
+				}
+			},
+			async ({ object }) => {
+				await object?.body.cancel().catch(() => {});
+			},
+			deferTo(ctx)
+		);
+		for await (const { chunk, row, object } of loads) {
+			if (!object) {
 				vanished.push(chunk.hash);
 				break;
 			}
-			const ok = await withWasmSlot(async () => {
+			// Reserve before consuming the body. Admission is per chunk, so a
+			// large completion cannot reserve all memory while waiting on R2.
+			const release = await acquireUpload(UPLOAD_SLOT_BYTES, ADMISSION_WAIT_MS);
+			let ok: boolean;
+			try {
 				let compressed: Uint8Array | null;
 				try {
-					const object = await withR2Retry(() => env.CACHE_BUCKET.get(key));
-					if (!object) {
-						vanished.push(chunk.hash);
-						return false;
-					}
-					compressed = await measure('cdcRead', () =>
-						readAll(
-							object.body as unknown as ReadableStream<Uint8Array>,
-							CDC_MAX_CHUNK + 1024 * 1024
+					compressed = await withSpan(ctx, 'complete chunk read', () =>
+						measure('cdcRead', () =>
+							readAll(
+								object.body as unknown as ReadableStream<Uint8Array>,
+								CDC_MAX_CHUNK + 1024 * 1024,
+								object.size
+							)
 						)
 					);
 					compressedBytes += compressed?.byteLength ?? 0;
 				} catch {
 					throw new AdmissionError('Chunk storage temporarily unavailable', 5);
 				}
-				return measure('cdcVerify', async () => {
-					let raw: Uint8Array | null = null;
-					if (compressed) {
-						await initZstd();
-						try {
-							raw = zstdDecompress(compressed, chunk.size);
-						} catch {
-							raw = null;
-						}
-					}
-					if (
-						!raw ||
-						raw.length !== chunk.size ||
-						toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource)) !== chunk.hash
-					) {
-						// Oversized, undecodable, or contradicting the row: mark it so
-						// the client's re-upload repairs it instead of dedup'ing
-						// against the bad bytes. Nothing is deleted here — a repair
-						// racing this read may already have moved the row.
-						await db.markChunkDamaged(env.ATTIC_DB, row.id, row.remote_file);
-						vanished.push(chunk.hash);
-						return false;
-					}
-					await writer.write(raw as BufferSource);
-					return true;
-				});
-			});
-			if (!ok) break;
+				await initZstd();
+				ok = await withWasmSlot(() =>
+					withSpan(ctx, 'complete chunk verify', () =>
+						measure('cdcVerify', async () => {
+							let raw: Uint8Array | null = null;
+							if (compressed) {
+								try {
+									raw = zstdDecompress(compressed, chunk.size);
+								} catch {
+									raw = null;
+								}
+							}
+							if (
+								!raw ||
+								raw.length !== chunk.size ||
+								toHex(await crypto.subtle.digest('SHA-256', raw as BufferSource)) !== chunk.hash
+							)
+								return false;
+							await writer.write(raw as BufferSource);
+							return true;
+						})
+					)
+				);
+			} finally {
+				release();
+			}
+			if (!ok) {
+				// Compare-and-set preserves a repair that moved the object while
+				// this request was reading it. No deletion or publication here.
+				await db.markChunkDamaged(env.ATTIC_DB, row.id, row.remote_file);
+				vanished.push(chunk.hash);
+				break;
+			}
 		}
 		if (vanished.length > 0) {
 			return json({ missing_chunk_hashes: vanished }, 409);

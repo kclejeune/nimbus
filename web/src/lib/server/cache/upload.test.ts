@@ -321,6 +321,28 @@ describe('MemoryBudget', () => {
 		expect(budget.tryAcquire(uploadWeight(1))).toBe(true);
 	});
 
+	it('returns bytes after verification while retaining the active cap and queued order', async () => {
+		vi.useFakeTimers();
+		try {
+			const budget = new MemoryBudget(64, 2);
+			expect(budget.tryAcquire(32)).toBe(true);
+			expect(budget.tryAcquire(32)).toBe(true);
+			budget.shrink(32, 1);
+			expect(budget.tryAcquire(1)).toBe(false); // Active cap still binds.
+			const queued = budget.acquireBounded(32, 4, 500);
+			budget.shrink(32, 1);
+			budget.release(1);
+			expect(budget.tryAcquire(1)).toBe(false); // Queued full slot wins.
+			await vi.advanceTimersByTimeAsync(100);
+			expect(await queued).toBe(true);
+			budget.release(32);
+			budget.release(1);
+			expect(budget.tryAcquire(64)).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('does not let light uploads starve a queued full slot', async () => {
 		vi.useFakeTimers();
 		try {
