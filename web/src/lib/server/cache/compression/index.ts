@@ -195,12 +195,16 @@ function toHex(buf: ArrayBuffer): string {
 	return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/** One-shot compression with dual hashing, for buffered (≤16MB) inputs. */
+/** One-shot compression with dual hashing, for buffered (≤16MB) inputs.
+ * verifiedNarHash may reuse a SHA-256 computed locally over this exact input;
+ * callers must never pass an unverified client claim. */
 export async function compressBuffer(
 	input: Uint8Array,
-	kind: CompressionKind
+	kind: CompressionKind,
+	verifiedNarHash?: string
 ): Promise<BufferedCompressionResult> {
-	const narHash = toHex(await crypto.subtle.digest('SHA-256', input as BufferSource));
+	const narHash =
+		verifiedNarHash ?? toHex(await crypto.subtle.digest('SHA-256', input as BufferSource));
 
 	let data: Uint8Array;
 	if (kind === 'none') {
@@ -222,6 +226,7 @@ export async function compressBuffer(
 		}
 	}
 
-	const fileHash = toHex(await crypto.subtle.digest('SHA-256', data as BufferSource));
+	const fileHash =
+		kind === 'none' ? narHash : toHex(await crypto.subtle.digest('SHA-256', data as BufferSource));
 	return { data, narHash, narSize: input.length, fileHash, fileSize: data.length, kind };
 }

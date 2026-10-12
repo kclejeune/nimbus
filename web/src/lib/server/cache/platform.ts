@@ -53,6 +53,22 @@ export function newFixedLengthStream(size: number): TransformStream<Uint8Array, 
  * here so that invariant has one home. */
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** `work`'s value, or undefined once `ms` passes first. The timer is always
+ * cleared; a late `work` keeps running and is the caller's to park. */
+export async function withinMs<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			work,
+			new Promise<undefined>((resolve) => {
+				timer = setTimeout(() => resolve(undefined), ms);
+			})
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 /** Retry an async operation with jittered exponential backoff. shouldRetry
  * gates which failures are worth re-attempting (default: all). */
 export async function withRetry<T>(
@@ -185,6 +201,13 @@ export class MemoryBudget {
 		this.freeBytes += weight;
 		this.active--;
 	}
+	/** Return bytes after a pipeline drops its raw buffer, retaining its
+	 * active-request slot and the FIFO order of existing waiters. */
+	shrink(oldWeight: number, newWeight: number): void {
+		if (!Number.isFinite(newWeight) || newWeight < 0 || newWeight > oldWeight)
+			throw new RangeError('Memory weight must shrink');
+		this.freeBytes += oldWeight - newWeight;
+	}
 }
 
 /** Run fn while holding one slot of sem. */
@@ -233,27 +256,113 @@ export async function mapConcurrent<T, R>(
 	return results;
 }
 
-/** Collect a stream into memory, or null once it exceeds `limit` bytes. */
+/** Read native byte streams into one buffer without copying fragments in
+ * JavaScript. BYOB transfers the buffer, so every read must recover it from
+ * the returned view, including an empty EOF read. Incorrect size hints
+ * still grow or trim the result, and a separate read verifies EOF at the
+ * limit rather than trusting Content-Length. */
+async function readSizedBody(
+	reader: ReadableStreamBYOBReader,
+	limit: number,
+	size: number
+): Promise<Uint8Array | null> {
+	let out = new Uint8Array(size);
+	let total = 0;
+	let view: Uint8Array<ArrayBuffer>;
+	const deadline = bodyDeadline();
+	const timedReader = {
+		read: () => reader.read(view),
+		cancel: () => reader.cancel()
+	};
+	try {
+		for (;;) {
+			const capacity = out.length;
+			const intoOutput = total < capacity;
+			// Past the hint, a 1-byte probe confirms EOF; any byte it finds
+			// grows `out` and later reads land there directly.
+			view = intoOutput ? out.subarray(total) : new Uint8Array(1);
+			const { done, value } = await readWithTimeout(timedReader, deadline);
+			if (intoOutput) {
+				if (!value) throw new Error('Body read cancelled');
+				out = new Uint8Array(value.buffer, 0, capacity);
+			}
+			if (done) break;
+			if (!value || value.length === 0) continue;
+			const offset = total;
+			total += value.length;
+			if (total > limit) {
+				await reader.cancel().catch(() => {});
+				return null;
+			}
+			if (!intoOutput) {
+				const grown = new Uint8Array(Math.min(limit, Math.max(total, capacity * 2)));
+				grown.set(out);
+				grown.set(value, offset);
+				out = grown;
+			}
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	// Trim an inaccurate hint so upload admission can account for the actual
+	// backing allocation, rather than a short view retaining a large buffer.
+	return out.length === total ? out : out.slice(0, total);
+}
+
+/** Collect a stream, or null once it exceeds `limit`. A known size uses
+ * direct native BYOB reads where supported, with a preallocated-buffer
+ * fallback for ordinary streams (the upload preamble split's remainder).
+ * The size is only an allocation hint;
+ * byte limits and read deadlines still apply independently. */
 export async function readAll(
 	body: ReadableStream<Uint8Array>,
-	limit: number
+	limit: number,
+	expectedSize?: number
 ): Promise<Uint8Array | null> {
+	const sized =
+		expectedSize !== undefined &&
+		Number.isSafeInteger(expectedSize) &&
+		expectedSize >= 0 &&
+		expectedSize <= limit;
+	if (sized) {
+		let byob: ReadableStreamBYOBReader | undefined;
+		try {
+			byob = body.getReader({ mode: 'byob' });
+		} catch {
+			// User-created streams and Node test fixtures may not be byte streams.
+		}
+		if (byob) return readSizedBody(byob, limit, expectedSize!);
+	}
 	const parts: Uint8Array[] = [];
+	let out = sized ? new Uint8Array(expectedSize!) : undefined;
 	let total = 0;
 	const reader = body.getReader();
 	const deadline = bodyDeadline();
-	for (;;) {
-		const { done, value } = await readWithTimeout(reader, deadline);
-		if (done) break;
-		if (!value || value.length === 0) continue;
-		total += value.length;
-		if (total > limit) {
-			await reader.cancel().catch(() => {});
-			return null;
+	try {
+		for (;;) {
+			const { done, value } = await readWithTimeout(reader, deadline);
+			if (done) break;
+			if (!value || value.length === 0) continue;
+			const offset = total;
+			total += value.length;
+			if (total > limit) {
+				await reader.cancel().catch(() => {});
+				return null;
+			}
+			if (out) {
+				if (total > out.length) {
+					const grown = new Uint8Array(Math.min(limit, Math.max(total, out.length * 2)));
+					grown.set(out);
+					out = grown;
+				}
+				out.set(value, offset);
+			} else parts.push(value);
 		}
-		parts.push(value);
+	} finally {
+		reader.releaseLock();
 	}
-	const out = new Uint8Array(total);
+	if (out) return out.length === total ? out : out.slice(0, total);
+	out = new Uint8Array(total);
 	let offset = 0;
 	for (const part of parts) {
 		out.set(part, offset);

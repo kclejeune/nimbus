@@ -25,7 +25,7 @@ export const bodyDeadline = (): number => Date.now() + BODY_MAX_DURATION_MS;
 
 /** Both idle and absolute deadlines matter: a trickle must not hold admission forever. */
 export async function readWithTimeout<T>(
-	reader: ReadableStreamDefaultReader<T>,
+	reader: Pick<ReadableStreamDefaultReader<T>, 'read' | 'cancel'>,
 	deadline: number
 ): Promise<ReadableStreamReadResult<T>> {
 	const timeoutMs = Math.min(BODY_IDLE_TIMEOUT_MS, deadline - Date.now());
