@@ -16,15 +16,19 @@ import {
 	candidateTag,
 	internalRequest,
 	chargeBackendRead,
-	invalidateCandidates
+	invalidateCandidates,
+	candidateCacheControl,
+	CANDIDATES_TAG,
+	FILLED_AT_HEADER,
+	viaStore
 } from './metadata';
 import { errorResponse, withVisibility } from '../attic/http';
-import { buildNarInfo } from '../attic/narinfo';
+import { buildNarInfo, narInfoSignatureValid } from '../attic/narinfo';
 import { absoluteNarinfoUrl } from '../attic/nar-url';
 import { extractPublicKey } from '../attic/signing';
 import { hedgedReplicaRead } from './read-hedge';
 import { findCacheCached } from './cache-lookup';
-import { CLIENT_IP_HEADER } from './admission';
+import { AdmissionError, CLIENT_IP_HEADER } from './admission';
 import * as db from './db';
 import {
 	allLiveUpstreams,
@@ -35,7 +39,7 @@ import {
 	upstreamTtlSecs,
 	type Upstream
 } from './missing-paths';
-import { clearAbsent, getProxyKeypair } from './proxy';
+import { clearAbsent, getProxyKeypair, pickReadableWinner } from './proxy';
 import { purgeCoalesced } from './purge';
 import { RateBudget } from './rate-budget';
 import { TtlMemo } from './ttl-memo';
@@ -329,6 +333,9 @@ export async function serveStore(
 	}
 
 	await chargeBackendRead(env, request);
+	if (segments.length === 2 && segments[0] === '_anonymous_narinfo_v1') {
+		return serveAnonymousNarInfo(request, env, ctx, segments[1]);
+	}
 
 	// Root-proxy upstream fallback: the hash resolves to no local cache, so try
 	// the union of every live cache's upstreams. Cached at the edge under this
@@ -344,7 +351,7 @@ export async function serveStore(
 			env,
 			ctx,
 			segments[1].slice(0, -'.narinfo'.length),
-			request.headers.get('CF-Connecting-IP')
+			request.headers.get(CLIENT_IP_HEADER)
 		);
 	}
 	if (segments.length === 2 && segments[1].endsWith('.narinfo')) {
@@ -374,6 +381,98 @@ export async function serveStore(
 	return errorResponse(404, 'Not found');
 }
 
+/** Internal envelope: metadata never leaves the gateway, and the store selects
+ * public caches only. The gateway rechecks visibility on EVERY edge hit before
+ * releasing local bytes, just as it does with standalone candidate metadata. */
+export interface AnonymousNarInfo {
+	rows: db.LiveCacheRow[];
+	winnerId: number | null;
+	status: number;
+	responseFilledAt: number;
+	headers: [string, string][];
+	text: string;
+}
+
+async function serveAnonymousNarInfo(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	hash: string
+): Promise<Response> {
+	if (hash.length !== 32) return errorResponse(400, 'Invalid store path hash');
+	const rows = await hedgedReplicaRead(env.ATTIC_DB, ctx, (session) =>
+		db.cachesWithStorePathHash(session, hash)
+	);
+	const filledAt = Date.now();
+	const winner = pickReadableWinner(null, rows);
+	let proxySigningAvailable = !winner;
+	let response: Response;
+	try {
+		// Reuse the existing narinfo edge entry on envelope refills. Refreshing
+		// five-minute metadata must not turn an hour-long upstream TTL into a
+		// live probe every five minutes. Only a combined MISS needs this nested
+		// call; hits take one gateway loopback.
+		const body = internalRequest(
+			env,
+			winner ? `/_proxy/${winner.name}/${hash}.narinfo` : `/_proxy_upstream/${hash}.narinfo`,
+			request.headers.get(CLIENT_IP_HEADER)
+		);
+		const url = new URL(body.url);
+		url.searchParams.set('policy', STORE_POLICY_VERSION);
+		if (winner) {
+			// Names can be reused after deletion; keep bodies tied to the
+			// cache identity the envelope selected.
+			url.searchParams.set('cache-id', String(winner.id));
+			try {
+				url.searchParams.set('pk', extractPublicKey(await getProxyKeypair(env)));
+				proxySigningAvailable = true;
+			} catch {
+				/* Existing unsigned/stored-signature fallback. */
+			}
+		}
+		const keyed = new Request(url, body);
+		response = await viaStore(ctx, keyed, () => serveStore(keyed, env, ctx));
+	} catch (error) {
+		// Keep candidate metadata available for the gateway's confirmation:
+		// an upstream outage must not hide an upload behind a stale empty list.
+		console.warn(`anonymous narinfo lookup failed: ${error}`);
+		response =
+			error instanceof AdmissionError
+				? error.response()
+				: errorResponse(503, 'Narinfo temporarily unavailable', undefined, { 'Retry-After': '60' });
+	}
+	const envelope: AnonymousNarInfo = {
+		rows,
+		winnerId: winner?.id ?? null,
+		status: response.status,
+		responseFilledAt: Date.now() - (Number(response.headers.get('Age')) || 0) * 1000,
+		headers: [...response.headers.entries()],
+		text: await response.text()
+	};
+	// The combined entry must refresh when either membership or the narinfo
+	// expires. Metadata retains its week-long reuse; the gateway separately
+	// checks the narinfo's shorter lifetime before using its body. Never cache
+	// errors, deletion races or local signing fallbacks. The envelope key has
+	// no signing identity, so a fallback must retry key access on the next read.
+	// Existing purges cover this key.
+	const candidatePolicy = candidateCacheControl(rows.length > 0);
+	const age = (policy: string) => Number(/max-age=(\d+)/.exec(policy)?.[1] ?? 0);
+	const ttl = Math.min(age(candidatePolicy), age(response.headers.get('Cache-Control') ?? ''));
+	const cacheable =
+		(response.ok || (!winner && response.status === 404)) &&
+		proxySigningAvailable &&
+		!response.headers.get('Cache-Control')?.includes('no-store');
+	return Response.json(envelope, {
+		headers: {
+			'Cache-Control': cacheable
+				? candidatePolicy.replace(/max-age=\d+/, `max-age=${ttl}`)
+				: 'no-store',
+			'Cache-Tag': `${CANDIDATES_TAG},${candidateTag('path', hash)},${response.headers.get('Cache-Tag') ?? ''}`,
+			[FILLED_AT_HEADER]: String(filledAt)
+		}
+	});
+}
+
 async function serveProxyNarInfo(
 	env: Env,
 	ctx: ExecutionContext | undefined,
@@ -400,7 +499,20 @@ async function serveProxyNarInfo(
 	const narinfo = await buildNarInfo(found.object, found.nar, found.chunks, keypair);
 
 	// Same tags as the per-cache entry: GC/upload purges cover both.
-	return narinfoResponse(narinfo, cacheName, storePathHash, cache.is_public === 1);
+	const response = narinfoResponse(narinfo, cacheName, storePathHash, cache.is_public === 1);
+	// Key lookup or signing can fail even after the caller selected a ?pk key.
+	// Never let that fallback poison either the body entry or an anonymous
+	// envelope: recovery must produce a proxy-signed response on the next read.
+	let signed = false;
+	if (keypair) {
+		try {
+			signed = await narInfoSignatureValid(narinfo, extractPublicKey(keypair));
+		} catch {
+			// Verification/key access failed; retain the fallback for this request.
+		}
+	}
+	if (!signed) response.headers.set('Cache-Control', 'no-store');
+	return response;
 }
 
 /**

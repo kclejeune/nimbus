@@ -28,11 +28,12 @@ const narHashFor = (hash: string) => `0${hash.slice(1)}`.padEnd(52, '0');
 function get(
 	ctx: ExecutionContext,
 	path: string,
-	options: { env?: App.Platform['env']; clientIp?: string } = {}
+	options: { env?: App.Platform['env']; clientIp?: string; authorization?: string } = {}
 ): Promise<Response> {
 	const headers: Record<string, string> = options.clientIp
 		? { 'CF-Connecting-IP': options.clientIp }
 		: {};
+	if (options.authorization) headers.Authorization = options.authorization;
 	return handleCacheApi(
 		new Request(`https://cache.test/${path}`, { headers }),
 		options.env ?? env,
@@ -64,6 +65,26 @@ function store(
 	const purged: string[] = [];
 	const fetch = vi.fn(async (request: Request) => {
 		const path = new URL(request.url).pathname;
+		if (path.startsWith('/_anonymous_narinfo_v1/')) {
+			const metadata = overrides.meta?.clone() ?? emptyEntry(entry);
+			const response = overrides.route
+				? overrides.route(path)
+				: new Response(null, {
+						status: upstream === 'miss' ? 404 : 503,
+						headers: { 'Cache-Control': 'no-store', 'Retry-After': '60' }
+					});
+			return Response.json(
+				{
+					rows: await metadata.json(),
+					winnerId: null,
+					status: response.status,
+					responseFilledAt: Date.now(),
+					headers: [...response.headers.entries()],
+					text: await response.text()
+				},
+				{ headers: metadata.headers }
+			);
+		}
 		if (path.startsWith('/_meta/')) return overrides.meta?.clone() ?? emptyEntry(entry);
 		if (overrides.route) return overrides.route(path);
 		const failed = () =>
@@ -248,7 +269,11 @@ it('releases the upstream response when confirmation is refused', async () => {
 	const { ctx } = store('stale', 'miss', {
 		route: () => new Response(new ReadableStream({ cancel }), { status: 503 })
 	});
-	const response = await get(ctx, `${hash}.narinfo`, { env: refused, clientIp: '203.0.113.9' });
+	const response = await get(ctx, `${hash}.narinfo`, {
+		env: refused,
+		clientIp: '203.0.113.9',
+		authorization: 'Bearer invalid'
+	});
 	expect(response.status).toBe(503);
 	expect(cancel).toHaveBeenCalledOnce();
 });

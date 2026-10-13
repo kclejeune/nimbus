@@ -13,7 +13,9 @@ import {
 	disposeLoopback,
 	internalRequest,
 	internalJson,
-	remainingFreshMs
+	remainingFreshMs,
+	resolveCandidates,
+	type Candidates
 } from './metadata';
 import {
 	CacheConfigError,
@@ -75,7 +77,8 @@ import {
 	serveStore,
 	STORE_POLICY_VERSION,
 	UPSTREAM_MARKER_HEADER,
-	upstreamNarPath
+	upstreamNarPath,
+	type AnonymousNarInfo
 } from './store';
 import {
 	hasGcAuthority,
@@ -319,7 +322,15 @@ async function forwardToStore(
 	const response = await measure('store', () =>
 		viaStore(ctx, forwarded, () => serveStore(forwarded, env, ctx))
 	);
+	return finishStoreResponse(response, env, ctx);
+}
 
+/** Apply gateway-owned ingestion only after a combined response is authorized. */
+async function finishStoreResponse(
+	response: Response,
+	env: Env,
+	ctx: ExecutionContext | undefined
+): Promise<Response> {
 	const cacheName = response.headers.get(PERSIST_CACHE_HEADER);
 	const upstreamUrl = response.headers.get(PERSIST_UPSTREAM_HEADER);
 	if (!cacheName || !upstreamUrl || response.status !== 200) return response;
@@ -591,6 +602,55 @@ function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
 	);
 }
 
+async function anonymousNarInfo(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	hash: string
+): Promise<{ cached: Candidates; response?: Response; winnerId: number | null }> {
+	const internal = internalRequest(
+		env,
+		`/_anonymous_narinfo_v1/${hash}`,
+		request.headers.get('CF-Connecting-IP')
+	);
+	const result = await measure('candidateLoopback', () =>
+		viaStore(ctx, internal, () => serveStore(internal, env, ctx))
+	);
+	const envelope = await internalJson<AnonymousNarInfo>(result, 'Narinfo temporarily unavailable');
+	const cached = await resolveCandidates(
+		env,
+		ctx,
+		request,
+		'path',
+		hash,
+		envelope.rows,
+		result.headers
+	);
+	const response = new Response(envelope.text, {
+		status: envelope.status,
+		headers: envelope.headers
+	});
+	const edge = result.headers.get('CF-Cache-Status');
+	if (edge) response.headers.set('CF-Cache-Status', edge);
+	// Keep reusing candidate metadata across weekend CI gaps without extending
+	// the upstream narinfo's own lifetime. An older body takes the existing
+	// body loopback, using these candidates rather than re-reading metadata.
+	const policy = response.headers.get('Cache-Control') ?? '';
+	const maxAge = Number(/(?:^|[\s,])max-age=(\d+)/.exec(policy)?.[1] ?? 0);
+	const staleAge = Number(/stale-while-revalidate=(\d+)/.exec(policy)?.[1] ?? 0);
+	const bodyAge = Date.now() - envelope.responseFilledAt;
+	if (
+		(!Number.isFinite(bodyAge) || bodyAge >= (maxAge + staleAge) * 1000) &&
+		!/no-store/.test(policy)
+	) {
+		await disposeLoopback(response);
+		return { cached, winnerId: envelope.winnerId };
+	}
+	if (Number.isFinite(bodyAge))
+		response.headers.set('Age', String(Math.max(0, Math.floor(bodyAge / 1000))));
+	return { cached, response, winnerId: envelope.winnerId };
+}
+
 async function handleProxyNarInfo(
 	request: Request,
 	env: Env,
@@ -607,15 +667,27 @@ async function handleProxyNarInfo(
 		return errorResponse(404, 'Not found', 'NoSuchObject');
 	}
 
-	// Token verification (CPU plus, at worst, a memoized revocation read) and
-	// candidate resolution (an edge-cached /_meta loopback) are independent —
-	// run them concurrently. The candidates' edge entry is what keeps edge hits
-	// off D1: the winner determines the edge key, so this resolution runs on
-	// every root read, cached or not.
-	const [token, cached] = await Promise.all([
-		proxyToken(request, env, ctx),
-		measure('candidates', () => loadCandidates(env, ctx, request, 'path', storePathHash))
-	]);
+	// Anonymous reads combine candidates and content in one edge lookup. With
+	// credentials, verify the token concurrently with standalone metadata so
+	// private-cache selection remains caller-specific in the gateway.
+	const combined = !request.headers.has('Authorization')
+		? await measure('candidates', () => anonymousNarInfo(request, env, ctx, storePathHash)).catch(
+				(error) => {
+					if (error instanceof AdmissionError) throw error;
+					// A transport failure cannot supply metadata for confirmation.
+					// Recover through the independent metadata/upstream loopbacks.
+					console.warn(`anonymous narinfo loopback failed; retrying separate reads: ${error}`);
+					return null;
+				}
+			)
+		: null;
+	const [token, cached] = combined
+		? [null, combined.cached]
+		: await Promise.all([
+				proxyToken(request, env, ctx),
+				measure('candidates', () => loadCandidates(env, ctx, request, 'path', storePathHash))
+			]);
+	let combinedResponse = combined?.response;
 	let candidates = cached.rows;
 	let winner = pickReadableWinner(token, candidates);
 	// Caches listed but none readable (or none left after the visibility
@@ -629,6 +701,12 @@ async function handleProxyNarInfo(
 		);
 		winner = pickReadableWinner(token, candidates);
 	}
+	// A visibility change, deletion/recreation or confirmed new holder can
+	// change the winner. Discard the cached body's selection before retrying.
+	if (combined && combined.winnerId !== (winner?.id ?? null)) {
+		await disposeLoopback(combinedResponse);
+		combinedResponse = undefined;
+	}
 	// No local winner (not stored anywhere, or stored only in caches this
 	// requester can't read): fall back to the union of live caches' upstreams.
 	// Upstream content is public, so serving it regardless of token leaks
@@ -641,7 +719,9 @@ async function handleProxyNarInfo(
 		// Upstream content is the fast path; a stale empty entry is confirmed
 		// before a miss or an upstream failure — returned or thrown — becomes
 		// the answer.
-		const upstream = await settle(forwardToStore(new Request(fallback, request), env, ctx));
+		const upstream = combinedResponse
+			? { ok: true as const, value: combinedResponse }
+			: await settle(forwardToStore(new Request(fallback, request), env, ctx));
 		const response = upstream.value;
 		if (!response?.ok) {
 			const confirmed = await measure('candidates', cached.confirmEmpty).catch(async (e) => {
@@ -671,9 +751,20 @@ async function handleProxyNarInfo(
 				viaUpstream: true,
 				edge: storeEdge(response)
 			});
-			return withCachePolicy(stripUpstreamMarker(response), true);
+			return withCachePolicy(
+				stripUpstreamMarker(await finishStoreResponse(response, env, ctx)),
+				true
+			);
 		}
 	}
+	if (combinedResponse?.ok && combined?.winnerId === winner.id) {
+		recordRead(env, 'narinfo', UNIFIED_LABEL, {
+			status: combinedResponse.status,
+			edge: storeEdge(combinedResponse)
+		});
+		return withCachePolicy(await finishStoreResponse(combinedResponse, env, ctx), true);
+	}
+	await disposeLoopback(combinedResponse);
 
 	let pk: string | null = null;
 	try {

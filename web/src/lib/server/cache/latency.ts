@@ -189,6 +189,7 @@ export function routeTemplate(request: Request): string {
 	const parts = new URL(request.url).pathname.split('/').filter(Boolean);
 	let path: string;
 	if (parts[0] === '_upstream_nar') path = '/_upstream_nar/:scope/:file';
+	else if (parts[0] === '_anonymous_narinfo_v1') path = '/_anonymous_narinfo_v1/:hash';
 	else if (parts[0] === '_meta') path = '/_meta/:kind/:hash';
 	else if (parts[0] === '_touch') path = '/_touch/:cache/:hash';
 	else if (parts[0] === '_manifest') path = '/_manifest/:cache/:hash';

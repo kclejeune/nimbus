@@ -74,12 +74,14 @@ const CANDIDATE_STALE_SECONDS = 7 * 24 * 60 * 60;
 const LONG_CACHE_CONTROL = `public, max-age=3600, stale-while-revalidate=${CANDIDATE_STALE_SECONDS}`;
 const EMPTY_MAX_AGE_MS = 30_000;
 const EMPTY_CACHE_CONTROL = `public, max-age=300, stale-while-revalidate=${CANDIDATE_STALE_SECONDS}, stale-if-error=0`;
+export const candidateCacheControl = (listed: boolean): string =>
+	listed ? LONG_CACHE_CONTROL : EMPTY_CACHE_CONTROL;
 const SHORT_CACHE_CONTROL = 'public, max-age=30, must-revalidate';
 
 // When a candidate list was read from D1. The edge keeps it with the entry,
 // so the gateway judges staleness from the fill itself rather than from how
 // the caching layer labels a stale-while-revalidate hit in CF-Cache-Status.
-const FILLED_AT_HEADER = 'X-Nimbus-Filled-At';
+export const FILLED_AT_HEADER = 'X-Nimbus-Filled-At';
 
 /** Internal metadata: edge-cached, evicted by tag on change. */
 function cachedJson(body: unknown, tag: string, cacheControl: string): Response {
@@ -168,7 +170,7 @@ export async function serveCandidates(
 	const response = cachedJson(
 		rows,
 		candidateTag(kind, hash),
-		rows.length > 0 ? LONG_CACHE_CONTROL : EMPTY_CACHE_CONTROL
+		candidateCacheControl(rows.length > 0)
 	);
 	response.headers.set(FILLED_AT_HEADER, String(Date.now()));
 	return response;
@@ -218,8 +220,21 @@ export async function loadCandidates(
 		response,
 		'Candidate resolution temporarily unavailable'
 	);
-	const stale = rows.length === 0 && pastEmptyMaxAge(response.headers);
-	candidateMetadata(response.headers.get('CF-Cache-Status') ?? 'NONE', rows.length > 0);
+	return resolveCandidates(env, ctx, request, kind, canonical, rows, response.headers);
+}
+
+/** Shared by standalone metadata and the anonymous narinfo envelope. */
+export async function resolveCandidates(
+	env: App.Platform['env'],
+	ctx: ExecutionContext | undefined,
+	request: Request,
+	kind: 'nar' | 'path',
+	canonical: string,
+	rows: db.LiveCacheRow[],
+	headers: Headers
+): Promise<Candidates> {
+	const stale = rows.length === 0 && pastEmptyMaxAge(headers);
+	candidateMetadata(headers.get('CF-Cache-Status') ?? 'NONE', rows.length > 0);
 	return {
 		rows: await measure('candidateVisibility', () => withCurrentVisibility(env, rows, ctx)),
 		listed: rows.length > 0,
