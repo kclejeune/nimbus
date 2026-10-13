@@ -70,6 +70,7 @@ import { edgeEvent, recordRead, UNIFIED_LABEL, type EdgeEvent } from './metrics'
 import { extractPublicKey } from '../attic/signing';
 import {
 	keyedNarinfoUrl,
+	proxyNarinfoUrl,
 	narStoreUrl,
 	PERSIST_CACHE_HEADER,
 	PERSIST_UPSTREAM_HEADER,
@@ -773,10 +774,7 @@ async function handleProxyNarInfo(
 		// keypair unavailable: serve unsigned/stored-sig variant unkeyed
 	}
 	const fetchWinner = (from: db.LiveCacheRow) => {
-		const keyed = new URL(
-			`${new URL(request.url).origin}/_proxy/${from.name}/${storePathHash}.narinfo`
-		);
-		if (pk) keyed.searchParams.set('pk', pk);
+		const keyed = proxyNarinfoUrl(env, from, storePathHash, pk);
 		return forwardToStore(new Request(keyed, request), env, ctx);
 	};
 	let response = await fetchWinner(winner);

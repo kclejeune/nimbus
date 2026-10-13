@@ -193,6 +193,22 @@ export function keyedNarinfoUrl(
 	return url;
 }
 
+/** One root-proxy body key for envelope refills and gateway forwards. Cache
+ * ids prevent name reuse from inheriting an old entry; a fixed query order
+ * keeps identical narinfos on the same edge key. */
+export function proxyNarinfoUrl(
+	env: Env,
+	cache: { id: number; name: string },
+	storePathHash: string,
+	publicKey: string | null
+): URL {
+	const url = new URL(internalRequest(env, `/_proxy/${cache.name}/${storePathHash}.narinfo`).url);
+	url.searchParams.set('policy', STORE_POLICY_VERSION);
+	url.searchParams.set('cache-id', String(cache.id));
+	if (publicKey) url.searchParams.set('pk', publicKey);
+	return url;
+}
+
 /**
  * NAR URL as the gateway keys it for the edge cache, derived from the client
  * request so a store miss lands on the same origin.
@@ -417,18 +433,18 @@ async function serveAnonymousNarInfo(
 			winner ? `/_proxy/${winner.name}/${hash}.narinfo` : `/_proxy_upstream/${hash}.narinfo`,
 			request.headers.get(CLIENT_IP_HEADER)
 		);
-		const url = new URL(body.url);
-		url.searchParams.set('policy', STORE_POLICY_VERSION);
+		let url = new URL(body.url);
 		if (winner) {
-			// Names can be reused after deletion; keep bodies tied to the
-			// cache identity the envelope selected.
-			url.searchParams.set('cache-id', String(winner.id));
+			let pk: string | null = null;
 			try {
-				url.searchParams.set('pk', extractPublicKey(await getProxyKeypair(env)));
+				pk = extractPublicKey(await getProxyKeypair(env));
 				proxySigningAvailable = true;
 			} catch {
 				/* Existing unsigned/stored-signature fallback. */
 			}
+			url = proxyNarinfoUrl(env, winner, hash, pk);
+		} else {
+			url.searchParams.set('policy', STORE_POLICY_VERSION);
 		}
 		const keyed = new Request(url, body);
 		response = await viaStore(ctx, keyed, () => serveStore(keyed, env, ctx));

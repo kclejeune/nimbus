@@ -331,6 +331,37 @@ it('does not cache upstream uncertainty or remember it as absence', async () => 
 	expect((await get(hash)).status).toBe(200);
 });
 
+it.each(['authenticated', 'anonymous'] as const)(
+	'shares one local body key between authenticated and anonymous reads (%s first)',
+	async (first) => {
+		const hash = freshHash();
+		hold(hash);
+		const token = await mintAtticToken(env.JWT_HS256_SECRET_BASE64!, 'reader', { test: { r: 1 } });
+		const { get, entries, fetch } = edge();
+		const prepare = vi.spyOn(fixture.db, 'prepare');
+		const headers = { Authorization: `Bearer ${token}` };
+		expect((await get(hash, first === 'authenticated' ? headers : undefined)).status).toBe(200);
+		expect((await get(hash, first === 'anonymous' ? headers : undefined)).status).toBe(200);
+		const bodyKeys = [...entries.keys()].filter((key) => key.startsWith('/_proxy/test/'));
+		expect(bodyKeys).toHaveLength(1);
+		expect(bodyKeys[0]).toContain('cache-id=1');
+		const bodyRequests = fetch.mock.calls
+			.map(([request]) => request.url)
+			.filter((url) => new URL(url).pathname.startsWith('/_proxy/test/'));
+		expect(bodyRequests).toHaveLength(2);
+		expect(bodyRequests[0]).toBe(bodyRequests[1]);
+		const bodyReads = () =>
+			prepare.mock.calls.filter(
+				([sql]) => sql.includes('WHERE c.name = ?1') && sql.includes('o.store_path_hash = ?2')
+			);
+		expect(bodyReads()).toHaveLength(1);
+		// Refilling the envelope reuses that same body without another object read.
+		entries.delete(route(hash));
+		expect((await get(hash)).status).toBe(200);
+		expect(bodyReads()).toHaveLength(1);
+	}
+);
+
 it('retains authenticated private-cache routing and strips authorization at the store', async () => {
 	const hash = freshHash();
 	fixture.sqlite.exec('UPDATE cache SET is_public = 0');
