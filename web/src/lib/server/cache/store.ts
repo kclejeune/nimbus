@@ -20,6 +20,7 @@ import {
 } from './metadata';
 import { errorResponse, withVisibility } from '../attic/http';
 import { buildNarInfo } from '../attic/narinfo';
+import { absoluteNarinfoUrl } from '../attic/nar-url';
 import { extractPublicKey } from '../attic/signing';
 import { hedgedReplicaRead } from './read-hedge';
 import { findCacheCached } from './cache-lookup';
@@ -86,15 +87,15 @@ function upstreamNarinfoCacheControl(upstream: Upstream): string {
 
 /**
  * The shared response for an upstream passthrough narinfo (per-cache and
- * root proxy): served verbatim with the upstream's own signature, edge-cached
- * for the upstream's TTL, marked for pull-through when the winning upstream
- * resolves to a persist cache.
+ * root proxy): served with an absolute download URL and the upstream's own
+ * signature, edge-cached for the upstream's TTL, marked for pull-through when
+ * the winning upstream resolves to a persist cache.
  */
 function upstreamNarinfoResponse(
 	hit: { text: string; upstream: Upstream },
 	tags: string
 ): Response {
-	const response = new Response(hit.text, {
+	const response = new Response(absoluteNarinfoUrl(hit.text, hit.upstream.url), {
 		status: 200,
 		headers: {
 			'Content-Type': 'text/x-nix-narinfo',

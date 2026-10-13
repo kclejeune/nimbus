@@ -23,6 +23,7 @@
 // (see worker-entry.ts).
 
 import { parseNarInfo, parsedNarInfoSignatureValid } from '../attic/narinfo';
+import { resolveNarUrl } from '../attic/nar-url';
 import { bytesToHex, sha256HexDigest } from '../attic/nix-base32';
 import { initZstd, uploadCompressionFor, withWasmSlot, zstdDecompress } from './compression';
 import * as db from './db';
@@ -96,6 +97,8 @@ export async function persistUpstreamPath(
 ): Promise<void> {
 	const parsed = parseNarInfo(narinfoText);
 	if (!parsed?.url) return;
+	const narUrl = resolveNarUrl(upstreamUrl, parsed.url);
+	if (!narUrl) return;
 	const storePathHash = (parsed.storePath.split('/').pop() ?? '').slice(0, 32);
 	if (storePathHash.length !== 32) return;
 
@@ -200,12 +203,12 @@ export async function persistUpstreamPath(
 			recentIngests.delete(memoKey);
 			return;
 		}
-		const res = await fetch(`${upstreamUrl}/${parsed.url}`, {
+		const res = await fetch(narUrl, {
 			signal: AbortSignal.timeout(NAR_FETCH_TIMEOUT_MS)
 		});
 		if (res.status !== 200 || !res.body) {
 			await res.body?.cancel().catch(() => {});
-			console.warn(`pullthrough: NAR fetch ${upstreamUrl}/${parsed.url} returned ${res.status}`);
+			console.warn(`pullthrough: NAR fetch ${narUrl} returned ${res.status}`);
 			return;
 		}
 		const downloadCap =
