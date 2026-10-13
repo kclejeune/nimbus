@@ -41,11 +41,15 @@ function get(
 }
 
 /** An empty candidate entry as the edge would return it: filled a minute ago
- * (past the 30 s max-age, so served stale) or just now. */
+ * (past the 30 s confirmation threshold, still fresh at the edge) or just now. */
 function emptyEntry(entry: 'stale' | 'fresh', cfCacheStatus = 'HIT'): Response {
 	const filledAt = Date.now() - (entry === 'stale' ? 60_000 : 0);
 	return Response.json([], {
-		headers: { 'CF-Cache-Status': cfCacheStatus, 'X-Nimbus-Filled-At': String(filledAt) }
+		headers: {
+			'CF-Cache-Status': cfCacheStatus,
+			'X-Nimbus-Filled-At': String(filledAt),
+			'Cache-Control': 'public, max-age=300, stale-while-revalidate=604800, stale-if-error=0'
+		}
 	});
 }
 
@@ -120,7 +124,7 @@ it('serves empty candidate entries stale, but never stale on error', async () =>
 	expect(await response.json()).toEqual([]);
 	expect(Number(response.headers.get('X-Nimbus-Filled-At'))).toBeGreaterThan(0);
 	expect(response.headers.get('Cache-Control')).toBe(
-		'public, max-age=30, stale-while-revalidate=604800, stale-if-error=0'
+		'public, max-age=300, stale-while-revalidate=604800, stale-if-error=0'
 	);
 });
 

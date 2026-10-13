@@ -53,8 +53,9 @@ export function internalRequest(
 // race. Membership rarely changes and a stale positive fails safe (the
 // store 404s a reaped object; visibility is re-read below), so it can live
 // an hour — at 30 s prod paid a candidate D1 read per unified-endpoint
-// request, half of all D1 reads. An empty list stays short: a lagging refill
-// after an upload would otherwise hide the fresh path for the whole TTL.
+// request, half of all D1 reads. Empty lists refresh every five minutes;
+// their confirmation threshold remains thirty seconds, independently of
+// edge freshness, so a lagging refill cannot decide an older missing result.
 // It is still served stale while it refreshes, for as long as a non-empty
 // list: upstream-only paths are re-polled by every CI run, often hours
 // apart, and past the stale window the edge refills them inline — that
@@ -68,11 +69,11 @@ export function internalRequest(
 // A week covers daily and weekend CI gaps. The 2026-09-30–10-11 samples
 // still spent 61% of narinfo header time resolving candidates; empty entries
 // served UPDATING had a 16 ms median versus 322 ms EXPIRED. Freshness and
-// confirmation policies below are unchanged; only background reuse grows.
+// confirmation policies below remain independent of background reuse.
 const CANDIDATE_STALE_SECONDS = 7 * 24 * 60 * 60;
 const LONG_CACHE_CONTROL = `public, max-age=3600, stale-while-revalidate=${CANDIDATE_STALE_SECONDS}`;
 const EMPTY_MAX_AGE_MS = 30_000;
-const EMPTY_CACHE_CONTROL = `public, max-age=${EMPTY_MAX_AGE_MS / 1000}, stale-while-revalidate=${CANDIDATE_STALE_SECONDS}, stale-if-error=0`;
+const EMPTY_CACHE_CONTROL = `public, max-age=300, stale-while-revalidate=${CANDIDATE_STALE_SECONDS}, stale-if-error=0`;
 const SHORT_CACHE_CONTROL = 'public, max-age=30, must-revalidate';
 
 // When a candidate list was read from D1. The edge keeps it with the entry,
