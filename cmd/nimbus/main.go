@@ -52,6 +52,7 @@ server entirely.`,
 	root.AddCommand(watchStoreCmd())
 	root.AddCommand(watchExecCmd())
 	root.AddCommand(gcCmd())
+	root.AddCommand(repairCmd())
 
 	if err := fang.Execute(
 		context.Background(),

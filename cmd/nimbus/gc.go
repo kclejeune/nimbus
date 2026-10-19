@@ -15,7 +15,7 @@ func gcCmd() *cobra.Command {
 		Use:   "gc [SERVER]",
 		Short: "Trigger server-side garbage collection",
 		Long: `Runs a GC pass on the server (retention, size budgets, orphan cleanup).
-Requires a token with delete permission.`,
+Requires the admin-only gc claim, or attic-compatible delete permission on *.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()

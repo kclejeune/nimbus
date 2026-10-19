@@ -40,6 +40,7 @@ import {
 import { checkRateLimit } from '../rate-limit';
 import * as db from './db';
 import { claimManualGcSlot, listPins, runGc } from './gc';
+import { uncoveredReferences } from './closure-repair';
 import {
 	errorResponse,
 	jsonResponse,
@@ -1152,6 +1153,23 @@ async function handleV1(
 	if ('response' in auth) return auth.response;
 	const token = auth.token;
 	const canPush = (cacheName: string) => permissionForCache(token, cacheName).push;
+
+	if (method === 'GET' && route === 'cache-integrity' && segments.length === 4) {
+		const cacheName = segments[3];
+		const permission = permissionForCache(token, cacheName);
+		if (!permission.push) return errorResponse(403, 'Permission denied: push');
+		await requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request));
+		const read = db.readSession(env.ATTIC_DB);
+		const cache = await db.findCache(read, cacheName);
+		if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
+		if (!permission.pull && !cache.is_public) return errorResponse(403, 'Permission denied: pull');
+		const after = url.searchParams.get('after') ?? '';
+		if (after && !/^[0123456789abcdfghijklmnpqrsvwxyz]{32}$/.test(after)) {
+			return errorResponse(400, 'Invalid reference cursor');
+		}
+		const upstreams = await upstreamsForCache(read, cache, ctx);
+		return jsonResponse(await uncoveredReferences(read, cache.id, upstreams, after));
+	}
 
 	// Every write below except uploads (own budgets), so new routes are covered.
 	if (method !== 'GET' && method !== 'HEAD' && route !== 'upload-path') {

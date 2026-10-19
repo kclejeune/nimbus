@@ -115,7 +115,7 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 			tone: 'danger',
 			title: `${plural(incomplete, 'store path has', 'store paths have')} incomplete closures`,
 			detail:
-				'Their references aren’t in any cache or upstream, so Nix may fail to substitute them.',
+				'The last GC could not confirm their references locally or upstream. Review and repair missing dependencies.',
 			href: '/settings',
 			action: 'See affected paths'
 		});

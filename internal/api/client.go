@@ -813,6 +813,35 @@ func (c *Client) RunGc(ctx context.Context, dryRun bool) (map[string]any, error)
 	return stats, nil
 }
 
+// UncoveredReference is a dependency GC could not resolve locally or upstream.
+type UncoveredReference struct {
+	Hash      string `json:"hash"`
+	StorePath string `json:"store_path"`
+	Referrers int    `json:"referrers"`
+}
+
+type IntegrityPage struct {
+	References []UncoveredReference `json:"references"`
+	NextCursor string               `json:"next_cursor"`
+}
+
+// UncoveredReferences reads one page of the reference graph recorded by GC.
+// Call GetMissingPaths before repairing: unknown upstream coverage is advisory.
+func (c *Client) UncoveredReferences(
+	ctx context.Context,
+	cache, after string,
+) (*IntegrityPage, error) {
+	page := &IntegrityPage{}
+	path := "/_api/v1/cache-integrity/" + url.PathEscape(cache)
+	if after != "" {
+		path += "?after=" + url.QueryEscape(after)
+	}
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, page); err != nil {
+		return nil, err
+	}
+	return page, nil
+}
+
 // AuthConfig is the public login discovery document.
 type AuthConfig struct {
 	AuthorizeURL          string `json:"authorize_url"`

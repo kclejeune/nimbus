@@ -186,7 +186,8 @@
 								<span>
 									{formatCount(lastRun.integrity.incompleteObjects)}
 									{lastRun.integrity.incompleteObjects === 1 ? 'path has' : 'paths have'} references that
-									aren’t in any cache or upstream, so Nix may fail to substitute their closures.
+									weren’t confirmed in their cache or upstreams at the last GC, so Nix may fail to substitute
+									their closures.
 								</span>
 							</summary>
 							<ul class="mt-2 space-y-1 ps-6 text-foreground">
@@ -194,6 +195,13 @@
 									<li><StorePath path={example} full /></li>
 								{/each}
 							</ul>
+							<p class="mt-2 ps-6 text-sm text-foreground">
+								On a machine that built these paths, run <code
+									>nimbus repair SERVER:CACHE --dry-run</code
+								>
+								to inspect missing dependencies, then omit <code>--dry-run</code> to upload those available
+								locally. This warning refreshes after the next GC run.
+							</p>
 						</details>
 					{/if}
 				</div>

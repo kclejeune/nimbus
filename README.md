@@ -157,6 +157,8 @@ nimbus push mycache --no-closure --jobs 10 ...         # exact paths, more paral
 nimbus watch-store mycache                             # push new store paths as they appear
 nimbus watch-exec mycache -- nix build ...             # push what a command builds
 nimbus gc --dry-run                                    # preview (or run) server GC
+nimbus repair mycache --dry-run                        # inspect missing closure dependencies
+nimbus repair mycache                                  # upload dependencies still in this machine's store
 nimbus whoami                                          # decode the configured token
 nimbus cache list                                      # caches you can see, with your access bits
 nimbus cache info mycache
@@ -184,6 +186,18 @@ defines a server, and `NIMBUS_DEFAULT_SERVER` or
 codes distinguish retryable failures (75), auth (77), and config (78).
 
 ### Pushing
+
+If Settings reports incomplete closures, run `nimbus repair mycache --dry-run`
+on the machines that built those paths, then `nimbus repair mycache`. This
+uses the reference graph from the last GC, rechecks upstream coverage, and
+pushes locally available missing dependencies with their full closures. It
+requires pull and push permission and a Worker with the repair endpoint.
+Unavailable paths are listed; repair uploads what it can and exits nonzero
+if any are unavailable. It cannot recover bytes no machine or upstream still
+has: rebuild the original outputs and push their closures in that case.
+The Settings warning is a snapshot and refreshes at the next nightly GC, or
+after `nimbus gc` with a GC-authorized token. Upstream checks can refresh
+verdict rows even with `--dry-run`; no NARs are uploaded in that mode.
 
 `push` resolves closures with `nix path-info`, skips paths the server
 already has or can fetch from its upstreams (`--ignore-upstream-cache-filter`

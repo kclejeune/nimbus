@@ -24,6 +24,7 @@ import { refreshIngestRollup } from './ingest';
 import { candidateTag } from './metadata';
 import { narinfoTag } from './store';
 import { retentionCutoff } from './retention-explain';
+import { INTEGRITY_PUSH_GRACE_MS } from './closure-repair';
 
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];
@@ -31,7 +32,8 @@ type D1 = Env['ATTIC_DB'];
 const ABANDONED_CACHE_GRACE_SECS = 7 * 24 * 60 * 60;
 /** Upstream "absent" verdicts are rechecked after this long. "Present" rows
  * lazily expire per-upstream (cachedVerdicts applies the upstream's TTL);
- * the prune here only bounds table growth for rows never read again. */
+ * the prune here only bounds table growth for rows never read again. Never
+ * discard a present verdict before its configured upstream TTL expires. */
 const UPSTREAM_ABSENT_TTL_SECS = 24 * 60 * 60;
 const UPSTREAM_PRESENT_TTL_SECS = 90 * 24 * 60 * 60;
 const REF_SYNC_BATCH = 500;
@@ -1200,9 +1202,6 @@ const INCOMPLETE_CLOSURE_WHERE =
 	'AND NOT EXISTS (SELECT 1 FROM upstream_check uc ' +
 	`WHERE uc.store_path_hash = r.ref_hash AND uc.present <> ${VERDICT_ABSENT})`;
 
-/** Sized to outlast any real push that spans the nightly run. */
-const INTEGRITY_PUSH_GRACE_MS = 6 * 60 * 60 * 1000;
-
 /** Uncovered refs (re)classified per run — sized to one filterUpstreamPaths
  * probe budget, so a large backlog converges over a few runs without eating
  * the invocation's subrequest budget. */
@@ -1390,7 +1389,7 @@ async function reapOrphans(env: Env, stats: GcStats): Promise<void> {
  * nightly scan costs in reads (schema/migrations/2026-07-27-index-cleanup.sql).
  * The two cutoffs stay in one statement because splitting them buys nothing
  * without that index. */
-async function pruneUpstreamChecks(db: D1): Promise<void> {
+export async function pruneUpstreamChecks(db: D1): Promise<void> {
 	const absentCutoff = new Date(Date.now() - UPSTREAM_ABSENT_TTL_SECS * 1000).toISOString();
 	const presentCutoff = new Date(Date.now() - UPSTREAM_PRESENT_TTL_SECS * 1000).toISOString();
 	await db
@@ -1398,9 +1397,11 @@ async function pruneUpstreamChecks(db: D1): Promise<void> {
 			db
 				.prepare(
 					`DELETE FROM upstream_check WHERE (present = ${VERDICT_ABSENT} AND checked_at < ?1) ` +
-						`OR (present <> ${VERDICT_ABSENT} AND checked_at < ?2)`
+						`OR (present <> ${VERDICT_ABSENT} AND checked_at < ?2 ` +
+						'AND julianday(checked_at) < julianday(?3) - ' +
+						'(SELECT ttl FROM upstream WHERE id = upstream_id) / 86400.0)'
 				)
-				.bind(absentCutoff, presentCutoff),
+				.bind(absentCutoff, presentCutoff, new Date().toISOString()),
 			db.prepare('DELETE FROM upstream_check WHERE upstream_id NOT IN (SELECT id FROM upstream)')
 		])
 		.catch((e) => console.warn(`gc: upstream_check prune failed: ${e}`));
