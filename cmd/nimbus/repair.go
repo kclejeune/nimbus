@@ -13,7 +13,7 @@ import (
 )
 
 func repairCmd() *cobra.Command {
-	var dryRun bool
+	var apply, dryRun bool
 	var jobs int
 	cmd := &cobra.Command{
 		Use:   "repair [SERVER:]CACHE",
@@ -22,8 +22,10 @@ func repairCmd() *cobra.Command {
 coverage, and pushes missing dependencies and their closures from this machine.
 Requires pull and push permission. Run it on machines that built the affected
 paths; unavailable dependencies are listed and cause a nonzero exit status.
-It does not build, download, or delete paths. --dry-run lists the repair plan
-without uploading (upstream checks may refresh the server's verdict cache).
+Planning is the default. --apply uploads the locally available dependencies.
+It does not build, download, or delete paths. Upstream verification can refresh
+the server's verdict cache even while planning. Unanswered upstream probes are
+reported separately from confirmed missing dependencies.
 The dashboard warning refreshes on the next GC run.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -39,23 +41,32 @@ The dashboard warning refreshes on the next GC run.`,
 			}
 			pusher := newPusher(client, ref.Cache, jobs)
 			r := closureRepair{
-				client: client, cache: ref.Cache, out: cmd.OutOrStdout(),
-				local: nix.SplitValid, push: pusher.Push,
+				client:   client,
+				cache:    ref.Cache,
+				out:      cmd.OutOrStdout(),
+				progress: cmd.ErrOrStderr(),
+				local:    nix.SplitValid,
+				push:     pusher.Push,
 			}
-			return r.run(cmd.Context(), dryRun)
+			return r.run(cmd.Context(), !apply)
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "list missing dependencies without uploading")
+	cmd.Flags().
+		BoolVar(&apply, "apply", false, "upload the locally available dependencies in the plan")
+	cmd.MarkFlagsMutuallyExclusive("apply", "dry-run")
+	_ = cmd.Flags().MarkDeprecated("dry-run", "planning is now the default; use --apply to upload")
 	cmd.Flags().IntVarP(&jobs, "jobs", "j", 5, "parallel upload jobs")
 	return cmd
 }
 
 type closureRepair struct {
-	client *api.Client
-	cache  string
-	out    io.Writer
-	local  func(context.Context, []string) ([]string, []string, error)
-	push   func(context.Context, []string) error
+	client   *api.Client
+	cache    string
+	out      io.Writer
+	progress io.Writer
+	local    func(context.Context, []string) ([]string, []string, error)
+	push     func(context.Context, []string) error
 }
 
 const repairBatchSize = 100
@@ -65,14 +76,112 @@ var repairPath = regexp.MustCompile(
 )
 
 func (r closureRepair) run(ctx context.Context, dryRun bool) error {
-	fmt.Fprintf(r.out, "Checking unresolved references in %q (recorded by GC)...\n", r.cache)
-	var paths []string
-	after := ""
-	// Read every page before uploading: new paths must not shift pagination.
-	for {
-		page, err := r.client.UncoveredReferences(ctx, r.cache, after)
+	progressOut := r.progress
+	if progressOut == nil {
+		progressOut = r.out
+	}
+	p := newMaintenanceProgress(progressOut)
+	defer p.close()
+	missing, unverified, err := scanReferences(ctx, r.client, r.cache, p)
+	if err != nil {
+		return err
+	}
+	paths := append(append([]string{}, missing...), unverified...)
+	unknown := make(map[string]bool, len(unverified))
+	for _, path := range unverified {
+		unknown[path] = true
+	}
+	if len(paths) == 0 {
+		p.close()
+		fmt.Fprintln(r.out, "No uncovered dependencies in the GC reference graph.")
+		return nil
+	}
+	var available, unavailable []string
+	// Bound nix-store argv size even for a large repair backlog.
+	for start := 0; start < len(paths); start += repairBatchSize {
+		p.update(
+			"Checking local store: %d/%d dependencies",
+			min(start+repairBatchSize, len(paths)),
+			len(paths),
+		)
+		valid, invalid, err := r.local(ctx, paths[start:min(start+repairBatchSize, len(paths))])
 		if err != nil {
-			return fmt.Errorf(
+			return err
+		}
+		available = append(available, valid...)
+		unavailable = append(unavailable, invalid...)
+	}
+	p.close()
+	fmt.Fprintf(
+		r.out,
+		"Repair plan: %d confirmed missing, %d unverified; %d available locally.\n",
+		len(missing),
+		len(unverified),
+		len(available),
+	)
+	for _, path := range available {
+		fmt.Fprintf(r.out, "upload\t%s\n", path)
+	}
+	confirmedUnavailable := 0
+	for _, path := range unavailable {
+		label := "unavailable"
+		if unknown[path] {
+			label = "unverified"
+		} else {
+			confirmedUnavailable++
+		}
+		fmt.Fprintf(r.out, "%s\t%s\n", label, path)
+	}
+	if dryRun {
+		fmt.Fprintln(r.out, "Plan only. Pass --apply to upload the available dependencies.")
+		return nil
+	}
+	for start := 0; start < len(available); start += repairBatchSize {
+		batch := available[start:min(start+repairBatchSize, len(available))]
+		fmt.Fprintf(
+			progressOut,
+			"Uploading repair batch %d/%d (%d/%d dependencies)\n",
+			start/repairBatchSize+1,
+			(len(available)+repairBatchSize-1)/repairBatchSize,
+			min(start+repairBatchSize, len(available)),
+			len(available),
+		)
+		if err := r.push(ctx, batch); err != nil {
+			return err
+		}
+	}
+	unknownUnavailable := len(unavailable) - confirmedUnavailable
+	fmt.Fprintf(
+		r.out,
+		"Repair applied: %d dependencies submitted; %d confirmed missing dependencies unavailable locally; %d unavailable locally with unverified upstream coverage.\n",
+		len(available),
+		confirmedUnavailable,
+		unknownUnavailable,
+	)
+	if len(unavailable) > 0 {
+		return fmt.Errorf(
+			"repair incomplete: %d dependencies unavailable locally (confirmed missing); %d still unverified; try another build machine or rerun verification",
+			confirmedUnavailable,
+			unknownUnavailable,
+		)
+	}
+	fmt.Fprintln(r.out, "The dashboard refreshes after the next GC run.")
+	return nil
+}
+
+func scanReferences(
+	ctx context.Context,
+	client *api.Client,
+	cache string,
+	p *maintenanceProgress,
+) (missingPaths, unverifiedPaths []string, err error) {
+	after := ""
+	pages, examined := 0, 0
+	for {
+		p.update("Reading reference page %d (%d dependencies examined)", pages+1, examined)
+		page, err := client.UncoveredReferences(ctx, cache, after)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
 				"reading closure references (requires a Worker with cache-integrity support): %w",
 				err,
 			)
@@ -82,72 +191,38 @@ func (r closureRepair) run(ctx context.Context, dryRun bool) error {
 		for _, ref := range page.References {
 			match := repairPath.FindStringSubmatch(ref.StorePath)
 			if match == nil || match[1] != ref.Hash {
-				return fmt.Errorf("server returned invalid dependency %q", ref.StorePath)
+				return nil, nil, fmt.Errorf("server returned invalid dependency %q", ref.StorePath)
 			}
 			hashes = append(hashes, ref.Hash)
 			byHash[ref.Hash] = ref.StorePath
 		}
-		missing, err := r.client.GetMissingPaths(ctx, r.cache, hashes, false)
+		p.update("Verifying upstream coverage: page %d, %d dependencies", pages+1, len(hashes))
+		status, err := client.CheckReferences(ctx, cache, hashes)
 		if err != nil {
-			return fmt.Errorf("rechecking reference coverage: %w", err)
+			return nil, nil, fmt.Errorf(
+				"verifying reference coverage (requires a Worker with maintenance support): %w",
+				err,
+			)
 		}
-		for _, hash := range missing {
+		for _, hash := range status.Missing {
 			if path, ok := byHash[hash]; ok {
-				paths = append(paths, path)
+				missingPaths = append(missingPaths, path)
 			}
 		}
+		for _, hash := range status.Unverified {
+			if path, ok := byHash[hash]; ok {
+				unverifiedPaths = append(unverifiedPaths, path)
+			}
+		}
+		pages++
+		examined += len(hashes)
 		if page.NextCursor == "" {
 			break
 		}
 		if page.NextCursor <= after || len(page.NextCursor) != 32 {
-			return fmt.Errorf("server returned a non-advancing reference cursor")
+			return nil, nil, fmt.Errorf("server returned a non-advancing reference cursor")
 		}
 		after = page.NextCursor
 	}
-	if len(paths) == 0 {
-		fmt.Fprintln(
-			r.out,
-			"No uncovered dependencies in the GC reference graph. The dashboard refreshes after the next GC run.",
-		)
-		return nil
-	}
-	var available, unavailable []string
-	// Bound nix-store argv size even for a large repair backlog.
-	for start := 0; start < len(paths); start += repairBatchSize {
-		valid, invalid, err := r.local(ctx, paths[start:min(start+repairBatchSize, len(paths))])
-		if err != nil {
-			return err
-		}
-		available = append(available, valid...)
-		unavailable = append(unavailable, invalid...)
-	}
-	fmt.Fprintf(r.out, "%d dependencies still uncovered: %d available locally, %d unavailable.\n",
-		len(paths), len(available), len(unavailable))
-	for _, path := range available {
-		fmt.Fprintf(r.out, "upload\t%s\n", path)
-	}
-	for _, path := range unavailable {
-		fmt.Fprintf(r.out, "unavailable\t%s\n", path)
-	}
-	if dryRun {
-		return nil
-	}
-	if len(available) > 0 {
-		// Push revalidates its inputs and queries their closures via Nix.
-		// Keep those subprocess argument lists bounded as well.
-		for start := 0; start < len(available); start += repairBatchSize {
-			batch := available[start:min(start+repairBatchSize, len(available))]
-			if err := r.push(ctx, batch); err != nil {
-				return err
-			}
-		}
-		fmt.Fprintln(r.out, "Repair push complete. The dashboard refreshes after the next GC run.")
-	}
-	if len(unavailable) > 0 {
-		return fmt.Errorf(
-			"%d dependencies unavailable locally; run repair on a machine that still has them, or rebuild their original outputs and push those closures",
-			len(unavailable),
-		)
-	}
-	return nil
+	return missingPaths, unverifiedPaths, nil
 }

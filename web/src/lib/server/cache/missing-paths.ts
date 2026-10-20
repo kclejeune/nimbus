@@ -582,7 +582,8 @@ export async function filterUpstreamPaths(
 	upstreams: Upstream[],
 	missing: string[],
 	guard?: ProbeGuard,
-	ctx?: ExecutionContext
+	ctx?: ExecutionContext,
+	recheckAbsent = false
 ): Promise<{ missing: string[]; deferred: string[] }> {
 	const signal = AbortSignal.timeout(PREFLIGHT_PROBE_BUDGET_MS);
 	let remaining = missing;
@@ -597,6 +598,11 @@ export async function filterUpstreamPaths(
 	const verdictsByUpstream = await withSpan(ctx, 'preflight verdict lookup', () =>
 		measure('preflightRead', () => cachedVerdicts(db, upstreams, missing))
 	);
+	// Destructive maintenance must not rely on a cached miss. Keep cached
+	// coverage (which only retains data), but obtain fresh absence proofs.
+	if (recheckAbsent)
+		for (const verdicts of verdictsByUpstream.values())
+			for (const [hash, verdict] of verdicts) if (verdict === VERDICT_ABSENT) verdicts.delete(hash);
 	// Preflight asks whether ANY upstream covers a path, unlike serving where
 	// priority determines whose signed narinfo wins. A later cached hit saves
 	// probes against earlier upstreams too, without spending the probe budget.

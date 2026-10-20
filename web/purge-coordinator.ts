@@ -1,4 +1,5 @@
 import { processChunkRepair } from './src/lib/server/cache/repair';
+import { processPathPurge } from './src/lib/server/cache/closure-purge';
 import { DurableObject } from 'cloudflare:workers';
 import { PurgeQueue } from './src/lib/server/cache/purge-queue';
 import type { ExecutionContext } from './src/lib/server/cache/platform';
@@ -10,15 +11,22 @@ export class PurgeCoordinator extends DurableObject<App.Platform['env']> {
 		this.ctx.storage,
 		(tags) => (this.ctx as unknown as ExecutionContext).exports!.CachedStore!.purgeBatch(tags),
 		(key) =>
-			processChunkRepair(this.env, key, (tags, receipt) =>
-				this.queue.repairPurge(key, receipt, tags)
-			)
+			key.startsWith('path-purge:')
+				? processPathPurge(this.env, key.slice('path-purge:'.length), (tags, receipt) =>
+						this.queue.repairPurge(key, receipt, tags, true)
+					)
+				: processChunkRepair(this.env, key, (tags, receipt) =>
+						this.queue.repairPurge(key, receipt, tags)
+					)
 	);
 	enqueue(tags: string[], urgent = false) {
 		return this.queue.enqueue(tags, urgent);
 	}
 	scheduleRepair(key: string) {
 		return this.queue.scheduleRepair(key);
+	}
+	pathPurge(id: string, receipt: string, tags: string[]) {
+		return this.queue.repairPurge('path-purge:' + id, receipt, tags, true);
 	}
 	alarm() {
 		return this.queue.alarm();

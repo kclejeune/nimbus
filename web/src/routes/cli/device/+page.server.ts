@@ -46,7 +46,7 @@ export const load: PageServerLoad = async ({ url, locals, platform }) => {
 		scopeOptions: tokenScopeOptions(
 			...(await Promise.all([effectiveAccessOf(locals, db), listCacheNames(db)]))
 		),
-		user: { email: locals.user.email, name: locals.user.name }
+		user: { email: locals.user.email, name: locals.user.name, role: locals.user.role }
 	};
 };
 

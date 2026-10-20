@@ -157,8 +157,10 @@ nimbus push mycache --no-closure --jobs 10 ...         # exact paths, more paral
 nimbus watch-store mycache                             # push new store paths as they appear
 nimbus watch-exec mycache -- nix build ...             # push what a command builds
 nimbus gc --dry-run                                    # preview (or run) server GC
-nimbus repair mycache --dry-run                        # inspect missing closure dependencies
-nimbus repair mycache                                  # upload dependencies still in this machine's store
+nimbus repair mycache                                  # plan uploads of missing closure dependencies
+nimbus repair mycache --apply                          # upload dependencies still in this machine's store
+nimbus purge mycache                                   # plan removal of broken paths and their dependents
+nimbus purge mycache --apply                           # remove the still-broken, unprotected paths
 nimbus whoami                                          # decode the configured token
 nimbus cache list                                      # caches you can see, with your access bits
 nimbus cache info mycache
@@ -176,6 +178,14 @@ nimbus token revoke <id>
 
 ### Configuration
 
+Browser and device-code login let admins select additional cache-management
+permissions, Garbage collection, and Trust admin. These are optional and
+unchecked by default. For `nimbus repair`, select Pull and Push for the target
+cache (or All caches); select Garbage collection as well to run `nimbus gc`
+afterward. `nimbus purge` requires Pull and Delete paths. Re-running
+`nimbus login NAME ENDPOINT` replaces the saved token;
+`nimbus whoami` shows the resulting scope.
+
 Caches are addressed as `[server:]cache`; the first login becomes the default
 server (`--set-default` changes it later). Config lives in
 `$XDG_CONFIG_HOME/nimbus/config.toml` (default `~/.config`, on macOS too); a
@@ -187,17 +197,33 @@ codes distinguish retryable failures (75), auth (77), and config (78).
 
 ### Pushing
 
-If Settings reports incomplete closures, run `nimbus repair mycache --dry-run`
-on the machines that built those paths, then `nimbus repair mycache`. This
+If Settings reports incomplete closures, run `nimbus repair mycache`
+on the machines that built those paths, then `nimbus repair mycache --apply`. This
 uses the reference graph from the last GC, rechecks upstream coverage, and
 pushes locally available missing dependencies with their full closures. It
 requires pull and push permission and a Worker with the repair endpoint.
-Unavailable paths are listed; repair uploads what it can and exits nonzero
-if any are unavailable. It cannot recover bytes no machine or upstream still
+Both commands show a plan by default; only `--apply` uploads or deletes paths.
+Verification and planning show a live heartbeat on terminals and stage counters
+in logs; repair uploads keep their per-path transfer progress. Unanswered
+upstream checks are listed as **unverified**, separately from confirmed misses.
+Repair can upload locally available paths from either category, and exits
+nonzero when an applied repair still has unavailable dependencies. It cannot recover bytes no machine or upstream still
 has: rebuild the original outputs and push their closures in that case.
 The Settings warning is a snapshot and refreshes at the next nightly GC, or
 after `nimbus gc` with a GC-authorized token. Upstream checks can refresh
-verdict rows even with `--dry-run`; no NARs are uploaded in that mode.
+verdict rows while planning; no NARs are uploaded without `--apply`.
+
+`nimbus purge mycache` plans removal of obsolete outputs whose dependencies
+cannot be recovered, including their cached parents and reverse dependents. Unverified
+dependencies are excluded. Applying a purge re-probes cached upstream misses;
+failed or incomplete checks retain the affected paths. The server revalidates pins,
+recent uploads, and reviewed object versions at application time. A changed or
+newly protected path is retained; healthy shared dependencies and other caches
+are preserved. Metadata removal and its edge-invalidation journal commit
+atomically. Edge invalidations resume automatically through the purge
+coordinator if rate limited or interrupted; NAR and chunk storage is reclaimed
+by later GC. A single reviewed purge group is bounded to 10,000 affected paths;
+larger groups are split by missing dependency when possible.
 
 `push` resolves closures with `nix path-info`, skips paths the server
 already has or can fetch from its upstreams (`--ignore-upstream-cache-filter`

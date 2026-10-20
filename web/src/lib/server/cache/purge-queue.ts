@@ -66,7 +66,12 @@ export class PurgeQueue {
 
 	/** Idempotent page submission. Completed receipts survive until the D1 job
 	 * retires, including a lost D1 cursor-update response or DO restart. */
-	async repairPurge(key: string, receipt: string, tags: string[]): Promise<boolean> {
+	async repairPurge(
+		key: string,
+		receipt: string,
+		tags: string[],
+		urgent = false
+	): Promise<boolean> {
 		this.storage.transactionSync(() => {
 			if (
 				this.storage.sql
@@ -76,7 +81,7 @@ export class PurgeQueue {
 				return;
 			this.storage.sql.exec('INSERT INTO repair_receipt VALUES (?, ?)', key, receipt);
 			const unique = [...new Set(tags)];
-			const generation = this.stage(unique, false);
+			const generation = this.stage(unique, urgent);
 			for (const tag of unique) {
 				this.storage.sql.exec(
 					'INSERT INTO repair_tag VALUES (?, ?, ?, ?)',
@@ -88,6 +93,7 @@ export class PurgeQueue {
 			}
 		});
 		await this.arm();
+		if (urgent) await this.flush();
 		return (
 			this.storage.sql
 				.exec('SELECT 1 FROM repair_tag WHERE key = ? AND receipt = ? LIMIT 1', key, receipt)

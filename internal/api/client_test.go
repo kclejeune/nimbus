@@ -51,6 +51,90 @@ func TestMissingPathsBatches(t *testing.T) {
 	}
 }
 
+func TestHTMLForbiddenIsNotReportedAsTokenPermissionFailure(t *testing.T) {
+	for _, contentType := range []string{"text/html; charset=UTF-8", ""} {
+		res := httptest.NewRecorder()
+		res.Header().Set("Content-Type", contentType)
+		res.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(res, "<!DOCTYPE html>\n<html>Blocked by firewall</html>")
+		err := decodeOrError(res.Result(), nil, 1)
+		var apiErr *Error
+		if !errors.As(err, &apiErr) || apiErr.AuthFailure() {
+			t.Fatalf("HTML block classified as credential failure: %v", err)
+		}
+		if !strings.Contains(err.Error(), "firewall/access policy") ||
+			strings.Contains(err.Error(), "token lacks permission") {
+			t.Fatalf("misleading error: %v", err)
+		}
+	}
+	res := httptest.NewRecorder()
+	res.Header().Set("Content-Type", "application/json")
+	res.WriteHeader(http.StatusForbidden)
+	_, _ = io.WriteString(res, `{"message":"Permission denied: push"}`)
+	var apiErr *Error
+	err := decodeOrError(res.Result(), nil, 1)
+	if !errors.As(err, &apiErr) || !apiErr.AuthFailure() ||
+		!strings.Contains(err.Error(), "token lacks permission") {
+		t.Fatalf("lost JSON credential failure: %v", err)
+	}
+}
+
+func TestMaintenanceChecksDoNotCollapseUnverifiedIntoMissing(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body struct {
+			Hashes []string `json:"hashes"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if r.URL.Path != "/_api/v1/cache-integrity/test/check" {
+			t.Errorf("wrong route %s", r.URL.Path)
+		}
+		result := ReferenceStatus{Unverified: []string{"uncertain"}}
+		if calls == 1 {
+			result.Missing = []string{"missing"}
+		} else if !slices.Equal(body.Hashes, []string{"uncertain"}) {
+			t.Errorf("rechecked proven misses: %v", body.Hashes)
+		}
+		_ = json.NewEncoder(w).Encode(result)
+	}))
+	defer server.Close()
+	result, err := New(
+		server.URL,
+		"",
+	).CheckReferences(t.Context(), "test", []string{"missing", "uncertain"})
+	if err != nil || !slices.Equal(result.Missing, []string{"missing"}) ||
+		!slices.Equal(result.Unverified, []string{"uncertain"}) ||
+		calls != 4 {
+		t.Fatalf("lost uncertainty: %+v calls=%d err=%v", result, calls, err)
+	}
+}
+
+func TestPurgeRetriesKeepTheOperationReceipt(t *testing.T) {
+	var ids []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		ids = append(ids, body.ID)
+		if len(ids) == 1 {
+			w.WriteHeader(503)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(PurgeResult{Removed: 7})
+	}))
+	defer server.Close()
+	result, err := New(
+		server.URL,
+		"",
+	).ApplyPurge(t.Context(), "test", "fixed-receipt", []string{"missing"}, nil)
+	if err != nil || result.Removed != 7 ||
+		!slices.Equal(ids, []string{"fixed-receipt", "fixed-receipt"}) {
+		t.Fatalf("unsafe retry: ids=%v result=%+v err=%v", ids, result, err)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

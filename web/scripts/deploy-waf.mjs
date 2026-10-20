@@ -207,7 +207,7 @@ const CACHE_API_SHAPES = [
 	`starts_with(http.request.uri.path, "/_api/v1/upload-path/chunks/")`,
 	`http.request.uri.path eq "/_api/v1/upload-path/chunks"`,
 	`http.request.uri.path eq "/_api/v1/tokens"`,
-	...['tokens', 'cache-config', 'gc-root', 'pin', 'path'].map(
+	...['tokens', 'cache-config', 'cache-integrity', 'gc-root', 'pin', 'path'].map(
 		(p) => `starts_with(http.request.uri.path, "/_api/v1/${p}/")`
 	)
 ].join(' or ');

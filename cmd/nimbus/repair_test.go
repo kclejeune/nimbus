@@ -56,10 +56,10 @@ func TestRepairRechecksPagesAndUploadsAvailableClosures(t *testing.T) {
 							}
 						}
 						_ = json.NewEncoder(w).Encode(page)
-					case "/_api/v1/get-missing-paths":
+					case "/_api/v1/cache-integrity/test/check":
 						queries++
 						var body struct {
-							Hashes []string `json:"store_path_hashes"`
+							Hashes []string `json:"hashes"`
 						}
 						_ = json.NewDecoder(req.Body).Decode(&body)
 						// The first dependency is now upstream-covered. The others need repair.
@@ -69,7 +69,7 @@ func TestRepairRechecksPagesAndUploadsAvailableClosures(t *testing.T) {
 								missing = append(missing, h)
 							}
 						}
-						_ = json.NewEncoder(w).Encode(map[string]any{"missing_paths": missing})
+						_ = json.NewEncoder(w).Encode(map[string]any{"missing": missing})
 					default:
 						t.Errorf("unexpected request %s", req.URL.Path)
 						w.WriteHeader(404)
@@ -154,12 +154,12 @@ func TestRepairLargeBacklogBatchesUploads(t *testing.T) {
 				page.NextCursor = fmt.Sprintf("%032d", end)
 			}
 			_ = json.NewEncoder(w).Encode(page)
-		case "/_api/v1/get-missing-paths":
+		case "/_api/v1/cache-integrity/test/check":
 			var body struct {
-				Hashes []string `json:"store_path_hashes"`
+				Hashes []string `json:"hashes"`
 			}
 			_ = json.NewDecoder(req.Body).Decode(&body)
-			_ = json.NewEncoder(w).Encode(map[string]any{"missing_paths": body.Hashes})
+			_ = json.NewEncoder(w).Encode(map[string]any{"missing": body.Hashes})
 		default:
 			t.Errorf("unexpected request %s", req.URL.Path)
 			w.WriteHeader(http.StatusNotFound)

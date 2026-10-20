@@ -995,9 +995,10 @@ export function insertObjectStmt(
 				(object.publishTrust
 					? "EXISTS (SELECT 1 FROM upstream u JOIN cache c ON c.id = ?1 LEFT JOIN cache_upstream cu ON cu.cache_id = c.id AND cu.upstream_id = u.id WHERE u.id = ?13 AND u.public_key = ?14 AND u.url = ?15 AND c.deleted_at IS NULL AND COALESCE(cu.mode, u.default_mode) = 'persist') "
 					: '1 ') +
-				// Re-pushing revives a detached (removed) path.
+				// A revival/replacement starts a new publication and push grace period.
+				// An unchanged, attached re-publish remains a no-op.
 				'ON CONFLICT (cache_id, store_path_hash) DO UPDATE SET nar_id = excluded.nar_id, ' +
-				'detached_at = NULL, source = excluded.source, created_by = excluded.created_by ' +
+				'detached_at = NULL, created_at = excluded.created_at, source = excluded.source, created_by = excluded.created_by ' +
 				'WHERE object.nar_id <> excluded.nar_id OR object.detached_at IS NOT NULL'
 		)
 		.bind(

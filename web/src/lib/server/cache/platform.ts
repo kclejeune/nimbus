@@ -17,6 +17,7 @@ export type ExecutionContext = App.Platform['ctx'] & {
 		CachedStore?: {
 			fetch(request: Request): Promise<Response>;
 			purgeTags(tags: string[]): Promise<void>;
+			purgePathPage?(id: string, receipt: string, tags: string[]): Promise<boolean>;
 			enqueuePurgeTags(tags: string[]): Promise<{ confirmed: boolean }>;
 			/** Raw eviction for the purge coordinator; never throws. */
 			purgeBatch(tags: string[]): Promise<PurgeResult>;

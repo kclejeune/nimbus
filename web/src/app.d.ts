@@ -32,6 +32,7 @@ declare global {
 					getByName(name: string): {
 						enqueue(tags: string[], urgent?: boolean): Promise<{ confirmed: boolean }>;
 						scheduleRepair(key: string): Promise<void>;
+						pathPurge(id: string, receipt: string, tags: string[]): Promise<boolean>;
 					};
 				};
 				APP_URL?: string;

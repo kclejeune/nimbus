@@ -1,12 +1,51 @@
 // Maintenance reads over the reference graph recorded by GC. Check actual
 // object rows as well as child_id: a repair push is visible before ref-sync.
 import { dbAll } from './db';
-import { upstreamTtlSecs, type Upstream } from './missing-paths';
+import {
+	filterUpstreamPaths,
+	findExistingPaths,
+	upstreamTtlSecs,
+	type ProbeGuard,
+	type Upstream
+} from './missing-paths';
 
 type D1 = App.Platform['env']['ATTIC_DB'];
 const PAGE_SIZE = 100;
 /** Sized to outlast a real push that spans the nightly run. */
 export const INTEGRITY_PUSH_GRACE_MS = 6 * 3600_000;
+
+/** Maintenance asks whether a path can be served, including an upstream
+ * whose NAR cannot be ingested. Unanswered probes never prove absence. */
+export async function checkReferences(
+	db: D1,
+	cacheName: string,
+	upstreams: Upstream[],
+	hashes: string[],
+	guard?: ProbeGuard,
+	recheckAbsent = false
+) {
+	const existing = await findExistingPaths(db, cacheName, hashes);
+	const candidates = hashes.filter((h) => !existing.has(h));
+	const missing: string[] = [],
+		unverified: string[] = [];
+	const batchSize = recheckAbsent
+		? Math.max(1, Math.floor(200 / Math.max(1, upstreams.length)))
+		: Math.max(1, candidates.length);
+	for (let start = 0; start < candidates.length; start += batchSize) {
+		const result = await filterUpstreamPaths(
+			db,
+			upstreams.map((u) => ({ ...u, mode: 'redirect' as const })),
+			candidates.slice(start, start + batchSize),
+			guard,
+			undefined,
+			recheckAbsent
+		);
+		const unknown = new Set(result.deferred);
+		missing.push(...result.missing.filter((h) => !unknown.has(h)));
+		unverified.push(...result.deferred);
+	}
+	return { missing, unverified };
+}
 
 export async function uncoveredReferences(
 	db: D1,

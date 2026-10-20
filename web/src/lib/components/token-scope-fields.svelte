@@ -12,9 +12,9 @@
 	}: {
 		scopeOptions: ScopeOption[];
 		defaultPush?: boolean;
-		/** Show the cache-management bits (tokens page yes, device flow no). */
+		/** Show the cache-management bits (tokens page and admin CLI logins). */
 		advanced?: boolean;
-		/** Offer the storage-wide GC claim (admins on the tokens page only). */
+		/** Offer the GC and trust-admin claims (admin users only). */
 		allowGc?: boolean;
 	} = $props();
 

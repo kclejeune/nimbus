@@ -65,7 +65,12 @@
 				<Input id="label" name="label" value="nimbus CLI" />
 			</div>
 
-			<TokenScopeFields scopeOptions={data.scopeOptions} defaultPush={true} />
+			<TokenScopeFields
+				scopeOptions={data.scopeOptions}
+				defaultPush={true}
+				advanced={data.user.role === 'admin'}
+				allowGc={data.user.role === 'admin'}
+			/>
 
 			{#if form?.error}
 				<p role="alert" class="text-sm text-destructive">{form.error}</p>

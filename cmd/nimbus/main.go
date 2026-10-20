@@ -53,6 +53,7 @@ server entirely.`,
 	root.AddCommand(watchExecCmd())
 	root.AddCommand(gcCmd())
 	root.AddCommand(repairCmd())
+	root.AddCommand(purgeCmd())
 
 	if err := fang.Execute(
 		context.Background(),

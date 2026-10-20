@@ -40,7 +40,14 @@ import {
 import { checkRateLimit } from '../rate-limit';
 import * as db from './db';
 import { claimManualGcSlot, listPins, runGc } from './gc';
-import { uncoveredReferences } from './closure-repair';
+import { checkReferences, uncoveredReferences } from './closure-repair';
+import {
+	applyPurge,
+	MAX_PURGE_TARGETS,
+	purgePlan,
+	replayPathPurges,
+	type PurgeTarget
+} from './closure-purge';
 import {
 	errorResponse,
 	jsonResponse,
@@ -1157,7 +1164,8 @@ async function handleV1(
 	if (method === 'GET' && route === 'cache-integrity' && segments.length === 4) {
 		const cacheName = segments[3];
 		const permission = permissionForCache(token, cacheName);
-		if (!permission.push) return errorResponse(403, 'Permission denied: push');
+		if (!permission.push && !permission.delete)
+			return errorResponse(403, 'Permission denied: push or delete');
 		await requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request));
 		const read = db.readSession(env.ATTIC_DB);
 		const cache = await db.findCache(read, cacheName);
@@ -1186,6 +1194,104 @@ async function handleV1(
 	// behind the presented token's jti).
 	if (route === 'tokens' && (segments.length === 3 || segments.length === 4)) {
 		return handleTokensApi(request, env, token);
+	}
+
+	if (method === 'POST' && route === 'cache-integrity' && segments.length === 5) {
+		const operation = segments[4];
+		if (!['check', 'purge-plan', 'purge-apply', 'purge-replay'].includes(operation))
+			return errorResponse(404, 'Not found');
+		const permission = permissionForCache(token, segments[3]);
+		if (operation === 'check' ? !permission.push && !permission.delete : !permission.delete)
+			return errorResponse(
+				403,
+				'Permission denied: ' + (operation === 'check' ? 'push or delete' : 'delete')
+			);
+		const cache = await db.findCache(env.ATTIC_DB, segments[3]);
+		if (!cache) return errorResponse(404, 'Cache not found', 'NoSuchCache');
+		if (!permission.pull && !cache.is_public) return errorResponse(403, 'Permission denied: pull');
+		const body = await readJson(request, 2 * 1024 * 1024);
+		if (!isRecord(body)) return errorResponse(400, 'Invalid maintenance request');
+		if (operation === 'purge-replay')
+			return jsonResponse(await replayPathPurges(env, ctx, cache.id));
+		if (
+			!Array.isArray(body.hashes) ||
+			body.hashes.length > 100 ||
+			body.hashes.some((h) => typeof h !== 'string' || !db.STORE_PATH_HASH_RE.test(h))
+		)
+			return errorResponse(400, 'Expected at most 100 dependency hashes');
+		const hashes = [...new Set(body.hashes as string[])];
+		await requireBudgetUnits(
+			env.BATCH_QUERY_LIMITER,
+			clientKey('batch-query', request.headers.get('CF-Connecting-IP')),
+			1
+		);
+		const upstreams = await upstreamsForCache(env.ATTIC_DB, cache, ctx);
+		const checked = await checkReferences(
+			env.ATTIC_DB,
+			cache.name,
+			upstreams,
+			hashes,
+			{
+				env,
+				ip: request.headers.get('CF-Connecting-IP')
+			},
+			operation === 'purge-apply'
+		);
+		if (operation === 'check') return jsonResponse(checked);
+		if (operation === 'purge-plan') {
+			const after = body.after ?? 0;
+			if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0)
+				return errorResponse(400, 'Invalid purge cursor');
+			return jsonResponse({
+				...checked,
+				...(await purgePlan(env.ATTIC_DB, cache.id, checked.missing, after))
+			});
+		}
+		if (
+			typeof body.id !== 'string' ||
+			!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(body.id)
+		)
+			return errorResponse(400, 'Invalid purge operation id');
+		if (!Array.isArray(body.targets) || body.targets.length > MAX_PURGE_TARGETS)
+			return errorResponse(400, `At most ${MAX_PURGE_TARGETS} targets per purge`);
+		const targets: PurgeTarget[] = [];
+		const ids = new Set<number>();
+		for (const t of body.targets) {
+			if (
+				!isRecord(t) ||
+				typeof t.id !== 'number' ||
+				!Number.isSafeInteger(t.id) ||
+				t.id < 1 ||
+				ids.has(t.id) ||
+				typeof t.nar_id !== 'number' ||
+				!Number.isSafeInteger(t.nar_id) ||
+				t.nar_id < 1 ||
+				typeof t.store_path_hash !== 'string' ||
+				!db.STORE_PATH_HASH_RE.test(t.store_path_hash) ||
+				typeof t.created_at !== 'string' ||
+				!Number.isFinite(Date.parse(t.created_at))
+			)
+				return errorResponse(400, 'Invalid purge target');
+			ids.add(t.id);
+			if (
+				t.detached_at !== null &&
+				t.detached_at !== undefined &&
+				(typeof t.detached_at !== 'string' || !Number.isFinite(Date.parse(t.detached_at)))
+			)
+				return errorResponse(400, 'Invalid purge target');
+			targets.push({
+				id: t.id,
+				nar_id: t.nar_id,
+				store_path_hash: t.store_path_hash,
+				created_at: t.created_at,
+				detached_at: typeof t.detached_at === 'string' ? t.detached_at : null,
+				store_path: '',
+				blocked: 0
+			});
+		}
+		return jsonResponse(
+			await applyPurge(env, ctx, cache.id, cache.name, checked.missing, targets, body.id)
+		);
 	}
 
 	// nimbus extension: closure-safe per-path destroy (the API face of the

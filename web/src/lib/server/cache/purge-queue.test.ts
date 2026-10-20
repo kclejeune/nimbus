@@ -201,3 +201,21 @@ it('persists continuation retries before failures and preserves retirement timer
 		warn.mockRestore();
 	}
 });
+
+it('urgent page receipts survive pacing and do not create a new purge generation on retry', async () => {
+	const f = fixture();
+	await f.queue.enqueue(['busy'], true);
+	expect(await f.queue.repairPurge('path-purge:job', '0', ['removed'], true)).toBe(false);
+	const generation = f.sqlite
+		.prepare("SELECT generation FROM pending_purge WHERE tag='removed'")
+		.get()!.generation;
+	expect(await f.queue.repairPurge('path-purge:job', '0', ['removed'], true)).toBe(false);
+	expect(
+		f.sqlite.prepare("SELECT generation FROM pending_purge WHERE tag='removed'").get()!.generation
+	).toBe(generation);
+	const restarted = new PurgeQueue(f.storage, f.purge);
+	vi.advanceTimersByTime(PURGE_INTERVAL_MS);
+	await restarted.alarm();
+	expect(await restarted.repairPurge('path-purge:job', '0', ['removed'], true)).toBe(true);
+	expect(f.purge).toHaveBeenCalledTimes(2);
+});

@@ -196,11 +196,12 @@
 								{/each}
 							</ul>
 							<p class="mt-2 ps-6 text-sm text-foreground">
-								On a machine that built these paths, run <code
-									>nimbus repair SERVER:CACHE --dry-run</code
-								>
-								to inspect missing dependencies, then omit <code>--dry-run</code> to upload those available
-								locally. This warning refreshes after the next GC run.
+								On a machine that built these paths, run <code>nimbus repair SERVER:CACHE</code>
+								to inspect missing dependencies, then add <code>--apply</code> to upload those
+								available locally. For obsolete broken outputs,
+								<code>nimbus purge SERVER:CACHE</code>
+								previews removal of unprotected paths; <code>--apply</code> performs it. This warning
+								refreshes after the next GC run.
 							</p>
 						</details>
 					{/if}

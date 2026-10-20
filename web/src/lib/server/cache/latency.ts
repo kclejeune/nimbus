@@ -209,6 +209,7 @@ export function routeTemplate(request: Request): string {
 			'tokens',
 			'caches',
 			'cache-config',
+			'cache-integrity',
 			'pin',
 			'gc-root',
 			'auth-config',
@@ -218,6 +219,13 @@ export function routeTemplate(request: Request): string {
 		path = `/_api/v1/${operation}`;
 		if (operation === 'upload-path' && parts[3] === 'chunks')
 			path += parts[4] === 'complete' ? '/chunks/complete' : parts[4] ? '/chunks/:hash' : '/chunks';
+		else if (operation === 'cache-integrity')
+			path +=
+				'/:cache' +
+				(parts.length > 4 &&
+				['check', 'purge-plan', 'purge-apply', 'purge-replay'].includes(parts[4])
+					? '/' + parts[4]
+					: '');
 		else if (parts.length > 3) path += '/:id';
 	} else
 		path =

@@ -12,6 +12,7 @@
 //   wrangler.adapter.jsonc, so this file is never overwritten by builds.
 
 import { processChunkRepair, replayChunkRepairs } from './src/lib/server/cache/repair';
+import { replayPathPurges } from './src/lib/server/cache/closure-purge';
 import {
 	purgeWithJournal,
 	replayPurges,
@@ -86,6 +87,17 @@ export class CachedStore extends WorkerEntrypoint {
 	 * use purgeTags; repairs use durable page receipts and alarm continuation. */
 	async enqueuePurgeTags(tags: string[]) {
 		return this.coordinatePurge(tags, false);
+	}
+	/** Urgent, idempotent pages: an alarm resumes the D1 operation after a
+	 * rate limit, without resubmitting acknowledged pages under new generations. */
+	async purgePathPage(id: string, receipt: string, tags: string[]) {
+		const coordinator = this.coordinator();
+		if (!coordinator) {
+			await this.purgeUnjournaled(tags, true);
+			return true;
+		}
+		await coordinator.scheduleRepair('path-purge:' + id);
+		return coordinator.pathPurge(id, receipt, tags);
 	}
 
 	/** The singleton purge queue, when this deployment binds one. */
@@ -218,6 +230,14 @@ export default {
 	},
 
 	async scheduled(_controller: unknown, env: Env, ctx: unknown) {
+		await replayPathPurges(env, ctx as App.Platform['ctx']).catch((e) =>
+			console.warn('path purge replay failed', e)
+		);
+		await env.ATTIC_DB.prepare(
+			"DELETE FROM path_purge WHERE state='done' AND julianday(created_at)<julianday('now','-1 day')"
+		)
+			.run()
+			.catch((e) => console.warn('path purge receipt cleanup failed', e));
 		// Upstream re-validation is not cron work: passthrough narinfos carry
 		// the upstream's TTL as edge max-age (the CDN re-invokes the worker on
 		// expiry) and D1 "present" verdicts lazily expire on the same TTL.

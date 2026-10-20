@@ -41,6 +41,9 @@ func New(endpoint, token string) *Client {
 type Error struct {
 	Status  int
 	Message string
+	// HTML interstitials come from an edge/access policy or a wrong endpoint,
+	// rather than the cache API's JSON token-permission errors.
+	HTMLResponse bool
 	// Requests sent before giving up (>1 when transient retries were burned).
 	Attempts int
 }
@@ -58,6 +61,9 @@ func (e *Error) Transient() bool { return transientStatus(e.Status) }
 // AuthFailure reports a credential problem (missing, expired, revoked, or
 // underprivileged token).
 func (e *Error) AuthFailure() bool {
+	if e.HTMLResponse {
+		return false
+	}
 	return e.Status == http.StatusUnauthorized || e.Status == http.StatusForbidden
 }
 
@@ -75,6 +81,8 @@ func (e *Error) Error() string {
 	switch {
 	case e.Transient():
 		detail += "; transient — retrying may succeed"
+	case e.HTMLResponse:
+		detail += "; HTML response — check the endpoint and edge firewall/access policy"
 	case e.Status == http.StatusUnauthorized:
 		detail += "; token missing, expired, or revoked — check `nimbus whoami`"
 	case e.Status == http.StatusForbidden:
@@ -221,7 +229,19 @@ func decodeOrError(res *http.Response, out any, attempts int) error {
 				message = message[:200] + "…"
 			}
 		}
-		return &Error{Status: res.StatusCode, Message: message, Attempts: attempts}
+		bodyText := strings.ToLower(strings.TrimSpace(string(data)))
+		htmlResponse := strings.Contains(
+			strings.ToLower(res.Header.Get("Content-Type")),
+			"text/html",
+		) ||
+			strings.HasPrefix(bodyText, "<!doctype html") ||
+			strings.HasPrefix(bodyText, "<html")
+		return &Error{
+			Status:       res.StatusCode,
+			Message:      message,
+			HTMLResponse: htmlResponse,
+			Attempts:     attempts,
+		}
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, res.Body)
@@ -823,6 +843,120 @@ type UncoveredReference struct {
 type IntegrityPage struct {
 	References []UncoveredReference `json:"references"`
 	NextCursor string               `json:"next_cursor"`
+}
+
+// ReferenceStatus keeps uncertain upstream checks separate from proven misses.
+type ReferenceStatus struct {
+	Missing    []string `json:"missing"`
+	Unverified []string `json:"unverified"`
+}
+
+func (c *Client) CheckReferences(
+	ctx context.Context,
+	cache string,
+	hashes []string,
+) (*ReferenceStatus, error) {
+	result := &ReferenceStatus{}
+	for round := 0; len(hashes) > 0; round++ {
+		var deferred []string
+		for start := 0; start < len(hashes); start += 100 {
+			var page ReferenceStatus
+			if err := c.doJSON(
+				withReplay(ctx),
+				http.MethodPost,
+				"/_api/v1/cache-integrity/"+url.PathEscape(cache)+"/check",
+				map[string]any{"hashes": hashes[start:min(start+100, len(hashes))]},
+				&page,
+			); err != nil {
+				return nil, err
+			}
+			result.Missing = append(result.Missing, page.Missing...)
+			deferred = append(deferred, page.Unverified...)
+		}
+		if round == deferredQueryRounds {
+			result.Unverified = deferred
+			break
+		}
+		hashes = deferred
+	}
+	return result, nil
+}
+
+type PurgeTarget struct {
+	ID         int64   `json:"id"`
+	Hash       string  `json:"store_path_hash"`
+	StorePath  string  `json:"store_path,omitempty"`
+	NarID      int64   `json:"nar_id"`
+	CreatedAt  string  `json:"created_at"`
+	DetachedAt *string `json:"detached_at"`
+	Blocked    int     `json:"blocked,omitempty"`
+}
+
+type PurgePlan struct {
+	ReferenceStatus
+	Objects    []PurgeTarget `json:"objects"`
+	NextCursor int64         `json:"next_cursor"`
+}
+
+func (c *Client) PlanPurge(
+	ctx context.Context,
+	cache string,
+	hashes []string,
+	after int64,
+) (*PurgePlan, error) {
+	plan := &PurgePlan{}
+	err := c.doJSON(
+		withReplay(ctx),
+		http.MethodPost,
+		"/_api/v1/cache-integrity/"+url.PathEscape(cache)+"/purge-plan",
+		map[string]any{"hashes": hashes, "after": after},
+		plan,
+	)
+	return plan, err
+}
+
+type PurgeResult struct {
+	Removed      int  `json:"removed"`
+	PendingPurge bool `json:"pending_purge"`
+}
+
+func (c *Client) ApplyPurge(
+	ctx context.Context,
+	cache, id string,
+	hashes []string,
+	targets []PurgeTarget,
+) (*PurgeResult, error) {
+	// The server's durable receipt makes transport retries safe, including a
+	// committed delete whose response never reached this machine.
+	result := &PurgeResult{}
+	compact := make([]PurgeTarget, len(targets))
+	copy(compact, targets)
+	for i := range compact {
+		compact[i].StorePath = ""
+		compact[i].Blocked = 0
+	}
+	err := c.doJSON(
+		withReplay(ctx),
+		http.MethodPost,
+		"/_api/v1/cache-integrity/"+url.PathEscape(cache)+"/purge-apply",
+		map[string]any{"hashes": hashes, "targets": compact, "id": id},
+		result,
+	)
+	return result, err
+}
+
+func (c *Client) ReplayPathPurges(ctx context.Context, cache string) (int, error) {
+	var result struct {
+		Pending int `json:"pending"`
+	}
+	err := c.doJSON(
+		withReplay(ctx),
+		http.MethodPost,
+		"/_api/v1/cache-integrity/"+url.PathEscape(cache)+"/purge-replay",
+		map[string]any{},
+		&result,
+	)
+	return result.Pending, err
 }
 
 // UncoveredReferences reads one page of the reference graph recorded by GC.
