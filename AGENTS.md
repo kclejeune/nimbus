@@ -95,7 +95,7 @@ are created only by the Access path and the primary `OIDC_ISSUER` provider
 **CLI** (`cmd/nimbus/` cobra+fang, `internal/` for guts): `internal/push` drives
 closure queries via `internal/nix`, and `internal/chunker` implements FastCDC
 with boundaries **bit-identical to the server's** (`cache/chunking.ts`) so
-client-cut NARs (≥ 100 MiB) dedup against server-cut ones. Changing chunker
+client-cut NARs (≥ 64 MiB) dedup against server-cut ones. Changing chunker
 parameters on one side without the other silently breaks dedup.
 
 **Database.** One D1 database, two schema sources, both driven by

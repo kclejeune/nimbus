@@ -38,6 +38,35 @@ export async function takeBudgetUnits(
 	return results.every(Boolean);
 }
 
+/** Charge new compressed storage bytes, preserving the outcome of every unit
+ * so binding failures can be distinguished from exhausted budgets. These are
+ * attempted reservations, not a count of successful R2 writes. */
+export async function requireStorageBudget(
+	limiter: RateLimit | undefined,
+	bytes: number
+): Promise<void> {
+	const units = Math.ceil(bytes / (1024 * 1024));
+	if (!limiter || units <= 0) return;
+	const outcomes = await Promise.all(
+		Array.from({ length: units }, () => limitOutcome(limiter, 'storage-write'))
+	);
+	const rejectedUnits = outcomes.filter((outcome) => outcome === 'rejected').length;
+	const errorUnits = outcomes.filter((outcome) => outcome === 'error').length;
+	const outcome = errorUnits > 0 ? 'error' : rejectedUnits > 0 ? 'rejected' : 'allowed';
+	console.log(
+		JSON.stringify({
+			event: 'nimbus.storage_budget',
+			outcome,
+			bytes,
+			units,
+			allowedUnits: units - rejectedUnits - errorUnits,
+			rejectedUnits,
+			errorUnits
+		})
+	);
+	if (outcome !== 'allowed') throw new AdmissionError('Storage write budget exhausted');
+}
+
 export async function requireBudgetUnits(
 	limiter: RateLimit | undefined,
 	key: string,

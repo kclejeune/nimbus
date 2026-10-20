@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
-import { takeBudget, requireBudget, AdmissionError } from './admission';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { takeBudget, requireBudget, requireStorageBudget, AdmissionError } from './admission';
+import type { LimitOutcome } from '../rate-limit';
 import {
 	fetchUpstreamNarInfo,
 	filterUpstreamPaths,
@@ -9,6 +10,54 @@ import {
 	type Upstream
 } from './missing-paths';
 import { testDatabase } from './test-db';
+
+describe('storage budget telemetry', () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it.each<{
+		outcome: LimitOutcome;
+		units: LimitOutcome[];
+		rejectedUnits: number;
+		errorUnits: number;
+	}>([
+		{ outcome: 'allowed', units: ['allowed', 'allowed'], rejectedUnits: 0, errorUnits: 0 },
+		{ outcome: 'rejected', units: ['allowed', 'rejected'], rejectedUnits: 1, errorUnits: 0 },
+		{ outcome: 'error', units: ['allowed', 'error'], rejectedUnits: 0, errorUnits: 1 },
+		{ outcome: 'error', units: ['rejected', 'error'], rejectedUnits: 1, errorUnits: 1 }
+	])('records $units and fails closed unless all units allow', async (test) => {
+		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+		const limit = vi.fn();
+		for (const outcome of test.units) {
+			if (outcome === 'error') limit.mockRejectedValueOnce(new Error('binding unavailable'));
+			else limit.mockResolvedValueOnce({ success: outcome === 'allowed' });
+		}
+		const bytes = 1024 * 1024 + 1;
+		const attempt = requireStorageBudget({ limit }, bytes);
+		if (test.outcome === 'allowed') await expect(attempt).resolves.toBeUndefined();
+		else await expect(attempt).rejects.toBeInstanceOf(AdmissionError);
+		expect(limit).toHaveBeenCalledTimes(2);
+		for (const args of limit.mock.calls) expect(args).toEqual([{ key: 'storage-write' }]);
+		expect(log).toHaveBeenCalledOnce();
+		expect(JSON.parse(log.mock.calls[0][0])).toEqual({
+			event: 'nimbus.storage_budget',
+			outcome: test.outcome,
+			bytes,
+			units: 2,
+			allowedUnits: 2 - test.rejectedUnits - test.errorUnits,
+			rejectedUnits: test.rejectedUnits,
+			errorUnits: test.errorUnits
+		});
+	});
+
+	it('skips unbound and empty reservations', async () => {
+		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+		const limit = vi.fn();
+		await requireStorageBudget(undefined, 1024);
+		await requireStorageBudget({ limit }, 0);
+		expect(limit).not.toHaveBeenCalled();
+		expect(log).not.toHaveBeenCalled();
+	});
+});
 
 describe('work admission', () => {
 	it('fails closed on limiter failure and gives a retryable no-store response', async () => {

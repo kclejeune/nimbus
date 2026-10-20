@@ -143,7 +143,7 @@
 		{
 			"name": "STORAGE_WRITE_LIMITER",
 			"namespace_id": "1014",
-			"simple": { "limit": 512, "period": 60 }
+			"simple": { "limit": 4096, "period": 60 }
 		},
 		// Control plane: API_REQUEST per IP, API_MUTATION per token, GC_TRIGGER
 		// per colo (plus a D1 cooldown). Starting values; tune from the `limit`

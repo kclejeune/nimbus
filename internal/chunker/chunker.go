@@ -1,6 +1,6 @@
 // Package chunker is a FastCDC cutter bit-identical to the server's
 // (web/src/lib/server/attic/chunking.ts): same gear table, masks, and
-// min/avg/max sizes, so chunks cut client-side for >100 MB NARs dedup against
+// min/avg/max sizes, so chunks cut client-side for large NARs dedup against
 // chunks the server cut itself. The golden test pins the boundaries; any
 // change here or in the TS module breaks dedup between the two.
 package chunker

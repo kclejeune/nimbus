@@ -131,7 +131,7 @@ subcommand. The exceptions:
 | Runs on            | any host; NixOS module, OCI images                                           | Cloudflare Workers Paid                                                     |
 | Metadata / storage | PostgreSQL or SQLite; S3-compatible or local disk                            | D1; R2                                                                      |
 | Chunking           | FastCDC 16/64/256 KiB, configurable                                          | FastCDC 2/8/16 MiB, fixed; chunks are not shared with an attic store        |
-| Large uploads      | one streaming PUT                                                            | chunked above 100 MiB, sending only missing chunks                          |
+| Large uploads      | one streaming PUT                                                            | chunked from 64 MiB, sending only missing chunks                            |
 | Compression        | server-wide zstd, brotli, xz, or none                                        | per-cache zstd, gzip, or none                                               |
 | Garbage collection | per-object expiry, off by default                                            | closure-aware, by age and size, with pins                                   |
 | Path removal       | none                                                                         | closure-safe `cache rm`                                                     |
@@ -246,7 +246,7 @@ larger groups are split by missing dependency when possible.
 `push` resolves closures with `nix path-info`, skips paths the server
 already has or can fetch from its upstreams (`--ignore-upstream-cache-filter`
 disables the upstream check), and uploads raw NARs for the server to
-compress. NARs of 100 MiB or more are instead cut with the server's FastCDC
+compress. NARs of 64 MiB or more are instead cut with the server's FastCDC
 boundaries, zstd-compressed locally, and uploaded chunk by chunk, skipping
 chunks the server has. `push` accepts attic's flags (`--stdin`,
 `--no-closure`, `--jobs`, `--ignore-upstream-cache-filter`), so it can replace

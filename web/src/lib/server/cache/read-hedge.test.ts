@@ -152,3 +152,85 @@ it('preserves the original transient error when neither source succeeds', async 
 	).rejects.toBe(failure);
 	await Promise.all(tasks);
 });
+
+it('rescues a second stalled read after the cooldown without raising the primary start rate', async () => {
+	const { db, ctx, primary, tasks, withSession } = source();
+	const aReplica = deferred<string>();
+	const bReplica = deferred<string>();
+	const starts: number[] = [];
+	const read = (pending: Promise<string>) => (session: D1Database) => {
+		if (session !== primary) return pending;
+		starts.push(Date.now());
+		return Promise.resolve('primary');
+	};
+	const a = hedge(db, ctx, read(aReplica.promise));
+	const b = hedge(db, ctx, read(bReplica.promise));
+	await vi.advanceTimersByTimeAsync(500);
+	expect(await a).toBe('primary');
+	expect(starts).toHaveLength(1);
+	await vi.advanceTimersByTimeAsync(999);
+	expect(starts).toHaveLength(1);
+	await vi.advanceTimersByTimeAsync(26);
+	expect(await b).toBe('primary');
+	expect(starts).toHaveLength(2);
+	expect(starts[1] - starts[0]).toBeGreaterThanOrEqual(1000);
+	expect(withSession.mock.calls.filter(([c]) => c === 'first-unconstrained')).toHaveLength(2);
+	aReplica.resolve('late A');
+	bReplica.resolve('late B');
+	await Promise.all(tasks);
+});
+
+it('returns a replica that finishes while waiting for admission without starting an unnecessary hedge', async () => {
+	const { db, ctx, primary, tasks } = source();
+	const aReplica = deferred<string>();
+	const bReplica = deferred<string>();
+	const primaryRead = vi.fn(async () => 'primary');
+	const a = hedge(db, ctx, (s) => (s === primary ? primaryRead() : aReplica.promise));
+	const b = hedge(db, ctx, (s) => (s === primary ? primaryRead() : bReplica.promise));
+	await vi.advanceTimersByTimeAsync(500);
+	expect(await a).toBe('primary');
+	await vi.advanceTimersByTimeAsync(100);
+	bReplica.resolve('replica');
+	expect(await b).toBe('replica');
+	await vi.advanceTimersByTimeAsync(2000);
+	expect(primaryRead).toHaveBeenCalledOnce();
+	aReplica.resolve('late');
+	await Promise.all(tasks);
+});
+
+it('does not delay or spin on a transient replica failure while the primary budget is occupied', async () => {
+	const { db, ctx, primary, tasks } = source();
+	const pending = deferred<string>();
+	const aReplica = deferred<string>();
+	const a = hedge(db, ctx, (s) => (s === primary ? pending.promise : aReplica.promise));
+	await vi.advanceTimersByTimeAsync(500);
+	const failure = new Error('D1_ERROR: Replica disconnected from primary');
+	await expect(
+		hedge(db, ctx, async () => {
+			throw failure;
+		})
+	).rejects.toBe(failure);
+	pending.resolve('primary');
+	aReplica.resolve('replica');
+	await Promise.all([a, ...tasks]);
+});
+
+it('keeps the same primary rate cap when a burst of pending reads retries admission', async () => {
+	const { db, ctx, primary, tasks } = source();
+	const replicas = Array.from({ length: 8 }, () => deferred<string>());
+	const starts: number[] = [];
+	const reads = replicas.map((replica) =>
+		hedge(db, ctx, async (session) => {
+			if (session !== primary) return replica.promise;
+			starts.push(Date.now());
+			return 'primary';
+		})
+	);
+	await vi.advanceTimersByTimeAsync(3600);
+	expect(starts).toHaveLength(4);
+	for (let i = 1; i < starts.length; i++)
+		expect(starts[i] - starts[i - 1]).toBeGreaterThanOrEqual(1000);
+	for (const replica of replicas) replica.resolve('replica');
+	await Promise.all([...reads, ...tasks]);
+	expect(vi.getTimerCount()).toBe(0);
+});

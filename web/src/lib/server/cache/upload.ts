@@ -2,9 +2,9 @@
 //
 //   PUT  /_api/v1/upload-path                  raw NAR body (or preamble
 //                                              variant); server compresses
-//   POST /_api/v1/upload-path/chunks           client-side CDC for >100MB
-//   PUT  /_api/v1/upload-path/chunks/{hash}    NARs (Workers request-body
-//   POST /_api/v1/upload-path/chunks/complete  limit); client cuts + zstds
+//   POST /_api/v1/upload-path/chunks           client-side CDC for large
+//   PUT  /_api/v1/upload-path/chunks/{hash}    NARs; client cuts + zstds
+//   POST /_api/v1/upload-path/chunks/complete
 //
 // NARs below NAR_CHUNK_THRESHOLD are stored whole (one chunk, compressed in
 // one shot). Larger simple uploads are FastCDC-chunked: each content-defined
@@ -45,7 +45,7 @@ import {
 } from './platform';
 import { invalidateAfterUpload } from './store';
 import { bodyDeadline, isRecord, readWithTimeout } from '../request-body';
-import { AdmissionError, takeBudgetUnits } from './admission';
+import { AdmissionError, requireStorageBudget } from './admission';
 
 type Env = App.Platform['env'];
 
@@ -382,10 +382,7 @@ async function storeChunk(env: Env, chunk: db.NewChunk, data: Uint8Array): Promi
 	if (!row) throw new AdmissionError('Chunk is being stored by another upload', 5);
 	if (row.state === 'V') return row;
 	try {
-		const units = Math.ceil(data.byteLength / (1024 * 1024));
-		if (!(await takeBudgetUnits(env.STORAGE_WRITE_LIMITER, 'storage-write', units))) {
-			throw new AdmissionError('Storage write budget exhausted');
-		}
+		await requireStorageBudget(env.STORAGE_WRITE_LIMITER, data.byteLength);
 		const key = db.chunkKey(row);
 		if (!key) throw new Error('Staged chunk has no storage key');
 		await withR2Retry(() => env.CACHE_BUCKET.put(key, data as unknown as ArrayBuffer));
@@ -913,7 +910,7 @@ export async function handleStreamingUpload(
 	}
 }
 
-// --- Client-side CDC protocol (>100MB NARs) ---
+// --- Client-side CDC protocol (large NARs) ---
 
 export interface CdcManifest {
 	nar_info: UploadNarInfo;
@@ -1161,10 +1158,7 @@ async function repairChunk(
 	compressed: Uint8Array,
 	proof: string
 ): Promise<Response | null> {
-	const units = Math.ceil(compressed.byteLength / (1024 * 1024));
-	if (!(await takeBudgetUnits(env.STORAGE_WRITE_LIMITER, 'storage-write', units))) {
-		throw new AdmissionError('Storage write budget exhausted');
-	}
+	await requireStorageBudget(env.STORAGE_WRITE_LIMITER, compressed.byteLength);
 	const key = versionedKey('chunk', hash, 'zstd');
 	await withR2Retry(() => env.CACHE_BUCKET.put(key, compressed as unknown as ArrayBuffer));
 	const won = await db.repairChunkFile(env.ATTIC_DB, existing.id, existing.remote_file, {

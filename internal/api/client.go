@@ -444,6 +444,13 @@ type ChunkQueryResult struct {
 	Proofs map[string]string `json:"proofs"`
 }
 
+// ErrChunkProofsUnsupported identifies older chunk endpoints that cannot
+// safely issue possession receipts. Small enough NARs can still use the
+// regular raw-upload protocol without weakening chunk verification.
+var ErrChunkProofsUnsupported = errors.New(
+	"server does not support chunk possession proofs; upgrade the nimbus Worker to v0.6.1 or later before uploading large NARs",
+)
+
 // QueryChunks reports which of the NAR's chunks the server is missing,
 // deduplicating the whole NAR when it already exists.
 func (c *Client) QueryChunks(
@@ -472,9 +479,7 @@ func (c *Client) QueryChunks(
 	// Older Workers omit proofs entirely; an empty map is valid when every
 	// chunk needs uploading. Stop before spending bandwidth on incompatible PUTs.
 	if out.Proofs == nil {
-		return nil, errors.New(
-			"server does not support chunk possession proofs; upgrade the nimbus Worker to v0.6.1 or later before uploading large NARs",
-		)
+		return nil, ErrChunkProofsUnsupported
 	}
 	missing := make(map[string]bool, len(out.MissingChunkHashes))
 	for _, hash := range out.MissingChunkHashes {

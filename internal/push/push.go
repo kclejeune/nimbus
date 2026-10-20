@@ -21,9 +21,14 @@ import (
 	"github.com/kclejeune/nimbus/internal/nix"
 )
 
-// Above this NAR size (the Workers request-body limit) the client cuts the
-// NAR with FastCDC itself and uploads only the chunks the server is missing.
-const chunkedThreshold = 100 * 1024 * 1024
+// Client compression avoids the large raw uploads that spend seconds in
+// server-side WASM. Keep smaller NARs on the one-request path; the chunked
+// path also pays for a query, two dump passes and whole-NAR verification.
+const chunkedThreshold = 64 * 1024 * 1024
+
+// Servers without the chunk extension can still receive the newly chunked
+// 64–100 MiB range as a regular upload, as they did before the cutoff changed.
+const rawUploadLimit = 100 * 1024 * 1024
 
 // Shared compress+PUT budget across every path in a push. Chunker buffers
 // are per path; owned upload chunks (≤16 MiB each) use these four slots.
@@ -31,19 +36,27 @@ const chunkUploadJobs = 4
 
 var uploadSlots = make(chan struct{}, chunkUploadJobs)
 
-// One encoder for the process, with one state per upload slot: EncodeAll is
-// safe for concurrent use, and a per-path encoder would multiply the states
-// (and their memory) by the number of paths in flight. SpeedBetterCompression
-// is close to the server's zstd level at a fraction of SpeedBestCompression's
-// CPU; the client's choice is what gets stored for chunked NARs, so don't
-// drop below this without considering ratio.
-var chunkEncoder = sync.OnceValues(func() (*zstd.Encoder, error) {
-	return zstd.NewWriter(
-		nil,
-		zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
-		zstd.WithEncoderConcurrency(chunkUploadJobs),
-	)
-})
+// Process-wide encoders: a per-path encoder would multiply their states
+// (and memory) by the number of paths in flight. Existing large uploads keep
+// SpeedBetterCompression's CPU/ratio tradeoff. The newly client-compressed
+// 64–100 MiB range uses Best to stay near the server's previous stored size;
+// Better made benchmark binaries ~8% larger and would slow subsequent pulls.
+// Both encoders share uploadSlots, so their active work is bounded together.
+// Two medium-upload encoder states bound the extra retained codec memory.
+var (
+	chunkEncoder       = sharedEncoder(zstd.SpeedBetterCompression, chunkUploadJobs)
+	mediumChunkEncoder = sharedEncoder(zstd.SpeedBestCompression, 2)
+)
+
+func sharedEncoder(level zstd.EncoderLevel, concurrency int) func() (*zstd.Encoder, error) {
+	return sync.OnceValues(func() (*zstd.Encoder, error) {
+		return zstd.NewWriter(
+			nil,
+			zstd.WithEncoderLevel(level),
+			zstd.WithEncoderConcurrency(concurrency),
+		)
+	})
+}
 
 type Pusher struct {
 	Client *api.Client
@@ -368,6 +381,12 @@ func (p *Pusher) uploadChunked(
 
 	query, err := p.Client.QueryChunks(ctx, p.narInfo(info), info.NarSize, descs)
 	if err != nil {
+		var response *api.Error
+		unsupported := errors.Is(err, api.ErrChunkProofsUnsupported) ||
+			(errors.As(err, &response) && (response.Status == 404 || response.Status == 405 || response.Status == 501))
+		if info.NarSize < rawUploadLimit && unsupported {
+			return p.uploadSimple(ctx, info, sent)
+		}
 		return nil, fmt.Errorf("querying missing chunks: %w", err)
 	}
 	if query.Kind == "deduplicated" {
@@ -434,7 +453,11 @@ func (p *Pusher) uploadMissingChunks(
 	if len(missing) == 0 {
 		return nil
 	}
-	enc, err := chunkEncoder()
+	encoder := chunkEncoder
+	if info.NarSize < rawUploadLimit {
+		encoder = mediumChunkEncoder
+	}
+	enc, err := encoder()
 	if err != nil {
 		return err
 	}

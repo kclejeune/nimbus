@@ -215,6 +215,26 @@ describe('upload lifecycle', () => {
 		expect(put).toHaveBeenCalledOnce();
 	});
 
+	it.each(['rejected', 'error'])(
+		'releases the staged hold before R2 when storage is %s',
+		async (outcome) => {
+			env.STORAGE_WRITE_LIMITER = {
+				limit: async () => {
+					if (outcome === 'error') throw new Error('binding unavailable');
+					return { success: false };
+				}
+			};
+			await expect(handleBufferedUpload(env, manifest.nar_info, 1, 'zstd', raw)).rejects.toThrow(
+				'Storage write budget exhausted'
+			);
+			expect(put).not.toHaveBeenCalled();
+			expect(fixture.sqlite.prepare('SELECT state, holders_count FROM chunk').get()).toMatchObject({
+				state: 'P',
+				holders_count: 0
+			});
+		}
+	);
+
 	it('a fresh CDC query is strictly read-only', async () => {
 		const before = fixture.totalChanges();
 		expect(await (await handleCdcQuery(env, undefined, manifest)).json()).toEqual({

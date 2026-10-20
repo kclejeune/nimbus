@@ -181,7 +181,7 @@ tokens; drizzle-generated in `web/drizzle/`, tracked in `admin_migrations`).
 
 ### v0.6.1: chunk possession receipts
 
-From v0.6.1 on, chunked uploads (NARs ≥ 100 MiB) require cache-bound
+From v0.6.1 on, chunked uploads require cache-bound
 possession receipts, and the protocol does not negotiate: a pre-0.6.1 CLI
 cannot finish a chunked upload against a newer Worker, nor the reverse.
 Downloads and whole-NAR uploads are unaffected.
@@ -297,6 +297,16 @@ A distributed flood multiplies them across colos, refused and edge-served
 requests still cost money, and retention byte targets are enforced by GC,
 not at upload. A hard spend ceiling needs globally coordinated reservations,
 which nimbus does not implement.
+
+The default storage-write budget is 4 GiB per minute per location (4096
+started-MiB units), shared across clients. Valid dedup hits spend no units;
+fresh writes and repairs do. Each bound storage-budget attempt emits a
+`nimbus.storage_budget` log with compressed `bytes`, `units`, and
+`allowedUnits` / `rejectedUnits` / `errorUnits`. Its `outcome` is `allowed`,
+`rejected`, or `error` (errors take precedence when an attempt has both).
+These count attempted reservations, including units spent on refused
+attempts, rather than successful R2 writes. Use them alongside client push
+duration, 503 responses, and storage growth to evaluate the allowance.
 
 ### Upload memory
 
