@@ -45,6 +45,7 @@ server entirely.`,
 
 	root.AddCommand(loginCmd())
 	root.AddCommand(whoamiCmd())
+	root.AddCommand(doctorCmd())
 	root.AddCommand(tokenCmd())
 	root.AddCommand(useCmd())
 	root.AddCommand(pushCmd())

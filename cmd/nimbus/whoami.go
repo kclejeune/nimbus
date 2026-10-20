@@ -16,8 +16,9 @@ import (
 
 func whoamiCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "whoami [SERVER]",
-		Short: "Show what the configured token claims, without contacting the server",
+		Use:     "whoami [SERVER]",
+		Aliases: []string{"wai"},
+		Short:   "Show what the configured token claims, without contacting the server",
 		Long: `Decodes the configured token as a JWT and prints its subject, expiry, and
 cache permissions. The signature is deliberately not verified — that is the
 server's job — and no network calls are made.`,

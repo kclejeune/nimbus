@@ -162,6 +162,9 @@ nimbus repair mycache --apply                          # upload dependencies sti
 nimbus purge mycache                                   # plan removal of broken paths and their dependents
 nimbus purge mycache --apply                           # remove the still-broken, unprotected paths
 nimbus whoami                                          # decode the configured token
+nimbus wai                                             # alias for whoami
+nimbus doctor mycache                                   # read-only checks with suggested fixes (alias: dr)
+nimbus dr mycache --json                                # structured report for scripts
 nimbus cache list                                      # caches you can see, with your access bits
 nimbus cache info mycache
 nimbus cache rename mycache newname
@@ -194,6 +197,21 @@ file: `NIMBUS_ENDPOINT` with `NIMBUS_AUTH_TOKEN` or `NIMBUS_AUTH_TOKEN_FILE`
 defines a server, and `NIMBUS_DEFAULT_SERVER` or
 `NIMBUS_SERVERS_<NAME>_{ENDPOINT,TOKEN,TOKEN_FILE}` override the file. Exit
 codes distinguish retryable failures (75), auth (77), and config (78).
+
+`nimbus doctor [SERVER:]CACHE` (`nimbus dr`) checks token expiry, cache discovery,
+server-reported permissions, effective Nix substituters and signing keys, private
+cache netrc configuration, and one page of GC-recorded closure warnings. It uses
+GET requests and local inspection only; it suggests fixes rather than applying
+them. It does not run GC, upload paths, purge anything, or refresh upstream
+verdicts. Warnings describe the GC snapshot; use the suggested `repair` command
+to verify current coverage. Local availability checks are bounded to that page.
+The root proxy has a separate signing key, so doctor reports that it cannot
+verify that key through per-cache discovery. Daemon trust policy and netrc
+credential authorization also require separate verification.
+
+Doctor exits 1 if it finds warnings or errors, including checks it cannot
+complete. `--json` writes the report to stdout and progress to stderr;
+`--timeout` sets the total check budget (default 30 seconds).
 
 ### Pushing
 
