@@ -1,10 +1,12 @@
 /** Nix resolves a narinfo's URL against the binary cache's directory URL.
  * Use the same resolution for passthrough responses and pull-through ingest. */
+import { validateUpstreamUrl } from '../cache/upstream-url';
+
 export function resolveNarUrl(upstream: string, value: string): string | null {
 	try {
 		const url = new URL(value, `${upstream.replace(/\/+$/, '')}/`);
-		if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return null;
-		return url.href;
+		const checked = validateUpstreamUrl(url.href, { allowQuery: true });
+		return 'url' in checked ? checked.url : null;
 	} catch {
 		return null;
 	}

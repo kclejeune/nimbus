@@ -20,7 +20,7 @@ const refused = {
 } as unknown as App.Platform['env'];
 
 let seq = 0;
-const freshHash = () => `stale${(seq++).toString().padStart(27, '0')}`;
+const freshHash = () => (seq++).toString().padStart(32, '0');
 /** A NAR hash distinct from, but derived from, a store path hash. */
 const narHashFor = (hash: string) => `0${hash.slice(1)}`.padEnd(52, '0');
 

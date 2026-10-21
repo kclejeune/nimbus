@@ -11,6 +11,7 @@ import {
 	registryUsage,
 	setUpstreamPositions,
 	updateUpstream,
+	validateUpstreamUrl,
 	type UpstreamInput
 } from '$lib/server/cache/upstream-registry';
 import type { PageServerLoad, Actions } from './$types';
@@ -33,18 +34,11 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 /** Validate the shared add/save form fields into an UpstreamInput. The save
  * form carries every entry at once, namespaced by `_<id>` suffix. */
 function parseUpstreamInput(form: FormData, suffix = ''): UpstreamInput | { error: string } {
-	const url = String(form.get(`url${suffix}`) ?? '')
-		.trim()
-		.replace(/\/+$/, '');
-	if (!url) return { error: 'Upstream URL is required.' };
-	try {
-		const parsed = new URL(url);
-		if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-			return { error: `Upstream URL must be http(s): ${url}` };
-		}
-	} catch {
-		return { error: `Invalid upstream URL: ${url}` };
-	}
+	const rawUrl = String(form.get(`url${suffix}`) ?? '').trim();
+	if (!rawUrl) return { error: 'Upstream URL is required.' };
+	const checkedUrl = validateUpstreamUrl(rawUrl);
+	if ('error' in checkedUrl) return checkedUrl;
+	const url = checkedUrl.url;
 
 	// Trust without a key is unverifiable — every upstream must have one.
 	const key = String(form.get(`public_key${suffix}`) ?? '').trim();

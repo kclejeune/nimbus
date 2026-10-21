@@ -19,8 +19,9 @@ export const GET: RequestHandler = async ({ platform, params, url, locals }) => 
 
 	const sort = parseSort(url.searchParams.get('sort'));
 	const dir = parseDir(url.searchParams.get('dir'));
-	const q = (url.searchParams.get('q') ?? '').trim();
-	const offset = Math.max(0, Number(url.searchParams.get('offset') ?? '0'));
+	const q = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
+	const rawOffset = Number(url.searchParams.get('offset') ?? '0');
+	const offset = Number.isSafeInteger(rawOffset) ? Math.min(50_000, Math.max(0, rawOffset)) : 0;
 
 	const result = await queryStorePaths(read, params.name, {
 		sort,

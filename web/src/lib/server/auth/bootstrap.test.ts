@@ -6,7 +6,7 @@ describe('claimBootstrapAdmin', () => {
 	const fixture = testDatabase({ admin: true });
 	const row = (id: string) =>
 		fixture.sqlite.prepare('SELECT role, status, is_owner FROM user WHERE id = ?').get(id);
-	afterEach(() => fixture.sqlite.exec('DELETE FROM user'));
+	afterEach(() => fixture.sqlite.exec('DELETE FROM user; DELETE FROM bootstrap_state'));
 
 	it('promotes the first user to active admin and owner', async () => {
 		fixture.seedUser('first', 'pending');
@@ -25,15 +25,24 @@ describe('claimBootstrapAdmin', () => {
 		expect(row('b')).toEqual({ role: 'member', status: 'pending', is_owner: 0 });
 	});
 
-	it('recovers a deployment whose existing users are all pending members', async () => {
+	it('does not reopen bootstrap after administrators are removed', async () => {
 		fixture.seedUser('stuck', 'pending');
 		fixture.seedUser('other', 'pending');
-		expect(await claimBootstrapAdmin(fixture.db, 'other')).toEqual({
+		fixture.sqlite.exec('INSERT INTO bootstrap_state (id, completed_at) VALUES (1, unixepoch())');
+		expect(await claimBootstrapAdmin(fixture.db, 'other')).toBeNull();
+		expect(row('other')).toMatchObject({ role: 'member', status: 'pending' });
+		expect(row('stuck')).toMatchObject({ role: 'member', status: 'pending' });
+	});
+
+	it('can be reopened only by explicitly clearing the durable latch', async () => {
+		fixture.seedUser('recovery', 'pending');
+		fixture.sqlite.exec('INSERT INTO bootstrap_state (id, completed_at) VALUES (1, unixepoch())');
+		expect(await claimBootstrapAdmin(fixture.db, 'recovery')).toBeNull();
+		fixture.sqlite.exec('DELETE FROM bootstrap_state');
+		expect(await claimBootstrapAdmin(fixture.db, 'recovery')).toEqual({
 			role: 'admin',
 			status: 'active'
 		});
-		expect(row('other')).toMatchObject({ role: 'admin', status: 'active' });
-		expect(row('stuck')).toMatchObject({ role: 'member', status: 'pending' });
 	});
 
 	it('never promotes once an admin exists', async () => {

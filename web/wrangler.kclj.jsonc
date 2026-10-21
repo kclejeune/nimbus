@@ -128,6 +128,16 @@
 			"namespace_id": "1009",
 			"simple": { "limit": 30000, "period": 60 }
 		},
+		{
+			"name": "BACKEND_READ_GLOBAL_LIMITER",
+			"namespace_id": "1018",
+			"simple": { "limit": 120000, "period": 60 }
+		},
+		{
+			"name": "TOKEN_VERIFY_LIMITER",
+			"namespace_id": "1019",
+			"simple": { "limit": 6000, "period": 60 }
+		},
 		{ "name": "UPLOAD_LIMITER", "namespace_id": "1010", "simple": { "limit": 600, "period": 60 } },
 		{
 			"name": "BATCH_QUERY_LIMITER",

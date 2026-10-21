@@ -82,6 +82,10 @@ declare global {
 				/** Per-colo cap on pull-through ingests (pullthrough.ts). */
 				INGEST_LIMITER?: RateLimit;
 				BACKEND_READ_LIMITER?: RateLimit;
+				/** Aggregate per-colo backstop for distributed cold-read floods. */
+				BACKEND_READ_GLOBAL_LIMITER?: RateLimit;
+				/** Pre-auth budget for high-volume endpoints with specialized limits. */
+				TOKEN_VERIFY_LIMITER?: RateLimit;
 				UPLOAD_LIMITER?: RateLimit;
 				BATCH_QUERY_LIMITER?: RateLimit;
 				VERDICT_WRITE_LIMITER?: RateLimit;

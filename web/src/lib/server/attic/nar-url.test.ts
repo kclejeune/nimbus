@@ -16,13 +16,16 @@ it.each([
 	);
 });
 
-it.each(['file:///etc/passwd', 'data:text/plain,hello', 'https://user:password@cdn.test/x'])(
-	'refuses unsupported download targets: %s',
-	(url) => {
-		expect(resolveNarUrl('https://upstream.test', url)).toBeNull();
-		expect(absoluteNarinfoUrl(`URL: ${url}\n`, 'https://upstream.test')).toBe(`URL: ${url}\n`);
-	}
-);
+it.each([
+	'file:///etc/passwd',
+	'data:text/plain,hello',
+	'http://cdn.test/x',
+	'https://user:password@cdn.test/x',
+	'https://127.0.0.1/x'
+])('refuses unsupported download targets: %s', (url) => {
+	expect(resolveNarUrl('https://upstream.test', url)).toBeNull();
+	expect(absoluteNarinfoUrl(`URL: ${url}\n`, 'https://upstream.test')).toBe(`URL: ${url}\n`);
+});
 
 it('preserves CRLF and all signed fields', () => {
 	expect(absoluteNarinfoUrl('URL: nar/x\r\nSig: exact\r\n', 'https://upstream.test')).toBe(

@@ -46,6 +46,7 @@ import {
 import { invalidateAfterUpload } from './store';
 import { bodyDeadline, isRecord, readWithTimeout } from '../request-body';
 import { AdmissionError, requireStorageBudget } from './admission';
+import { CACHE_NAME_RE } from '$lib/utils';
 
 type Env = App.Platform['env'];
 
@@ -163,6 +164,56 @@ export interface UploadNarInfo {
 	source?: string | null;
 	/** Pushing token's subject, stamped server-side like `source`. */
 	created_by?: string | null;
+}
+
+const NAR_HASH_RE = /^(sha256:)?[0-9a-f]{64}$/;
+const SAFE_LINE_RE = /^[^\r\n\0]*$/;
+const SAFE_TOKEN_RE = /^[^\s\0]+$/;
+
+/** Validate every client-controlled value that can reach D1 or a generated
+ * narinfo. In particular, line breaks must never enter narinfo fields. */
+export function validateUploadNarInfo(value: unknown): Response | null {
+	if (!isRecord(value)) return errorResponse(400, 'Invalid NAR info');
+	const nullableLine = (v: unknown, max: number) =>
+		v === null || (typeof v === 'string' && v.length <= max && SAFE_LINE_RE.test(v));
+	const storeBase =
+		typeof value.store_path === 'string'
+			? value.store_path.slice(value.store_path.lastIndexOf('/') + 1)
+			: '';
+	if (
+		typeof value.cache !== 'string' ||
+		!CACHE_NAME_RE.test(value.cache) ||
+		typeof value.store_path_hash !== 'string' ||
+		!db.STORE_PATH_HASH_RE.test(value.store_path_hash) ||
+		typeof value.store_path !== 'string' ||
+		value.store_path.length > 4096 ||
+		!value.store_path.startsWith('/') ||
+		storeBase.length <= value.store_path_hash.length + 1 ||
+		!storeBase.startsWith(`${value.store_path_hash}-`) ||
+		!SAFE_TOKEN_RE.test(value.store_path) ||
+		typeof value.nar_hash !== 'string' ||
+		!NAR_HASH_RE.test(value.nar_hash) ||
+		!Array.isArray(value.references) ||
+		value.references.length > 4096 ||
+		!value.references.every(
+			(r) => typeof r === 'string' && r.length <= 4096 && SAFE_TOKEN_RE.test(r)
+		) ||
+		!Array.isArray(value.sigs) ||
+		value.sigs.length > 64 ||
+		!value.sigs.every((s) => typeof s === 'string' && s.length <= 8192 && SAFE_TOKEN_RE.test(s)) ||
+		!nullableLine(value.system, 256) ||
+		!nullableLine(value.deriver, 4096) ||
+		!nullableLine(value.ca, 4096)
+	) {
+		return errorResponse(400, 'Invalid NAR info');
+	}
+	return null;
+}
+
+function validateStoreDirectory(info: UploadNarInfo, storeDir: string): Response | null {
+	return info.store_path.startsWith(`${storeDir.replace(/\/+$/, '')}/${info.store_path_hash}-`)
+		? null
+		: errorResponse(400, 'Store path does not belong to the cache store directory');
 }
 
 function uploadedResult(fileSize: number | null, fracDeduplicated: number): Response {
@@ -641,7 +692,7 @@ export async function handleUploadPath(
 	// NAR info comes from a header, or as a JSON preamble before the NAR bytes.
 	// Either way the NAR itself stays a stream; nothing is buffered until the
 	// size-based branch below decides to.
-	let info: UploadNarInfo | null = null;
+	let parsedInfo: unknown = null;
 	let narBody: ReadableStream<Uint8Array> | null = request.body;
 	// Bytes of NAR expected, when the client declared a length; null means
 	// unknown (chunked transfer encoding) and forces the streaming path.
@@ -650,7 +701,7 @@ export async function handleUploadPath(
 	const headerRaw = request.headers.get(NAR_INFO_HEADER);
 	if (headerRaw) {
 		try {
-			info = JSON.parse(headerRaw);
+			parsedInfo = JSON.parse(headerRaw);
 		} catch (e) {
 			return errorResponse(400, `Invalid NAR info: ${e}`);
 		}
@@ -665,14 +716,17 @@ export async function handleUploadPath(
 		const split = await splitStream(request.body, preambleSize);
 		if (!split) return errorResponse(400, 'Body shorter than preamble');
 		try {
-			info = JSON.parse(new TextDecoder().decode(split.head));
+			parsedInfo = JSON.parse(new TextDecoder().decode(split.head));
 		} catch (e) {
 			return errorResponse(400, `Invalid NAR info preamble: ${e}`);
 		}
 		narBody = split.rest;
 		if (narLength != null) narLength = Math.max(0, narLength - preambleSize);
 	}
-	if (!info) return errorResponse(400, 'Missing NAR info');
+	if (!parsedInfo) return errorResponse(400, 'Missing NAR info');
+	const invalidInfo = validateUploadNarInfo(parsedInfo);
+	if (invalidInfo) return invalidInfo;
+	const info = parsedInfo as unknown as UploadNarInfo;
 	if (!canPush(info.cache)) return errorResponse(403, 'Permission denied: push');
 	// Provenance is stamped server-side; whatever the client sent is ignored.
 	info.publishTrust = undefined;
@@ -687,6 +741,8 @@ export async function handleUploadPath(
 	const probe = probeNar(env, info.nar_hash, ctx);
 	const [cache] = await Promise.all([findCacheCached(env.ATTIC_DB, info.cache, ctx), probe]);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
+	const invalidStore = validateStoreDirectory(info, cache.store_dir);
+	if (invalidStore) return invalidStore;
 
 	const defer = deferTo(ctx);
 	let response: Response;
@@ -923,24 +979,10 @@ const HEX64 = /^[0-9a-f]{64}$/;
 
 /** Shared manifest validation; returns an error Response or null. */
 export function validateManifest(body: CdcManifest): Response | null {
-	if (
-		!isRecord(body) ||
-		!isRecord(body.nar_info) ||
-		typeof body.nar_info.cache !== 'string' ||
-		typeof body.nar_info.nar_hash !== 'string' ||
-		!/^(sha256:)?[0-9a-f]{64}$/.test(body.nar_info.nar_hash) ||
-		typeof body.nar_info.store_path_hash !== 'string' ||
-		!/^[0123456789abcdfghijklmnpqrsvwxyz]{32}$/.test(body.nar_info.store_path_hash) ||
-		typeof body.nar_info.store_path !== 'string' ||
-		!Array.isArray(body.nar_info.references) ||
-		!body.nar_info.references.every((r) => typeof r === 'string') ||
-		!Array.isArray(body.nar_info.sigs) ||
-		!body.nar_info.sigs.every((s) => typeof s === 'string') ||
-		!Number.isSafeInteger(body.nar_size) ||
-		body.nar_size <= 0
-	) {
+	if (!isRecord(body) || !Number.isSafeInteger(body.nar_size) || body.nar_size <= 0) {
 		return errorResponse(400, 'Invalid manifest');
 	}
+	if (validateUploadNarInfo(body.nar_info)) return errorResponse(400, 'Invalid manifest');
 	if (!Array.isArray(body.chunks) || body.chunks.length === 0) {
 		return errorResponse(400, 'Manifest has no chunks');
 	}
@@ -988,6 +1030,8 @@ export async function handleCdcQuery(
 	const info = body.nar_info;
 	const cache = await findCacheCached(env.ATTIC_DB, info.cache, ctx);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
+	const invalidStore = validateStoreDirectory(info, cache.store_dir);
+	if (invalidStore) return invalidStore;
 
 	if (
 		await db.hasAttachedNar(
@@ -1222,6 +1266,8 @@ export async function handleCdcComplete(
 	const info = body.nar_info;
 	const cache = await findCacheCached(env.ATTIC_DB, info.cache, ctx);
 	if (!cache) return errorResponse(404, `Cache not found: ${info.cache}`);
+	const invalidStore = validateStoreDirectory(info, cache.store_dir);
+	if (invalidStore) return invalidStore;
 	const invalidate = () =>
 		ctx?.waitUntil(invalidateAfterUpload(ctx, cache, info.store_path_hash, info.nar_hash));
 	if (

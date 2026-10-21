@@ -35,8 +35,11 @@ nimbus-only global `gc`) at two layers:
 
 New accounts start `pending` and see a wall page until an admin activates
 them, or automatically when their groups claim contains
-`OIDC_ACTIVATION_GROUP`. While no admin exists, whoever signs in becomes an
-active admin and the owner (`auth/bootstrap.ts`).
+`OIDC_ACTIVATION_GROUP`. The first user on a fresh installation becomes an
+active admin and the owner (`auth/bootstrap.ts`). That bootstrap edge is
+latched permanently so removing every admin cannot promote an arbitrary later
+sign-in; recovery requires the explicit database operation documented in
+`docs/deploy.md`.
 
 Deleting a user tombstones their token ids in `revoked_token` in the same
 batch that removes their `api_token` rows. A `jti` absent from both tables is

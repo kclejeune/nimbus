@@ -83,6 +83,21 @@ export function clientKey(prefix: string, ip: string | null | undefined): string
 	return `${prefix}:${ip ?? 'unknown'}`;
 }
 
+/** Every cold read spends both the caller's allowance and an aggregate colo
+ * allowance. The latter bounds a distributed distinct-hash flood that can
+ * stay below every individual IP budget. Internal loopbacks carry no client
+ * IP and have their own fan-out controls. */
+export async function requireBackendReadBudget(
+	env: App.Platform['env'],
+	ip: string | null | undefined
+): Promise<void> {
+	if (!ip) return;
+	await Promise.all([
+		requireBudget(env.BACKEND_READ_LIMITER, clientKey('backend-read', ip)),
+		requireBudget(env.BACKEND_READ_GLOBAL_LIMITER, 'backend-read-global')
+	]);
+}
+
 /** Internal gateway→store header carrying the client IP so the store can
  * charge backend work per client. Never trusted from the outside: the
  * gateway overwrites it on every loopback. */

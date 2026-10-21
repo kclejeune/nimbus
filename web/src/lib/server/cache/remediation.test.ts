@@ -433,6 +433,18 @@ describe('P1: control-plane request budgets', () => {
 		expect(api.keys).toEqual([]);
 	});
 
+	it('bounds specialized routes before token verification', async () => {
+		const verify = limiter(() => false);
+		const env = { ...baseEnv, TOKEN_VERIFY_LIMITER: verify.binding } as Env;
+		const response = await call(
+			'/_api/v1/get-missing-paths',
+			{ method: 'POST', token: 'not-a-jwt', body: {} },
+			env
+		);
+		expect(response.status).toBe(429);
+		expect(verify.keys).toEqual(['token-verify:203.0.113.9', 'token-verify-global']);
+	});
+
 	it('keys the mutation budget by jti and refuses before any write', async () => {
 		const mutation = limiter(() => false);
 		const env = { ...baseEnv, API_MUTATION_LIMITER: mutation.binding } as Env;

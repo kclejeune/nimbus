@@ -303,6 +303,22 @@ describe('upload lifecycle', () => {
 		}
 	);
 
+	it.each([
+		{ store_path: `/nix/store/${'b'.repeat(32)}-wrong-hash` },
+		{ store_path: `/nix/store/${'a'.repeat(32)}-bad\nReferences: injected` },
+		{ references: ['ok', 'bad\nSig: injected'] },
+		{ sigs: ['key:value\r\nCA: injected'] },
+		{ system: 'x86_64-linux\nURL: injected' },
+		{ cache: '../other' }
+	])('rejects unsafe NAR metadata before upload work: %j', (change) => {
+		expect(
+			validateManifest({
+				...manifest,
+				nar_info: { ...manifest.nar_info, ...change }
+			})?.status
+		).toBe(400);
+	});
+
 	it('bounds foreground waiters without sharing their I/O promises', async () => {
 		vi.useFakeTimers();
 		try {

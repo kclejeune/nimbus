@@ -34,6 +34,7 @@ import {
 	AdmissionError,
 	clientKey,
 	enforceLimit,
+	requireBackendReadBudget,
 	requireBudget,
 	requireBudgetUnits
 } from './admission';
@@ -240,7 +241,7 @@ async function authorizeCacheRead(
 	// handled during the token-verification window so workerd doesn't report
 	// it as unhandled in the interim.
 	const cachePromise = findCacheCached(env.ATTIC_DB, cacheName, ctx, () =>
-		requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request))
+		requireBackendReadBudget(env, request.headers.get('CF-Connecting-IP'))
 	);
 	cachePromise.catch(() => {});
 	let permission: Permission;
@@ -368,11 +369,6 @@ function mutationKey(request: Request, token: VerifiedToken): string {
 	return `mutation:sub:${token.sub ?? ''}:${request.headers.get('CF-Connecting-IP') ?? 'unknown'}`;
 }
 
-/** Per-client key for cold gateway lookups (memo misses that reach D1). */
-function backendReadKey(request: Request): string {
-	return clientKey('backend-read', request.headers.get('CF-Connecting-IP'));
-}
-
 /** Edge-cache verdict of a store response, from the loopback's CF-Cache-Status. */
 function storeEdge(response: Response): EdgeEvent {
 	return edgeEvent(response.headers.get('CF-Cache-Status'));
@@ -394,7 +390,8 @@ async function handleNarInfo(
 	filename: string
 ): Promise<Response> {
 	const storePathHash = filename.slice(0, -'.narinfo'.length);
-	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
+	if (!db.STORE_PATH_HASH_RE.test(storePathHash))
+		return errorResponse(400, 'Invalid store path hash');
 
 	const auth = await authorizeCacheRead(request, env, cacheName, ctx);
 	if ('response' in auth) return auth.response;
@@ -667,7 +664,8 @@ async function handleProxyNarInfo(
 	filename: string
 ): Promise<Response> {
 	const storePathHash = filename.slice(0, -'.narinfo'.length);
-	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
+	if (!db.STORE_PATH_HASH_RE.test(storePathHash))
+		return errorResponse(400, 'Invalid store path hash');
 
 	// Known-absent paths short-circuit before any token or D1 work: absence is
 	// token-independent, and mass queries re-ask for every miss.
@@ -1108,6 +1106,21 @@ async function handleV1(
 		const limited = await chargeApiBudget(request, env);
 		if (limited) return limited;
 	}
+	// Upload and mass-query routes have larger post-auth budgets, but token
+	// verification is still attacker-controlled CPU. Bound that work before
+	// parsing or verifying an Authorization header.
+	if (route === 'upload-path' || route === 'get-missing-paths') {
+		const [clientLimit, aggregateLimit] = await Promise.all([
+			enforceLimit(
+				env,
+				env.TOKEN_VERIFY_LIMITER,
+				clientKey('token-verify', request.headers.get('CF-Connecting-IP')),
+				'api'
+			),
+			enforceLimit(env, env.TOKEN_VERIFY_LIMITER, 'token-verify-global', 'api')
+		]);
+		if (clientLimit || aggregateLimit) return clientLimit ?? aggregateLimit!;
+	}
 
 	// Unauthenticated discovery endpoints.
 	if (method === 'GET' && route === 'auth-config' && segments.length === 3) {
@@ -1144,7 +1157,7 @@ async function handleV1(
 			token = null;
 		}
 		return handleCacheList(env, token, () =>
-			requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request))
+			requireBackendReadBudget(env, request.headers.get('CF-Connecting-IP'))
 		);
 	}
 
@@ -1166,7 +1179,7 @@ async function handleV1(
 		const permission = permissionForCache(token, cacheName);
 		if (!permission.push && !permission.delete)
 			return errorResponse(403, 'Permission denied: push or delete');
-		await requireBudget(env.BACKEND_READ_LIMITER, backendReadKey(request));
+		await requireBackendReadBudget(env, request.headers.get('CF-Connecting-IP'));
 		const read = db.readSession(env.ATTIC_DB);
 		const cache = await db.findCache(read, cacheName);
 		if (!cache) return errorResponse(404, `Cache not found: ${cacheName}`, 'NoSuchCache');
@@ -1393,7 +1406,7 @@ async function handleV1(
 		}
 		if (method === 'DELETE' && segments.length === 5) {
 			const hash = segments[4];
-			if (!/^[0-9a-z]{32}$/.test(hash)) return errorResponse(400, 'Invalid store path hash');
+			if (!db.STORE_PATH_HASH_RE.test(hash)) return errorResponse(400, 'Invalid store path hash');
 			const removed = await db.removeGcRoot(env.ATTIC_DB, cache.id, hash);
 			if (!removed) return errorResponse(404, 'Path is not pinned');
 			return jsonResponse({ unpinned: hash });

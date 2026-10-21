@@ -23,8 +23,9 @@ import { dbAll, dbBatch, readSession, runBatched } from './db';
 import { recordGuard } from './metrics';
 import { mapConcurrent, readAll, sleep, withinMs, type ExecutionContext } from './platform';
 import { TtlMemo } from './ttl-memo';
-import { AdmissionError, clientKey, requireBudget, takeBudget, takeBudgetUnits } from './admission';
+import { AdmissionError, requireBackendReadBudget, takeBudget, takeBudgetUnits } from './admission';
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
+import { validateUpstreamUrl } from './upstream-url';
 
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];
@@ -887,7 +888,7 @@ export async function resolveUpstreamNar(
 	// The work worth charging is the fan-out below, so a cache with no
 	// upstreams keeps its plain 404 even under budget pressure.
 	if (upstreams.length > 0) {
-		await requireBudget(env.BACKEND_READ_LIMITER, clientKey('backend-read', ip));
+		await requireBackendReadBudget(env, ip);
 	}
 	const url = await findUpstreamNar(
 		session,
@@ -994,7 +995,11 @@ function parseUpstreamConfig([upstreams, subs, caches]: { results: unknown[] }[]
 		entry.set(row.upstream_id, row.mode);
 	}
 	return {
-		upstreams: upstreams.results as RegistryRow[],
+		// Old rows predate URL validation. Refuse them on the read path too so
+		// an upgrade cannot retain an unsafe anonymous-fetch destination.
+		upstreams: (upstreams.results as RegistryRow[]).filter(
+			(row) => !('error' in validateUpstreamUrl(row.url))
+		),
 		overrides,
 		caches: caches.results as { id: number; name: string }[]
 	};

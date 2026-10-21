@@ -1,6 +1,6 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import * as db from './db';
-import { AdmissionError, CLIENT_IP_HEADER, clientKey, requireBudget } from './admission';
+import { AdmissionError, CLIENT_IP_HEADER, requireBackendReadBudget } from './admission';
 import type { ExecutionContext } from './platform';
 import { stripSha256 } from '../attic/nix-base32';
 import { hedgedReplicaRead } from './read-hedge';
@@ -23,7 +23,7 @@ export function chargeBackendRead(env: App.Platform['env'], request: Request): P
 
 /** Charge one D1 read to a client's backend-read budget; free without an IP. */
 async function chargeClientRead(env: App.Platform['env'], clientIp: string | null): Promise<void> {
-	if (clientIp) await requireBudget(env.BACKEND_READ_LIMITER, clientKey('backend-read', clientIp));
+	await requireBackendReadBudget(env, clientIp);
 }
 
 /** Stamp (or clear) the client IP the store charges its backend-read budget

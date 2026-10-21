@@ -144,9 +144,16 @@ npm run deploy   # migrate + build, then wrangler deploy; WAF rules in parallel
 ## After the first deploy
 
 Open your `APP_URL` and sign in. The first user to sign in, by any method,
-becomes the active admin and instance owner. Whenever no admin exists (say,
-after a manual database edit), the next user to sign in is promoted the same
-way.
+becomes the active admin and instance owner. Nimbus records this bootstrap
+permanently. If every administrator is removed by mistake, first make sure the
+next signer is the intended owner, then explicitly reopen bootstrap:
+
+```bash
+npx wrangler d1 execute attic --remote --config=wrangler.local.jsonc \
+  --command="DELETE FROM bootstrap_state WHERE id = 1"
+```
+
+The next successful sign-in claims ownership and closes bootstrap again.
 
 A fresh database has no upstreams. Add `https://cache.nixos.org` (key
 `cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=`) under

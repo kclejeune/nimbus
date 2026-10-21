@@ -16,10 +16,10 @@ export class RequestBodyError extends Error {
 /** A sender that stops mid-body must not hold an upload slot; 30 s idle is
  * generous for any live TCP stream. */
 export const BODY_IDLE_TIMEOUT_MS = 30_000;
-/** Absolute backstop against a deliberate trickle. Matches the Go client's
- * request timeout: a legitimate 100 MB PUT on a slow uplink takes far longer
- * than the five minutes this first shipped with. */
-export const BODY_MAX_DURATION_MS = 30 * 60_000;
+/** Absolute backstop against a deliberate trickle holding scarce upload
+ * admission. Ten minutes still permits a 100 MiB NAR at roughly 170 KiB/s;
+ * larger uploads use the resumable client-side chunk protocol. */
+export const BODY_MAX_DURATION_MS = 10 * 60_000;
 
 export const bodyDeadline = (): number => Date.now() + BODY_MAX_DURATION_MS;
 

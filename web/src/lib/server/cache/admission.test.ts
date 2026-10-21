@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { takeBudget, requireBudget, requireStorageBudget, AdmissionError } from './admission';
+import {
+	takeBudget,
+	requireBudget,
+	requireStorageBudget,
+	requireBackendReadBudget,
+	AdmissionError
+} from './admission';
 import type { LimitOutcome } from '../rate-limit';
 import {
 	fetchUpstreamNarInfo,
@@ -60,6 +66,20 @@ describe('storage budget telemetry', () => {
 });
 
 describe('work admission', () => {
+	it('charges cold reads to both per-client and aggregate budgets', async () => {
+		const client = { limit: vi.fn(async () => ({ success: true })) };
+		const aggregate = { limit: vi.fn(async () => ({ success: true })) };
+		await requireBackendReadBudget(
+			{
+				BACKEND_READ_LIMITER: client,
+				BACKEND_READ_GLOBAL_LIMITER: aggregate
+			} as unknown as App.Platform['env'],
+			'203.0.113.9'
+		);
+		expect(client.limit).toHaveBeenCalledWith({ key: 'backend-read:203.0.113.9' });
+		expect(aggregate.limit).toHaveBeenCalledWith({ key: 'backend-read-global' });
+	});
+
 	it('fails closed on limiter failure and gives a retryable no-store response', async () => {
 		const limiter = {
 			limit: async () => {

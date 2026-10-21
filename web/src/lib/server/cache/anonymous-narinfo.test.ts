@@ -26,7 +26,7 @@ const env = {
 	JWT_HS256_SECRET_BASE64: btoa('anonymous-narinfo-tests')
 } as unknown as App.Platform['env'];
 let sequence = 0;
-const freshHash = () => `anonymous${(sequence++).toString().padStart(23, '0')}`;
+const freshHash = () => (sequence++).toString().padStart(32, '0');
 const route = (hash: string) => `/_anonymous_narinfo_v2/${hash}`;
 
 function edge() {

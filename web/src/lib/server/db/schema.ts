@@ -1,4 +1,5 @@
-import { sqliteTable, text, integer, primaryKey, index } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
+import { sqliteTable, text, integer, primaryKey, index, check } from 'drizzle-orm/sqlite-core';
 
 // --- better-auth managed tables ---------------------------------------------
 // Column names match better-auth's default field names (camelCase) so no
@@ -62,6 +63,17 @@ export const verification = sqliteTable('verification', {
 });
 
 // --- admin-owned tables ------------------------------------------------------
+
+/** Durable one-way latch for the first-user owner bootstrap. The singleton
+ * row is removed only by the documented operator recovery procedure. */
+export const bootstrapState = sqliteTable(
+	'bootstrap_state',
+	{
+		id: integer('id').primaryKey(),
+		completedAt: integer('completed_at', { mode: 'timestamp' }).notNull()
+	},
+	(t) => [check('bootstrap_state_singleton', sql`${t.id} = 1`)]
+);
 
 /** API tokens minted for users (CI/programmatic access). Only the hash is stored. */
 export const apiToken = sqliteTable(

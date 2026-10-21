@@ -15,6 +15,7 @@ import {
 } from './missing-paths';
 import type { ExecutionContext } from './platform';
 import { ROOT_UPSTREAM_TAG, upstreamPassthroughTag } from './store';
+export { validateUpstreamUrl } from './upstream-url';
 
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];

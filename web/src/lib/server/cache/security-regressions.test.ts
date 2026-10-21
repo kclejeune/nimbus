@@ -240,7 +240,14 @@ describe('audit security regressions', () => {
 		const again = await handleCdcQuery(
 			env,
 			undefined,
-			{ ...manifest, nar_info: { ...manifest.nar_info, store_path_hash: 'd'.repeat(32) } },
+			{
+				...manifest,
+				nar_info: {
+					...manifest.nar_info,
+					store_path_hash: 'd'.repeat(32),
+					store_path: `/nix/store/${'d'.repeat(32)}-test`
+				}
+			},
 			() => false
 		).then(
 			(r) => r.json() as Promise<{ missing_chunk_hashes: string[]; proofs: Record<string, string> }>
@@ -323,7 +330,12 @@ describe('audit security regressions', () => {
 		const complete = (proof: string, storePathHash = manifest.nar_info.store_path_hash) =>
 			handleCdcComplete(live, undefined, {
 				...manifest,
-				nar_info: { ...manifest.nar_info, cache: 'attacker', store_path_hash: storePathHash },
+				nar_info: {
+					...manifest.nar_info,
+					cache: 'attacker',
+					store_path_hash: storePathHash,
+					store_path: `/nix/store/${storePathHash}-test`
+				},
 				chunks: [{ hash, size: 3, proof }]
 			});
 

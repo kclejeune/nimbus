@@ -32,7 +32,7 @@ import { handle } from './hooks.server';
 import { requireAdmin } from '$lib/server/auth/guard';
 import { mintSessionToken } from '$lib/server/auth/cf-access';
 
-// Unbound first() is the bootstrap claim's admin-exists probe: an admin exists.
+// Unbound first() is the bootstrap claim's durable latch probe: it is closed.
 const binding = {
 	prepare: () => ({ first: async () => ({ 1: 1 }), bind: () => ({ first: mocks.primary }) })
 };

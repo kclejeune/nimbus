@@ -36,7 +36,7 @@ export const load: PageServerLoad = async ({ platform, locals, url }) => {
 		throw error(404, `Cache "${[...requested][0]}" not found`);
 	}
 
-	const q = (url.searchParams.get('q') ?? '').trim();
+	const q = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
 	const page = parsePage(url.searchParams.get('page'));
 	const cacheNames = inScope.map((c) => c.name);
 

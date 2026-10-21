@@ -19,7 +19,7 @@ export const load: PageServerLoad = async ({ platform, params, url, locals }) =>
 
 	const sort = parseSort(url.searchParams.get('sort'));
 	const dir = parseDir(url.searchParams.get('dir'));
-	const q = (url.searchParams.get('q') ?? '').trim();
+	const q = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
 
 	const { cache, access } = await requireCacheBrowse(locals, db, params.name);
 	// Pinning (retention) is the layout's cacheViewer.canConfigure.
