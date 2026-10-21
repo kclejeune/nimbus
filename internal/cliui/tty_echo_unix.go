@@ -1,6 +1,6 @@
 //go:build linux || darwin
 
-package main
+package cliui
 
 import (
 	"os"

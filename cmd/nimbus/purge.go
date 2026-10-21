@@ -184,14 +184,22 @@ func (r closurePurger) run(ctx context.Context, apply bool) error {
 		return err
 	}
 	removed := 0
-	for i, group := range groups {
+	totalGroups, completedGroups := 0, 0
+	for _, group := range groups {
+		if len(group.targets) > 0 {
+			totalGroups++
+		}
+	}
+	for _, group := range groups {
 		if len(group.targets) == 0 {
 			continue
 		}
-		work.update(
+		work.counted(
+			completedGroups,
+			totalGroups,
 			"Applying purge group %d/%d (%d reviewed paths; %d removed)",
-			i+1,
-			len(groups),
+			completedGroups+1,
+			totalGroups,
 			len(group.targets),
 			removed,
 		)
@@ -205,6 +213,15 @@ func (r closurePurger) run(ctx context.Context, apply bool) error {
 			return err
 		}
 		removed += result.Removed
+		completedGroups++
+		work.counted(
+			completedGroups,
+			totalGroups,
+			"Applied purge group %d/%d (%d paths removed)",
+			completedGroups,
+			totalGroups,
+			removed,
+		)
 		if result.PendingPurge {
 			pending++
 		}

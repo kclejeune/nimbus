@@ -1,4 +1,4 @@
-package main
+package cliui
 
 import "golang.org/x/sys/unix"
 

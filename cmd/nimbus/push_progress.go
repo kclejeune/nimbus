@@ -12,52 +12,29 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/term"
 
+	"github.com/kclejeune/nimbus/internal/cliui"
 	"github.com/kclejeune/nimbus/internal/nix"
 	"github.com/kclejeune/nimbus/internal/push"
 )
 
-var (
-	progressAccent  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7D56F4"))
-	progressSuccess = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
-	progressFailure = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4672"))
-	progressMuted   = lipgloss.NewStyle().Foreground(lipgloss.Color("#777777"))
-)
-
 func pushProgressFactory(out *os.File) func() push.ProgressReporter {
-	if !term.IsTerminal(out.Fd()) || os.Getenv("TERM") == "dumb" {
+	if _, ok := cliui.TerminalFile(out); !ok {
 		return nil
 	}
 	return func() push.ProgressReporter { return newTTYPushProgress(out) }
 }
 
 type ttyPushProgress struct {
-	program     *tea.Program
-	out         *os.File
-	restoreEcho func()
-	done        chan struct{}
+	program *cliui.Program
 }
 
 func newTTYPushProgress(out *os.File) *ttyPushProgress {
-	model := newPushProgressModel()
-	program := tea.NewProgram(
-		model,
-		tea.WithInput(nil),
-		tea.WithOutput(out),
-		// Fang owns process signals and cancels the command context. A nested
-		// progress renderer must not compete with it for Ctrl-C.
-		tea.WithoutSignalHandler(),
-	)
-	return &ttyPushProgress{program: program, out: out, done: make(chan struct{})}
+	return &ttyPushProgress{program: cliui.NewProgram(out, newPushProgressModel())}
 }
 
 func (r *ttyPushProgress) Start(cache string) {
-	r.restoreEcho = suppressTTYEcho(r.out)
-	go func() {
-		defer close(r.done)
-		_, _ = r.program.Run()
-	}()
+	r.program.Start()
 	r.program.Send(pushStartMsg{cache: cache})
 }
 
@@ -86,9 +63,7 @@ func (r *ttyPushProgress) PathFinished(result push.PathProgress) {
 }
 
 func (r *ttyPushProgress) Stop() {
-	r.program.Send(pushStopMsg{})
-	<-r.done
-	r.restoreEcho()
+	r.program.Stop(pushStopMsg{})
 }
 
 type (
@@ -155,12 +130,10 @@ type pushProgressModel struct {
 }
 
 func newPushProgressModel() pushProgressModel {
-	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(progressAccent))
-	bar := progress.New(progress.WithDefaultBlend(), progress.WithScaled(true))
-	bar.SetWidth(64)
-	pathBar := progress.New(progress.WithDefaultBlend(), progress.WithScaled(true))
-	pathBar.SetWidth(16)
-	pathBar.PercentageStyle = progressMuted
+	spin := cliui.NewSpinner()
+	bar := cliui.NewBar(64)
+	pathBar := cliui.NewBar(16)
+	pathBar.PercentageStyle = cliui.Muted
 	return pushProgressModel{
 		spinner: spin,
 		bar:     bar,
@@ -204,11 +177,11 @@ func (m pushProgressModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if result.Err != nil {
 			failure := fmt.Sprintf("%s: %v", name, result.Err)
 			m.failures = append(m.failures, failure)
-			line = progressFailure.Render("✗") + " " + failure
+			line = cliui.Failure.Render("✗") + " " + failure
 		} else {
 			m.completedBytes += result.NarSize
-			line = progressSuccess.Render("✓") + " " + name + " " +
-				progressMuted.Render(result.Suffix())
+			line = cliui.Success.Render("✓") + " " + name + " " +
+				cliui.Muted.Render(result.Suffix())
 		}
 		// Finished paths scroll above the live region so the history of a
 		// push survives the way plain line output does.
@@ -248,7 +221,7 @@ func (m pushProgressModel) View() tea.View {
 			"%s %s %s",
 			m.spinner.View(),
 			m.stage,
-			progressMuted.Render(pushDestination(m.cache)),
+			cliui.Muted.Render(pushDestination(m.cache)),
 		))
 	}
 	if m.done {
@@ -263,7 +236,7 @@ func (m pushProgressModel) View() tea.View {
 		fraction = float64(transferred) / float64(m.totalBytes)
 	}
 	lines := []string{
-		fmt.Sprintf("%s Pushing to %s", m.spinner.View(), progressAccent.Render(m.cache)),
+		fmt.Sprintf("%s Pushing to %s", m.spinner.View(), cliui.Accent.Render(m.cache)),
 		m.bar.ViewAs(fraction),
 		fmt.Sprintf(
 			"%d/%d paths  %s/%s%s",
@@ -293,20 +266,20 @@ func (m pushProgressModel) finalView() string {
 	if m.total == 0 {
 		return fmt.Sprintf(
 			"%s Nothing to push to %s%s",
-			progressSuccess.Render("✓"),
-			progressAccent.Render(m.cache),
+			cliui.Success.Render("✓"),
+			cliui.Accent.Render(m.cache),
 			alreadyPresentLabel(m.alreadyPresent),
 		)
 	}
 
 	succeeded := m.completed - len(m.failures)
-	icon := progressSuccess.Render("✓")
+	icon := cliui.Success.Render("✓")
 	verb := fmt.Sprintf("Pushed %d paths", succeeded)
 	if m.completed < m.total {
-		icon = progressFailure.Render("✗")
+		icon = cliui.Failure.Render("✗")
 		verb = fmt.Sprintf("Stopped after %d/%d paths", m.completed, m.total)
 	} else if len(m.failures) > 0 {
-		icon = progressFailure.Render("✗")
+		icon = cliui.Failure.Render("✗")
 		verb = fmt.Sprintf("Pushed %d/%d paths", succeeded, m.total)
 	}
 	line := fmt.Sprintf(
@@ -314,7 +287,7 @@ func (m pushProgressModel) finalView() string {
 		icon,
 		verb,
 		push.FormatBytes(m.completedBytes),
-		progressAccent.Render(m.cache),
+		cliui.Accent.Render(m.cache),
 		elapsed,
 		alreadyPresentLabel(m.alreadyPresent),
 	)
@@ -322,7 +295,7 @@ func (m pushProgressModel) finalView() string {
 		return line
 	}
 	for _, failure := range m.failures {
-		line += "\n  " + progressFailure.Render("✗") + " " + failure
+		line += "\n  " + cliui.Failure.Render("✗") + " " + failure
 	}
 	return line
 }
@@ -336,7 +309,7 @@ func (m pushProgressModel) activeLines() []string {
 		lines = append(lines, m.activeLine(a))
 	}
 	if rest := len(m.active) - shown; rest > 0 {
-		lines = append(lines, progressMuted.Render(fmt.Sprintf("  +%d more uploading", rest)))
+		lines = append(lines, cliui.Muted.Render(fmt.Sprintf("  +%d more uploading", rest)))
 	}
 	return lines
 }
@@ -351,7 +324,7 @@ func (m pushProgressModel) activeLine(a *activeUpload) string {
 		"  %s %s  %s",
 		name,
 		m.pathBar.ViewAs(a.fraction()),
-		progressMuted.Render(push.FormatBytes(a.sent)+"/"+push.FormatBytes(a.size)),
+		cliui.Muted.Render(push.FormatBytes(a.sent)+"/"+push.FormatBytes(a.size)),
 	))
 }
 

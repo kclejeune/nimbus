@@ -227,7 +227,8 @@ pushes locally available missing dependencies with their full closures. It
 requires pull and push permission and a Worker with the repair endpoint.
 Both commands show a plan by default; only `--apply` uploads or deletes paths.
 Verification and planning show a live heartbeat on terminals and stage counters
-in logs; repair uploads keep their per-path transfer progress. Unanswered
+in logs. Local store checks and purge application show progress bars when their
+totals are known; repair uploads keep their per-path transfer progress. Unanswered
 upstream checks are listed as **unverified**, separately from confirmed misses.
 Repair can upload locally available paths from either category, and exits
 nonzero when an applied repair still has unavailable dependencies. It cannot recover bytes no machine or upstream still

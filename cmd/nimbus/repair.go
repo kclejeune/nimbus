@@ -99,9 +99,11 @@ func (r closureRepair) run(ctx context.Context, dryRun bool) error {
 	var available, unavailable []string
 	// Bound nix-store argv size even for a large repair backlog.
 	for start := 0; start < len(paths); start += repairBatchSize {
-		p.update(
+		p.counted(
+			start,
+			len(paths),
 			"Checking local store: %d/%d dependencies",
-			min(start+repairBatchSize, len(paths)),
+			start,
 			len(paths),
 		)
 		valid, invalid, err := r.local(ctx, paths[start:min(start+repairBatchSize, len(paths))])
@@ -110,6 +112,13 @@ func (r closureRepair) run(ctx context.Context, dryRun bool) error {
 		}
 		available = append(available, valid...)
 		unavailable = append(unavailable, invalid...)
+		p.counted(
+			min(start+repairBatchSize, len(paths)),
+			len(paths),
+			"Checked local store: %d/%d dependencies",
+			min(start+repairBatchSize, len(paths)),
+			len(paths),
+		)
 	}
 	p.close()
 	fmt.Fprintf(
