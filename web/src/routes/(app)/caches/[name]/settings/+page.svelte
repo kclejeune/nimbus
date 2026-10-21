@@ -135,9 +135,10 @@
 
 		<SettingsSection title="Upstream caches" flush>
 			{#snippet description()}
-				Paths an enabled upstream already has are skipped on push and served through this cache.
-				Persist keeps a re-signed copy here, safe from upstream GC. Upstreams are server-wide{#if isAdmin},
-					managed in <a
+				Paths an enabled upstream already has are served through this cache. Persist keeps a
+				re-signed copy here for zstd or uncompressed NARs up to 16 MiB compressed and uncompressed,
+				safe from upstream GC. Larger or unsupported NARs stay upstream until a client pushes them
+				here. Upstreams are server-wide{#if isAdmin}, managed in <a
 						href="/upstreams"
 						class="font-medium text-foreground underline-offset-4 hover:underline">Upstreams</a
 					>{/if}.

@@ -4,8 +4,8 @@ import { withRequestSpan } from './tracing';
 
 it('groups combined narinfo reads without a store-path hash in the route', () => {
 	expect(
-		routeTemplate(new Request(`https://cache.test/_anonymous_narinfo_v1/${'a'.repeat(32)}`))
-	).toBe('GET /_anonymous_narinfo_v1/:hash');
+		routeTemplate(new Request(`https://cache.test/_anonymous_narinfo_v2/${'a'.repeat(32)}`))
+	).toBe('GET /_anonymous_narinfo_v2/:hash');
 });
 
 it('normalizes the invocation root before entering a child span', async () => {

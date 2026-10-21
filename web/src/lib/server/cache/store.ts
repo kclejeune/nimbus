@@ -23,7 +23,7 @@ import {
 	viaStore
 } from './metadata';
 import { errorResponse, withVisibility } from '../attic/http';
-import { buildNarInfo, narInfoSignatureValid } from '../attic/narinfo';
+import { addNarInfoSignature, buildNarInfo, narInfoSignatureValid } from '../attic/narinfo';
 import { absoluteNarinfoUrl } from '../attic/nar-url';
 import { extractPublicKey } from '../attic/signing';
 import { hedgedReplicaRead } from './read-hedge';
@@ -49,15 +49,17 @@ import { stripSha256 } from '../attic/nix-base32';
 
 type Env = App.Platform['env'];
 
-// NAR URLs identify raw content. Cache for a year; representation-changing
-// repairs explicitly purge body and metadata tags together.
-export const STORE_POLICY_VERSION = '2';
+// Version narinfo bodies when signing/representation policy changes. NAR body
+// keys do not use this version and retain their content-addressed edge cache.
+export const STORE_POLICY_VERSION = '3';
 /** Every public NAR body; purged when a cache's visibility changes or it is
  * destroyed, since the unscoped body route cannot tell contributing caches
  * apart. */
 export const PUBLIC_NARS_TAG = 'public-nars';
 
 export const narBodyTag = (hash: string) => `nar-body:${stripSha256(hash)}`;
+// NAR URLs identify raw content. Cache for a year; representation-changing
+// repairs explicitly purge body and metadata tags together.
 const NAR_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 // narinfo entries are invalidated actively — GC purges the tag of every
 // object it deletes, uploads purge+rewarm on (re-)push, and keypair rotation
@@ -92,8 +94,9 @@ function upstreamNarinfoCacheControl(upstream: Upstream): string {
 /**
  * The shared response for an upstream passthrough narinfo (per-cache and
  * root proxy): served with an absolute download URL and the upstream's own
- * signature, edge-cached for the upstream's TTL, marked for pull-through when
- * the winning upstream resolves to a persist cache.
+ * signature (plus the proxy signature at the root), edge-cached for the
+ * upstream's TTL, marked for pull-through when the winning upstream resolves
+ * to a persist cache.
  */
 function upstreamNarinfoResponse(
 	hit: { text: string; upstream: Upstream },
@@ -349,7 +352,9 @@ export async function serveStore(
 	}
 
 	await chargeBackendRead(env, request);
-	if (segments.length === 2 && segments[0] === '_anonymous_narinfo_v1') {
+	// v2 excludes old cross-version envelopes whose upstream body was signed
+	// only by the upstream, even when its nested body cache is invalidated.
+	if (segments.length === 2 && segments[0] === '_anonymous_narinfo_v2') {
 		return serveAnonymousNarInfo(request, env, ctx, segments[1]);
 	}
 
@@ -532,12 +537,12 @@ async function serveProxyNarInfo(
 }
 
 /**
- * Root-proxy upstream passthrough: serve the upstream's narinfo verbatim (its
- * signature is the upstream's own, which clients substituting through the
- * root already trust — nothing is re-signed). Upstream content is public, so
- * responses are always cacheable; both hits and misses carry the
- * ROOT_UPSTREAM_TAG_NS tag so ingestion can evict them once a path lands
- * locally.
+ * Root-proxy upstream passthrough: add the proxy signature after the upstream
+ * narinfo has been verified against its registered key. Clients need only the
+ * proxy key, even before persistence or when ingestion is impossible. Retain
+ * the upstream signature for ingest's independent trust recheck. Both hits
+ * and misses carry the ROOT_UPSTREAM_TAG_NS tag so ingestion can evict them
+ * once a path lands locally.
  */
 async function serveRootUpstreamNarInfo(
 	env: Env,
@@ -567,7 +572,20 @@ async function serveRootUpstreamNarInfo(
 		return errorResponse(503, 'Upstream probe budget exhausted', undefined, {
 			'Retry-After': '60'
 		});
-	if (hit) return withVisibility(upstreamNarinfoResponse(hit, tag), true);
+	if (hit) {
+		try {
+			const keypair = await getProxyKeypair(env);
+			const text = await addNarInfoSignature(hit.text, keypair);
+			return withVisibility(upstreamNarinfoResponse({ ...hit, text }, tag), true);
+		} catch (error) {
+			// A foreign-signature fallback would still fail for proxy-only clients.
+			// Do not cache it: key access/signing must retry on the next request.
+			console.warn(`upstream proxy signing failed: ${error}`);
+			return errorResponse(503, 'Narinfo signing temporarily unavailable', undefined, {
+				'Retry-After': '60'
+			});
+		}
+	}
 	const absent = errorResponse(404, 'Not found', 'NoSuchObject');
 	absent.headers.set('Cache-Control', NARINFO_404_CACHE_CONTROL);
 	absent.headers.set('Cache-Tag', tag);

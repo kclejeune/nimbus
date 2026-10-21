@@ -139,6 +139,22 @@ export async function parsedNarInfoSignatureValid(
 	return false;
 }
 
+/** Add a signature to an already-verified upstream narinfo without changing
+ * its transport fields or dropping the upstream signature needed by ingest.
+ * The caller must verify the original against its registered trust key first. */
+export async function addNarInfoSignature(text: string, keypair: string): Promise<string> {
+	const parsed = parseNarInfo(text);
+	if (!parsed) throw new Error('Cannot sign malformed narinfo');
+	const fingerprint = computeFingerprint(
+		parsed.storePath,
+		parsed.narHash,
+		parsed.narSize,
+		parsed.references
+	);
+	const signature = await signMessage(keypair, fingerprint);
+	return `${text.endsWith('\n') ? text : text + '\n'}Sig: ${signature}\n`;
+}
+
 export async function buildNarInfo(
 	object: NarInfoObject,
 	nar: NarInfoNar,

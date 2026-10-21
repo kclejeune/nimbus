@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildNarInfo, narInfoSignatureValid, parseNarInfo } from './narinfo';
+import { addNarInfoSignature, buildNarInfo, narInfoSignatureValid, parseNarInfo } from './narinfo';
 import { extractPublicKey, generateKeypair } from './signing';
 
 const object = {
@@ -45,6 +45,30 @@ describe('parseNarInfo', () => {
 	it('returns null when fingerprint fields are missing', () => {
 		expect(parseNarInfo('URL: nar/x.nar\nCompression: zstd\n')).toBeNull();
 		expect(parseNarInfo('')).toBeNull();
+	});
+});
+
+describe('addNarInfoSignature', () => {
+	it('preserves upstream metadata and signatures while adding a valid proxy signature', async () => {
+		const upstreamKey = await generateKeypair('upstream');
+		const proxyKey = await generateKeypair('proxy');
+		const original =
+			(await buildNarInfo(
+				{ ...object, refs: JSON.stringify(['d'.repeat(32) + '-dep']) },
+				nar,
+				chunks,
+				upstreamKey
+			)) + 'X-Upstream-Metadata: preserved\n';
+		const signed = await addNarInfoSignature(original.trimEnd(), proxyKey);
+		expect(signed.startsWith(original)).toBe(true);
+		expect(await narInfoSignatureValid(signed, extractPublicKey(upstreamKey))).toBe(true);
+		expect(await narInfoSignatureValid(signed, extractPublicKey(proxyKey))).toBe(true);
+	});
+
+	it('rejects malformed narinfo', async () => {
+		await expect(
+			addNarInfoSignature('URL: nar/x.nar\n', await generateKeypair('proxy'))
+		).rejects.toThrow('Cannot sign malformed narinfo');
 	});
 });
 

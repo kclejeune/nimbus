@@ -619,7 +619,7 @@ async function anonymousNarInfo(
 ): Promise<{ cached: Candidates; response?: Response; winnerId: number | null }> {
 	const internal = internalRequest(
 		env,
-		`/_anonymous_narinfo_v1/${hash}`,
+		`/_anonymous_narinfo_v2/${hash}`,
 		request.headers.get('CF-Connecting-IP')
 	);
 	const result = await measure('candidateLoopback', () =>

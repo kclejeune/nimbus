@@ -4,7 +4,7 @@ import { invalidateAfterUpload, serveStore } from './store';
 import { testDatabase } from './test-db';
 import { invalidateCacheRow } from './cache-lookup';
 import { clearCandidateMemos } from './metadata';
-import { clearUpstreamsMemo } from './missing-paths';
+import { clearUpstreamsMemo, PERSIST_MAX_NAR_BYTES } from './missing-paths';
 import { configureCache } from './cache-config';
 import { getProxyKeypair } from './proxy';
 import * as proxy from './proxy';
@@ -27,7 +27,7 @@ const env = {
 } as unknown as App.Platform['env'];
 let sequence = 0;
 const freshHash = () => `anonymous${(sequence++).toString().padStart(23, '0')}`;
-const route = (hash: string) => `/_anonymous_narinfo_v1/${hash}`;
+const route = (hash: string) => `/_anonymous_narinfo_v2/${hash}`;
 
 function edge() {
 	const entries = new Map<string, { text: string; headers: Headers; storedAt: number }>();
@@ -83,7 +83,7 @@ function hold(hash: string, cacheId = 1, suffix = 'test') {
 		.run(cacheId, hash, `/nix/store/${hash}-${suffix}`);
 }
 
-async function upstream(hash: string, mode = 'redirect') {
+async function upstream(hash: string, mode = 'redirect', narSize = 100) {
 	const key = await generateKeypair('upstream');
 	const text = await buildNarInfo(
 		{
@@ -94,7 +94,7 @@ async function upstream(hash: string, mode = 'redirect') {
 			deriver: null,
 			ca: null
 		},
-		{ nar_hash: `sha256:${'c'.repeat(64)}`, nar_size: 100, compression: 'zstd' },
+		{ nar_hash: `sha256:${'c'.repeat(64)}`, nar_size: narSize, compression: 'zstd' },
 		[],
 		key
 	);
@@ -238,13 +238,16 @@ it('uses existing priority purges to select a different public holder', async ()
 	expect(await (await get(hash)).text()).toContain(`${hash}-other`);
 });
 
-it('serves upstream narinfo in one warm loopback with an absolute, still-signed URL', async () => {
+it('serves proxy-signed upstream narinfo in one warm loopback with an absolute URL', async () => {
 	const hash = freshHash();
 	const remote = await upstream(hash);
 	const { get, fetch } = edge();
 	const text = await (await get(hash)).text();
 	expect(text).toContain('URL: https://upstream.test/cache/nar/');
 	expect(await narInfoSignatureValid(text, extractPublicKey(remote.key))).toBe(true);
+	expect(await narInfoSignatureValid(text, extractPublicKey(await getProxyKeypair(env)))).toBe(
+		true
+	);
 	const prepare = vi.spyOn(fixture.db, 'prepare');
 	expect(await (await get(hash)).text()).toBe(text);
 	expect(prepare).not.toHaveBeenCalled();
@@ -252,9 +255,97 @@ it('serves upstream narinfo in one warm loopback with an absolute, still-signed 
 	expect(remote.fetch).toHaveBeenCalledOnce();
 });
 
+it('bypasses upstream-only signatures cached by an older deployment in both cache layers', async () => {
+	const hash = freshHash();
+	const remote = await upstream(hash);
+	const { get, entries } = edge();
+	const headers = new Headers({ 'Cache-Control': 'public, max-age=3600' });
+	entries.set(`/_anonymous_narinfo_v1/${hash}`, {
+		text: JSON.stringify({
+			rows: [],
+			winnerId: null,
+			status: 200,
+			responseFilledAt: Date.now(),
+			headers: [...headers.entries()],
+			text: remote.text
+		}),
+		headers,
+		storedAt: Date.now()
+	});
+	entries.set(`/_proxy_upstream/${hash}.narinfo?policy=2`, {
+		text: remote.text,
+		headers,
+		storedAt: Date.now()
+	});
+	const response = await get(hash);
+	expect(response.status).toBe(200);
+	expect(
+		await narInfoSignatureValid(await response.text(), extractPublicKey(await getProxyKeypair(env)))
+	).toBe(true);
+	expect(remote.fetch).toHaveBeenCalledOnce();
+});
+
+it.each(['anonymous', 'authenticated'] as const)(
+	'signs oversized persist-mode upstream paths with the proxy key for %s reads',
+	async (caller) => {
+		const hash = freshHash();
+		const remote = await upstream(hash, 'persist', PERSIST_MAX_NAR_BYTES + 1);
+		const publicKey = extractPublicKey(await getProxyKeypair(env));
+		const token = await mintAtticToken(env.JWT_HS256_SECRET_BASE64!, 'reader', { test: { r: 1 } });
+		const headers = caller === 'authenticated' ? { Authorization: `Bearer ${token}` } : undefined;
+		const { get, tasks } = edge();
+		for (let i = 0; i < 2; i++) {
+			const response = await get(hash, headers);
+			expect(response.status).toBe(200);
+			const text = await response.text();
+			expect(await narInfoSignatureValid(text, publicKey)).toBe(true);
+			expect(await narInfoSignatureValid(text, extractPublicKey(remote.key))).toBe(true);
+		}
+		await Promise.all(tasks);
+		expect(remote.fetch).toHaveBeenCalledOnce();
+	}
+);
+
+it.each(['key lookup', 'signing'] as const)(
+	'retries upstream proxy signing without caching a foreign-signature fallback after %s failure',
+	async (failure) => {
+		const hash = freshHash();
+		await upstream(hash);
+		const publicKey = extractPublicKey(await getProxyKeypair(env));
+		const error = new Error('temporary signing failure');
+		if (failure === 'key lookup') vi.spyOn(proxy, 'getProxyKeypair').mockRejectedValueOnce(error);
+		else vi.spyOn(signing, 'signMessage').mockRejectedValueOnce(error);
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const { get, entries } = edge();
+		const failed = await get(hash);
+		expect(failed.status).toBe(503);
+		expect(failed.headers.get('Cache-Control')).toContain('no-store');
+		expect(entries.size).toBe(0);
+		const recovered = await get(hash);
+		expect(recovered.status).toBe(200);
+		expect(await narInfoSignatureValid(await recovered.text(), publicKey)).toBe(true);
+		expect(entries.has(route(hash))).toBe(true);
+	}
+);
+
+it('does not proxy-sign upstream metadata that fails the registered signature check', async () => {
+	const hash = freshHash();
+	const remote = await upstream(hash);
+	remote.fetch.mockImplementation(
+		async () => new Response(remote.text.replace('NarSize: 100', 'NarSize: 101'))
+	);
+	const sign = vi.spyOn(signing, 'signMessage');
+	const { get, tasks } = edge();
+	const response = await get(hash);
+	expect(response.status).toBe(404);
+	expect(await response.text()).not.toContain('Sig:');
+	expect(sign).not.toHaveBeenCalled();
+	await Promise.all(tasks);
+});
+
 it('keeps pull-through on the gateway context and strips its internal markers', async () => {
 	const hash = freshHash();
-	await upstream(hash, 'persist');
+	const remote = await upstream(hash, 'persist');
 	const { get, tasks } = edge();
 	for (let i = 0; i < 2; i++) {
 		const response = await get(hash);
@@ -271,6 +362,12 @@ it('keeps pull-through on the gateway context and strips its internal markers', 
 	expect(vi.mocked(persistUpstreamPath).mock.calls[0][4]).toContain(
 		'URL: https://upstream.test/cache/nar/'
 	);
+	expect(
+		await narInfoSignatureValid(
+			vi.mocked(persistUpstreamPath).mock.calls[0][4],
+			extractPublicKey(remote.key)
+		)
+	).toBe(true);
 });
 
 it('reuses a fresh upstream body when five-minute candidate metadata refills', async () => {

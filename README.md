@@ -53,7 +53,9 @@ object layout), but Cloudflare is the only supported target today.
   for membership in `OIDC_ACTIVATION_GROUP`.
 - **Unified cache endpoint.** The cache host's root is a substituter over
   every cache the requester can read: public caches plus private ones the
-  bearer token can pull, in priority order, re-signed with one proxy key. One
+  bearer token can pull, in priority order, re-signed with one proxy key.
+  Upstream narinfos are verified against their registered keys and also signed
+  with the proxy key, including paths that cannot be persisted. One
   `substituters` entry and one `trusted-public-keys` entry cover them all.
 - **Server-side compression.** Per-cache zstd (WASM), gzip, or none; brotli
   and xz NARs from older imports stay readable.
@@ -61,10 +63,13 @@ object layout), but Cloudflare is the only supported target today.
   TTL) in one registry. Each cache subscribes to each upstream as off,
   redirect, or persist, and enforced upstreams apply to every cache.
   `get-missing-paths` filters out paths an upstream already serves (with
-  cached verdicts), so they are never pushed. Reads of those paths pass the
-  narinfo through and redirect NARs to the upstream; persist mode also
-  ingests and re-signs them in the background. Every cache and upstream
-  offers a generated `nix.conf` snippet.
+  cached verdicts). Reads of those paths serve the narinfo and redirect NARs
+  to the upstream; persist mode also ingests them in the background. Ingestion
+  supports zstd or uncompressed NARs up to 16 MiB compressed and uncompressed;
+  other paths remain available from the upstream and are included in the next
+  client push. Per-cache endpoints retain upstream signatures until ingestion;
+  the unified endpoint also signs them with the proxy key. Every cache and
+  upstream offers a generated `nix.conf` snippet.
 - **Closure-aware GC.** Retention keeps the full closures of recently used
   paths and pins, so GC never leaves a broken closure. Per-cache age and size
   budgets, a global storage ceiling, eviction after pushes that exceed a

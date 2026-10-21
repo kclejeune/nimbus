@@ -319,7 +319,14 @@ after which they get a 503 with `Retry-After: 5`. CDC manifest calls are not gat
 ingestion never queues; it runs only when a slot is free. Body reads have a
 30 s idle deadline and a 30 min absolute backstop (the CLI's request timeout).
 Pull-through ingestion is limited to NARs up to 16 MiB decompressed; larger
-upstream NARs stay available by redirect.
+upstream NARs stay available by redirect. The compressed download is also
+capped at 16 MiB, and only zstd or uncompressed upstream NARs can be ingested.
+Persist-mode paths that cannot be ingested are included in the next client
+push so they can still be stored locally. The unified root endpoint verifies
+upstream narinfos and adds its proxy signature before serving them, so clients
+need only its proxy key even when persistence is pending or impossible.
+Per-cache endpoints serve the upstream signature until a local copy exists;
+clients using those endpoints must also trust their upstream keys.
 
 ### Oversized objects
 

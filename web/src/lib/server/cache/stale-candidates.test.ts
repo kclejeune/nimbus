@@ -65,7 +65,7 @@ function store(
 	const purged: string[] = [];
 	const fetch = vi.fn(async (request: Request) => {
 		const path = new URL(request.url).pathname;
-		if (path.startsWith('/_anonymous_narinfo_v1/')) {
+		if (path.startsWith('/_anonymous_narinfo_v2/')) {
 			const metadata = overrides.meta?.clone() ?? emptyEntry(entry);
 			const response = overrides.route
 				? overrides.route(path)
