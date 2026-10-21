@@ -106,6 +106,27 @@
 			description="A path is kept while anything recently pulled or pinned depends on it. Over the size limit, least recently used closures go first."
 		>
 			<div class="grid gap-4 sm:grid-cols-2">
+				<div class="space-y-2 sm:col-span-2">
+					<Label for="purge_broken_after_days"
+						>Automatically purge broken closures after (days)</Label
+					>
+					<Input
+						id="purge_broken_after_days"
+						name="purge_broken_after_days"
+						type="number"
+						min="1"
+						max="3650"
+						step="1"
+						placeholder="Disabled"
+						value={c.purgeBrokenAfterDays ?? ''}
+						disabled={!canConfigure}
+					/>
+					<p class="text-xs text-muted-foreground">
+						Leave blank to disable. Nightly GC waits this long after first confirming missing
+						dependencies and checks again before removal. Recovery or uncertain checks reset the
+						timer. Pins protect their full closures, and new uploads get the same delay.
+					</p>
+				</div>
 				<div class="space-y-2">
 					<Label for="retention_period">Max age (days)</Label>
 					<Input

@@ -5,6 +5,7 @@ import { narinfoTag, ROOT_UPSTREAM_TAG_NS } from './store';
 import { PURGE_TAG_LIMIT } from './purge';
 import { PURGE_INTERVAL_MS } from './purge-queue';
 import type { ExecutionContext } from './platform';
+import type { Upstream } from './missing-paths';
 
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];
@@ -29,6 +30,38 @@ interface Operation {
 	state: string;
 }
 
+const ENABLED_UPSTREAMS = `SELECT u.id,u.url,u.public_key,u.ttl,
+ CASE WHEN u.enforced=1 AND COALESCE(cu.mode,u.default_mode)='off' THEN 'redirect'
+ ELSE COALESCE(cu.mode,u.default_mode) END AS mode
+ FROM upstream u LEFT JOIN cache_upstream cu ON cu.upstream_id=u.id AND cu.cache_id=?1
+ WHERE u.enforced=1 OR COALESCE(cu.mode,u.default_mode)<>'off'`;
+const UPSTREAM_CONFIG = `(SELECT json_group_array(json_array(id,url,public_key,ttl,mode))
+ FROM (SELECT * FROM enabled ORDER BY id))`;
+
+/** Read from the primary, sharing the exact fingerprint used by deletion's
+ * atomic policy guard. Cached registry memos cannot authorize an auto purge. */
+export async function readPurgeUpstreams(db: D1, cacheId: number, cacheName: string) {
+	const row = await dbFirst<{ config: string }>(
+		db
+			.prepare(
+				`WITH enabled AS MATERIALIZED (${ENABLED_UPSTREAMS}) SELECT ${UPSTREAM_CONFIG} AS config`
+			)
+			.bind(cacheId)
+	);
+	const config = row!.config;
+	const entries = JSON.parse(config) as [number, string, string, number, 'redirect' | 'persist'][];
+	const upstreams: Upstream[] = entries.map(([id, url, publicKey, ttl, mode]) => ({
+		id,
+		url,
+		publicKey,
+		ttl,
+		mode,
+		persistInto: mode === 'persist' ? cacheName : null,
+		nixDefault: false
+	}));
+	return { config, upstreams };
+}
+
 // Read references from their source JSON, including uploads after GC's graph
 // watermark. Apply evaluates these CTEs once inside its atomic deletion batch,
 // recording the eligible IDs and their invalidation tags before deleting.
@@ -38,8 +71,11 @@ interface Operation {
 // The forward walk can read refs directly with indexed child lookups.
 const PURGE_CTES = `WITH RECURSIVE
  enabled AS MATERIALIZED (
-   SELECT u.id FROM upstream u LEFT JOIN cache_upstream cu ON cu.upstream_id=u.id AND cu.cache_id=?1
-   WHERE u.enforced=1 OR COALESCE(cu.mode,u.default_mode)<>'off'
+   ${ENABLED_UPSTREAMS}
+ ), auto_policy AS MATERIALIZED (
+   SELECT c.purge_broken_after_days AS days FROM cache c JOIN broken_purge_state s ON s.cache_id=c.id
+   WHERE c.id=?1 AND c.deleted_at IS NULL AND c.purge_broken_after_days=?5
+   AND s.policy_days=?5 AND s.upstream_config=${UPSTREAM_CONFIG}
  ), missing(hash) AS (
    SELECT value FROM json_each(?2) seed
    WHERE NOT EXISTS (SELECT 1 FROM object o JOIN nar n ON n.id=o.nar_id
@@ -47,6 +83,10 @@ const PURGE_CTES = `WITH RECURSIVE
    AND NOT EXISTS (SELECT 1 FROM enabled u WHERE NOT EXISTS (
      SELECT 1 FROM upstream_check uc WHERE uc.upstream_id=u.id AND uc.store_path_hash=seed.value
      AND uc.present=0 AND julianday(uc.checked_at)>=julianday('now','-1 day')))
+   AND (?5 IS NULL OR EXISTS (SELECT 1 FROM broken_reference b CROSS JOIN auto_policy a
+     WHERE b.cache_id=?1 AND b.ref_hash=seed.value AND b.upstream_config=${UPSTREAM_CONFIG}
+     AND julianday(b.first_missing_at)<=julianday('now')-a.days
+     AND julianday(b.last_checked_at)>=julianday('now','-1 hour')))
  ), edges(parent,child) AS MATERIALIZED (
    SELECT o.id,CAST(substr(j.value,1,32) AS TEXT) FROM object o,json_each(o.refs) j WHERE o.cache_id=?1
  ), affected(id) AS (
@@ -69,7 +109,14 @@ const PURGE_CTES = `WITH RECURSIVE
  ), eligible(id) AS (SELECT id FROM affected EXCEPT SELECT id FROM keep)
 `;
 
-function params(cacheId: number, references: string[], targets: PurgeTarget[] | null) {
+function params(
+	cacheId: number,
+	references: string[],
+	targets: PurgeTarget[] | null,
+	autoDays: number | null
+) {
+	if (autoDays !== null && (!Number.isInteger(autoDays) || autoDays < 1 || autoDays > 3650))
+		throw new Error('Invalid automatic purge policy');
 	return [
 		cacheId,
 		JSON.stringify(references),
@@ -84,11 +131,20 @@ function params(cacheId: number, references: string[], targets: PurgeTarget[] | 
 						detached_at
 					}))
 				),
-		new Date(Date.now() - INTEGRITY_PUSH_GRACE_MS).toISOString()
+		new Date(
+			Date.now() - Math.max(INTEGRITY_PUSH_GRACE_MS, (autoDays ?? 0) * 86400_000)
+		).toISOString(),
+		autoDays
 	];
 }
 
-export async function purgePlan(db: D1, cacheId: number, references: string[], after = 0) {
+export async function purgePlan(
+	db: D1,
+	cacheId: number,
+	references: string[],
+	after = 0,
+	autoDays: number | null = null
+) {
 	if (references.length === 0) return { objects: [] as PurgeTarget[], next_cursor: null };
 	const { results } = await dbAll<PurgeTarget>(
 		db
@@ -97,10 +153,11 @@ export async function purgePlan(db: D1, cacheId: number, references: string[], a
 					`
  SELECT o.id,o.store_path_hash,o.store_path,o.nar_id,o.created_at,o.detached_at,
  CASE WHEN o.id IN (SELECT id FROM keep) THEN 1 ELSE 0 END AS blocked
- FROM object o JOIN affected a ON a.id=o.id WHERE o.id>?5 ORDER BY o.id LIMIT 501
+ FROM object o JOIN affected a ON a.id=o.id WHERE o.id>?6
+ AND (?5 IS NULL OR o.id IN (SELECT id FROM eligible)) ORDER BY o.id LIMIT 501
  `
 			)
-			.bind(...params(cacheId, references, null), after)
+			.bind(...params(cacheId, references, null, autoDays), after)
 	);
 	return {
 		objects: results.slice(0, 500),
@@ -117,7 +174,8 @@ export async function applyPurge(
 	cacheName: string,
 	references: string[],
 	targets: PurgeTarget[],
-	id: string
+	id: string,
+	autoDays: number | null = null
 ) {
 	const db = env.ATTIC_DB;
 	const prior = await dbFirst<Operation>(
@@ -136,10 +194,15 @@ export async function applyPurge(
 				.prepare(
 					PURGE_CTES +
 						`INSERT OR IGNORE INTO path_purge (id,cache_id,cache_name,objects,created_at)
-          SELECT ?5,?1,?6,json_group_array(json_object('id',o.id,'hash',o.store_path_hash,'nar_hash',n.nar_hash)),?7
+          SELECT ?6,?1,?7,json_group_array(json_object('id',o.id,'hash',o.store_path_hash,'nar_hash',n.nar_hash)),?8
           FROM eligible e CROSS JOIN object o ON o.id=e.id LEFT JOIN nar n ON n.id=o.nar_id`
 				)
-				.bind(...params(cacheId, references, targets), id, cacheName, new Date().toISOString()),
+				.bind(
+					...params(cacheId, references, targets, autoDays),
+					id,
+					cacheName,
+					new Date().toISOString()
+				),
 			db
 				.prepare(`UPDATE object_ref SET child_id=NULL WHERE child_id IN (${eligible})`)
 				.bind(id, cacheId),

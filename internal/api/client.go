@@ -275,13 +275,14 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body, out any)
 
 // CacheInfo is the public cache discovery document (attic-cache-info).
 type CacheInfo struct {
-	SubstituterEndpoint string `json:"substituter_endpoint"`
-	APIEndpoint         string `json:"api_endpoint"`
-	PublicKey           string `json:"public_key"`
-	IsPublic            bool   `json:"is_public"`
-	StoreDir            string `json:"store_dir"`
-	Priority            int    `json:"priority"`
-	Compression         string `json:"compression"`
+	PurgeBrokenAfterDays *int   `json:"purge_broken_after_days"`
+	SubstituterEndpoint  string `json:"substituter_endpoint"`
+	APIEndpoint          string `json:"api_endpoint"`
+	PublicKey            string `json:"public_key"`
+	IsPublic             bool   `json:"is_public"`
+	StoreDir             string `json:"store_dir"`
+	Priority             int    `json:"priority"`
+	Compression          string `json:"compression"`
 }
 
 func (c *Client) GetCacheInfo(ctx context.Context, cache string) (*CacheInfo, error) {

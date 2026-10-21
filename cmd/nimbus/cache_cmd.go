@@ -40,6 +40,7 @@ type cacheFlags struct {
 	compression       string
 	retentionDays     int
 	retentionMaxBytes int64
+	purgeBrokenDays   int
 	upstreamKeyNames  []string
 	regenKeypair      bool
 }
@@ -57,6 +58,8 @@ func (f *cacheFlags) register(cmd *cobra.Command, includeKeypair bool) {
 	cmd.Flags().
 		StringSliceVar(&f.upstreamKeyNames, "upstream-cache-key-name", nil, "signing key names of upstream caches (repeatable; clients skip re-uploading paths signed by them)")
 	if includeKeypair {
+		cmd.Flags().
+			IntVar(&f.purgeBrokenDays, "purge-broken-after-days", 0, "nightly purge after this many days of confirmed breakage (1-3650; -1 disables)")
 		cmd.Flags().
 			BoolVar(&f.regenKeypair, "regenerate-keypair", false, "generate a new signing keypair")
 	}
@@ -96,6 +99,13 @@ func (f *cacheFlags) options(cmd *cobra.Command) map[string]any {
 	}
 	if f.regenKeypair {
 		opts["keypair"] = map[string]string{"type": "generate"}
+	}
+	if cmd.Flags().Changed("purge-broken-after-days") {
+		if f.purgeBrokenDays == -1 {
+			opts["purge_broken_after_days"] = nil
+		} else {
+			opts["purge_broken_after_days"] = f.purgeBrokenDays
+		}
 	}
 	return opts
 }
@@ -260,6 +270,15 @@ func cacheInfoCmd() *cobra.Command {
 			fmt.Printf("%-13s %s\n", "Store dir:", info.StoreDir)
 			fmt.Printf("%-13s %d\n", "Priority:", info.Priority)
 			fmt.Printf("%-13s %s\n", "Compression:", info.Compression)
+			if info.PurgeBrokenAfterDays != nil {
+				fmt.Printf(
+					"%-13s after %d days of confirmed breakage\n",
+					"Auto purge:",
+					*info.PurgeBrokenAfterDays,
+				)
+			} else {
+				fmt.Printf("%-13s disabled\n", "Auto purge:")
+			}
 			return nil
 		},
 	}
@@ -272,6 +291,10 @@ func cacheConfigureCmd() *cobra.Command {
 		Short: "Update cache settings",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("purge-broken-after-days") &&
+				(flags.purgeBrokenDays < -1 || flags.purgeBrokenDays == 0 || flags.purgeBrokenDays > 3650) {
+				return fmt.Errorf("--purge-broken-after-days must be 1-3650, or -1 to disable")
+			}
 			ref, client, err := resolveCache(args[0])
 			if err != nil {
 				return err

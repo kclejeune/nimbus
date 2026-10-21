@@ -92,20 +92,35 @@ describe('audit security regressions', () => {
 			expect(found).toBeNull();
 		}
 	);
-	it('upstream outages return uncached 503 instead of poisoning the negative cache', async () => {
+	it.each([
+		['outage', 'Upstream temporarily unavailable'],
+		['timeout', 'Upstream temporarily unavailable'],
+		['budget', 'Upstream probe budget exhausted']
+	])('upstream %s returns an accurate uncached 503', async (failure, message) => {
 		fixture.sqlite.exec(
 			"INSERT INTO upstream (url,public_key,ttl,default_mode,enforced,position,nix_default,created_at) VALUES ('https://upstream.test','unused',3600,'redirect',0,0,0,datetime('now'))"
 		);
 		vi.stubGlobal(
 			'fetch',
-			vi.fn(async () => new Response('unavailable', { status: 503 }))
+			vi.fn(async () => {
+				if (failure === 'timeout') throw new DOMException('Timed out', 'TimeoutError');
+				return new Response('unavailable', { status: 503 });
+			})
 		);
-		const res = await serveStore(
-			new Request(`https://cache.test/attacker/${'c'.repeat(32)}.narinfo`),
-			env
-		);
-		expect(res.status).toBe(503);
-		expect(res.headers.get('Cache-Control')).toContain('no-store');
+		const guardedEnv = {
+			...env,
+			UPSTREAM_PROBE_LIMITER: { limit: async () => ({ success: failure !== 'budget' }) }
+		} as unknown as App.Platform['env'];
+		for (const path of ['attacker', '_proxy_upstream']) {
+			const res = await serveStore(
+				new Request(`https://cache.test/${path}/${'c'.repeat(32)}.narinfo`),
+				guardedEnv
+			);
+			expect(res.status).toBe(503);
+			expect(res.headers.get('Cache-Control')).toContain('no-store');
+			expect(res.headers.get('Retry-After')).toBe('60');
+			expect(await res.json()).toMatchObject({ error: 'ServiceUnavailable', message });
+		}
 	});
 	it.each([false, true])(
 		'checks the whole NAR hash after valid chunk possession (forged=%s)',

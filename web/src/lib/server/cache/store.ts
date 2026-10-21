@@ -34,6 +34,7 @@ import {
 	allLiveUpstreams,
 	fetchUpstreamNarInfo,
 	isUncertain,
+	PROBE_REFUSED,
 	resolveUpstreamNar,
 	upstreamsForCache,
 	upstreamTtlSecs,
@@ -569,9 +570,16 @@ async function serveRootUpstreamNarInfo(
 	// every client: errorResponse is no-store, so the refusal dies with this
 	// response.
 	if (isUncertain(hit))
-		return errorResponse(503, 'Upstream probe budget exhausted', undefined, {
-			'Retry-After': '60'
-		});
+		return errorResponse(
+			503,
+			hit === PROBE_REFUSED
+				? 'Upstream probe budget exhausted'
+				: 'Upstream temporarily unavailable',
+			undefined,
+			{
+				'Retry-After': '60'
+			}
+		);
 	if (hit) {
 		try {
 			const keypair = await getProxyKeypair(env);
@@ -845,7 +853,14 @@ async function serveNarInfo(
 		// must never poison the shared edge cache with a false 404.
 		if (isUncertain(hit)) {
 			return withVisibility(
-				errorResponse(503, 'Upstream probe budget exhausted', undefined, { 'Retry-After': '60' }),
+				errorResponse(
+					503,
+					hit === PROBE_REFUSED
+						? 'Upstream probe budget exhausted'
+						: 'Upstream temporarily unavailable',
+					undefined,
+					{ 'Retry-After': '60' }
+				),
 				isPublic
 			);
 		}

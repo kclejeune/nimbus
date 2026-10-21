@@ -150,6 +150,7 @@ export interface CacheRow {
 	compression: string;
 	retention_period: number | null;
 	retention_max_bytes: number | null;
+	purge_broken_after_days: number | null;
 }
 
 export interface NarRow {
@@ -198,7 +199,7 @@ export async function findCache(db: D1Database, name: string): Promise<CacheRow 
 			.prepare(
 				'SELECT id, name, keypair, is_public, store_dir, priority, ' +
 					'upstream_cache_key_names, compression, retention_period, ' +
-					'retention_max_bytes ' +
+					'retention_max_bytes, purge_broken_after_days ' +
 					'FROM cache WHERE name = ?1 AND deleted_at IS NULL'
 			)
 			.bind(name)
@@ -1227,6 +1228,7 @@ export interface CacheUpdate {
 	retention_period?: number | null;
 	/** undefined = leave unchanged; null = clear. */
 	retention_max_bytes?: number | null;
+	purge_broken_after_days?: number | null;
 	upstream_cache_key_names?: string[];
 	keypair?: string;
 }
@@ -1249,18 +1251,35 @@ export async function updateCache(
 	if ('retention_period' in update) push('retention_period', update.retention_period ?? null);
 	if ('retention_max_bytes' in update)
 		push('retention_max_bytes', update.retention_max_bytes ?? null);
+	if ('purge_broken_after_days' in update)
+		push('purge_broken_after_days', update.purge_broken_after_days ?? null);
 	if (update.upstream_cache_key_names !== undefined)
 		push('upstream_cache_key_names', JSON.stringify(update.upstream_cache_key_names));
 	if (update.keypair !== undefined) push('keypair', update.keypair);
 	if (sets.length === 0) return;
 
 	params.push(name);
-	await db
+	const statement = db
 		.prepare(
 			`UPDATE cache SET ${sets.join(', ')} WHERE name = ?${params.length} AND deleted_at IS NULL`
 		)
-		.bind(...params)
-		.run();
+		.bind(...params);
+	if ('purge_broken_after_days' in update) {
+		// Reset the confirmation clock atomically with a changed policy, so
+		// disabling/re-enabling cannot resurrect old deletion eligibility.
+		const changed = 'SELECT id FROM cache WHERE name=?1 AND purge_broken_after_days IS NOT ?2';
+		await dbBatch(db, [
+			db
+				.prepare(`DELETE FROM broken_reference WHERE cache_id IN (${changed})`)
+				.bind(name, update.purge_broken_after_days ?? null),
+			db
+				.prepare(`DELETE FROM broken_purge_state WHERE cache_id IN (${changed})`)
+				.bind(name, update.purge_broken_after_days ?? null),
+			statement
+		]);
+	} else {
+		await dbRun(statement);
+	}
 }
 
 export interface NewCache {

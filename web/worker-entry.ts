@@ -238,9 +238,9 @@ export default {
 		)
 			.run()
 			.catch((e) => console.warn('path purge receipt cleanup failed', e));
-		// Upstream re-validation is not cron work: passthrough narinfos carry
-		// the upstream's TTL as edge max-age (the CDN re-invokes the worker on
-		// expiry) and D1 "present" verdicts lazily expire on the same TTL.
+		// Read-path revalidation stays TTL-based: passthrough narinfos carry
+		// edge max-age and D1 positive verdicts expire lazily. Opt-in broken
+		// closure cleanup below verifies only its bounded maintenance sample.
 		try {
 			await (
 				ctx as import('./src/lib/server/cache/platform').ExecutionContext
@@ -248,7 +248,7 @@ export default {
 		} catch (e) {
 			console.warn('journal replay failed', e);
 		}
-		const stats = await runGc(env, { ctx: ctx as App.Platform['ctx'] });
+		const stats = await runGc(env, { ctx: ctx as App.Platform['ctx'], automaticBrokenPurge: true });
 		console.log(`gc: ${JSON.stringify(stats)}`);
 		// Refresh D1 query-planner statistics after GC changes row counts. Without
 		// stats SQLite mis-plans the hot lookups — the download-touch and narinfo

@@ -114,6 +114,9 @@ function validateCacheOptions(options: unknown): asserts options is ConfigureCac
 	}
 	int('retention_period', I32_MAX, true);
 	int('retention_max_bytes', Number.MAX_SAFE_INTEGER, true);
+	int('purge_broken_after_days', 3650, true);
+	if (o.purge_broken_after_days === 0)
+		throw bad('purge_broken_after_days must be at least 1 or null');
 	if (o.upstream_cache_key_names !== undefined) {
 		const names = o.upstream_cache_key_names;
 		if (
@@ -215,6 +218,8 @@ export interface ConfigureCacheOptions {
 	retention_period?: number | null;
 	/** undefined = unchanged; null = clear. Compressed bytes. */
 	retention_max_bytes?: number | null;
+	/** Automatic nightly cleanup; undefined = unchanged, null = disabled. */
+	purge_broken_after_days?: number | null;
 	upstream_cache_key_names?: string[];
 	keypair?: { type: 'generate' } | { type: 'set'; keypair: string };
 }
@@ -283,6 +288,9 @@ export async function configureCache(
 		...('retention_period' in options ? { retention_period: options.retention_period } : {}),
 		...('retention_max_bytes' in options
 			? { retention_max_bytes: options.retention_max_bytes }
+			: {}),
+		...('purge_broken_after_days' in options
+			? { purge_broken_after_days: options.purge_broken_after_days }
 			: {}),
 		upstream_cache_key_names: options.upstream_cache_key_names,
 		keypair
@@ -386,6 +394,7 @@ export function cacheInfo(cache: db.CacheRow, baseUrl: string): object {
 		store_dir: cache.store_dir,
 		priority: cache.priority,
 		compression: cache.compression,
+		purge_broken_after_days: cache.purge_broken_after_days,
 		upstream_cache_key_names: upstreamKeyNames,
 		// attic's RetentionPeriodConfig; its client rejects a bare number. Unset
 		// is omitted rather than "Global": nimbus has no global default.

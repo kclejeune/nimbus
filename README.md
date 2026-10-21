@@ -154,6 +154,7 @@ nimbus login prod https://cache.example.com <token>    # non-interactive: paste 
 nimbus login prod https://cache.example.com --device   # force device code (--web forces browser)
 nimbus cache create mycache --public --compression zstd --priority 40
 nimbus cache configure mycache --retention-days 30 --retention-max-bytes 50000000000
+nimbus cache configure mycache --purge-broken-after-days 7  # opt in to nightly broken-closure cleanup
 nimbus use mycache                                     # wire up nix.conf (+ netrc if private)
 nimbus use mycache --remove                            # undo it
 nimbus push mycache ./result /nix/store/...            # closures, in parallel
@@ -248,6 +249,30 @@ atomically. Edge invalidations resume automatically through the purge
 coordinator if rate limited or interrupted; NAR and chunk storage is reclaimed
 by later GC. A single reviewed purge group is bounded to 10,000 affected paths;
 larger groups are split by missing dependency when possible.
+
+Automatic broken-closure cleanup is disabled by default for every cache. Enable
+it in cache settings or with `nimbus cache configure mycache
+--purge-broken-after-days 7`; use `-1` to disable it. The delay must be 1–3650
+days. Only nightly GC performs automatic cleanup; manual GC, dry runs, and
+size-triggered GC do not. `nimbus cache info mycache` shows the policy.
+
+Each confirmed missing dependency starts its own timer, regardless of how
+old its parent objects are. A later nightly check must confirm absence again
+after the delay. Recovered or uncertain results reset the timer, as do policy
+changes and detected changes to the enabled upstream configuration. Pinned
+closures remain protected; newly published/revived paths receive at least the
+same delay. Automatic cleanup uses the same atomic version/pin checks and edge
+invalidation journal as manual purge. Local Nix GC roots must be registered as
+Nimbus pins to protect their cached closures.
+
+Work is bounded: nightly maintenance rotates through one enabled cache per
+run, checks at most 64 dependency hashes (at most 200 live upstream probes),
+and removes at most 500 paths using at most four purge-plan queries. Discovery
+and rechecking existing observations share that budget. Large closures that
+cannot fit the budget are retained; GC logs/stats report deferrals so an
+operator can review them with `nimbus purge`. Settings shows the latest cleanup
+counts. No bytes are reconstructed automatically; use `nimbus repair` on a
+machine that can restore them.
 
 `push` resolves closures with `nix path-info`, skips paths the server
 already has or can fetch from its upstreams (`--ignore-upstream-cache-filter`

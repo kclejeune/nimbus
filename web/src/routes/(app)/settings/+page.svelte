@@ -24,7 +24,8 @@
 					(lastRun.stats.detached_objects_reaped ?? 0) +
 					(lastRun.stats.expired_objects_reaped ?? 0) +
 					(lastRun.stats.size_evicted_objects ?? 0) +
-					(lastRun.stats.global_evicted_objects ?? 0)
+					(lastRun.stats.global_evicted_objects ?? 0) +
+					(lastRun.stats.automatic_objects_removed ?? 0)
 			: 0
 	);
 	const gcReclaimed = $derived(
@@ -177,6 +178,20 @@
 						)} over size limits) and reclaimed {formatCount(lastRun.stats.orphan_nars_reaped ?? 0)} NARs
 						and {formatCount(lastRun.stats.orphan_chunks_reaped ?? 0)} chunks.
 					</p>
+					{#if lastRun.stats.automatic_refs_checked > 0 || lastRun.stats.automatic_purge_errors > 0}
+						<p class="text-muted-foreground">
+							Automatic broken-closure cleanup checked {formatCount(
+								lastRun.stats.automatic_refs_checked ?? 0
+							)} dependencies and removed {formatCount(
+								lastRun.stats.automatic_objects_removed ?? 0
+							)} paths. {formatCount(lastRun.stats.automatic_refs_waiting ?? 0)} confirmed missing dependencies
+							are waiting for the policy delay; {formatCount(
+								lastRun.stats.automatic_purge_deferred ?? 0
+							)} groups were deferred by maintenance limits and {formatCount(
+								lastRun.stats.automatic_purge_errors ?? 0
+							)} errors occurred.
+						</p>
+					{/if}
 					{#if lastRun.integrity && lastRun.integrity.incompleteObjects > 0}
 						<details
 							class="rounded-lg border border-warning/30 bg-warning/8 px-3 py-2.5 text-warning"

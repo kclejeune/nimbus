@@ -25,6 +25,7 @@ import { candidateTag } from './metadata';
 import { narinfoTag } from './store';
 import { retentionCutoff } from './retention-explain';
 import { INTEGRITY_PUSH_GRACE_MS } from './closure-repair';
+import { runBrokenClosureGc } from './broken-closure-gc';
 
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];
@@ -113,6 +114,12 @@ function emptyStats(): GcStats {
 		incomplete_closure_objects: 0,
 		integrity_refs_probed: 0,
 		refs_synced: 0,
+		automatic_refs_checked: 0,
+		automatic_refs_waiting: 0,
+		automatic_objects_removed: 0,
+		automatic_purge_deferred: 0,
+		automatic_purge_pending: 0,
+		automatic_purge_errors: 0,
 		narinfo_tags_purged: 0,
 		narinfo_tags_queued: 0,
 		narinfo_tags_failed: 0,
@@ -184,6 +191,8 @@ export interface GcOptions {
 	dryRun?: boolean;
 	ctx?: ExecutionContext;
 	integrityReport?: boolean;
+	/** Explicit cron-only opt-in; manual/upload-triggered runs never apply it. */
+	automaticBrokenPurge?: boolean;
 }
 
 export async function runGc(env: Env, opts: GcOptions = {}): Promise<GcStats> {
@@ -217,6 +226,14 @@ async function runGcLocked(env: Env, opts: GcOptions): Promise<GcStats> {
 	await detachedPass(env.ATTIC_DB, stats, dryRun, purgeTags);
 	await retentionPass(env.ATTIC_DB, stats, dryRun, purgeTags);
 	await globalSizePass(env.ATTIC_DB, stats, dryRun, purgeTags);
+	if (!dryRun && opts.automaticBrokenPurge) {
+		try {
+			Object.assign(stats, await runBrokenClosureGc(env, opts.ctx));
+		} catch (error) {
+			stats.automatic_purge_errors++;
+			console.warn('gc: automatic broken-closure setup failed', error);
+		}
+	}
 	// Advisory only, and the heaviest read of the run — size-triggered GC
 	// (upload hot path via waitUntil) opts out; cron and manual runs report.
 	let integrity: GcIntegritySummary | null = null;

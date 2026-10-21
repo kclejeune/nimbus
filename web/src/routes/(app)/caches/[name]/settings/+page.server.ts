@@ -80,6 +80,8 @@ export const actions: Actions = {
 		const compression = String(form.get('compression') ?? 'zstd');
 		const retentionRaw = String(form.get('retention_period') ?? '').trim();
 		const retention = retentionRaw === '' ? null : Number(retentionRaw);
+		const purgeRaw = String(form.get('purge_broken_after_days') ?? '').trim();
+		const purgeDays = purgeRaw === '' ? null : Number(purgeRaw);
 
 		// Visibility is trust-affecting (it opens anonymous reads): admins only.
 		if (isPublic !== (cache.is_public === 1) && !isAdmin) {
@@ -131,7 +133,8 @@ export const actions: Actions = {
 					priority,
 					compression,
 					retention_period: retention,
-					retention_max_bytes: maxBytes
+					retention_max_bytes: maxBytes,
+					...(form.has('purge_broken_after_days') ? { purge_broken_after_days: purgeDays } : {})
 				},
 				{ trustAuthorized: isAdmin, ctx: platform.ctx }
 			);

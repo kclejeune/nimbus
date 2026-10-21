@@ -20,7 +20,8 @@ export const load: LayoutServerLoad = async ({ platform, params, locals }) => {
 			priority: cache.priority,
 			compression: cache.compression,
 			retentionDays: cache.retention_period,
-			retentionMaxBytes: cache.retention_max_bytes
+			retentionMaxBytes: cache.retention_max_bytes,
+			purgeBrokenAfterDays: cache.purge_broken_after_days
 		},
 		cacheViewer: cacheViewer(access, params.name)
 	};

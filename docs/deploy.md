@@ -186,6 +186,26 @@ tokens; drizzle-generated in `web/drizzle/`, tracked in `admin_migrations`).
 
 ## Upgrade notes
 
+### Automatic broken-closure cleanup
+
+Apply `2026-10-21-broken-closure-policy.sql` before deploying the Worker;
+`npm run deploy:worker` already performs migrations before deployment. The
+feature uses the existing nightly GC trigger and needs no new bindings or cron
+entry. It is disabled by default for every cache.
+
+After deployment, enable it in a cache's settings or with a current CLI:
+
+```sh
+nimbus cache configure mycache --purge-broken-after-days 7
+nimbus cache info mycache
+```
+
+The next nightly run begins fresh confirmation clocks; existing object age
+does not shorten the delay. Use `--purge-broken-after-days -1` to disable it.
+Changing the policy resets its observations atomically. The existing CLI
+protocol stays compatible; the new option requires an updated Worker. See
+[automatic cleanup behavior and limits](../README.md#pushing).
+
 ### v0.6.1: chunk possession receipts
 
 From v0.6.1 on, chunked uploads require cache-bound

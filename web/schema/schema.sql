@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS cache (
     created_at TEXT NOT NULL,
     deleted_at TEXT,
     retention_period INTEGER,
-    retention_max_bytes INTEGER -- size budget in compressed bytes; NULL = unlimited
+    retention_max_bytes INTEGER, -- size budget in compressed bytes; NULL = unlimited
+    purge_broken_after_days INTEGER CHECK (purge_broken_after_days BETWEEN 1 AND 3650) -- NULL = disabled
 );
 
 -- No index on name: the UNIQUE constraint's autoindex already serves lookups
@@ -106,6 +107,26 @@ CREATE TABLE IF NOT EXISTS server_config (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Bounded, round-robin automatic closure maintenance. These are written only
+-- by nightly maintenance/configuration, not the upload/read hot paths.
+CREATE TABLE IF NOT EXISTS broken_purge_state (
+    cache_id INTEGER PRIMARY KEY REFERENCES cache(id) ON DELETE CASCADE,
+    policy_days INTEGER NOT NULL,
+    upstream_config TEXT NOT NULL,
+    after_hash TEXT NOT NULL DEFAULT '',
+    purge_after_hash TEXT NOT NULL DEFAULT '',
+    last_run_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS broken_reference (
+    cache_id INTEGER NOT NULL REFERENCES cache(id) ON DELETE CASCADE,
+    ref_hash TEXT NOT NULL,
+    upstream_config TEXT NOT NULL,
+    first_missing_at TEXT NOT NULL,
+    last_checked_at TEXT NOT NULL,
+    PRIMARY KEY (cache_id, ref_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_broken_reference_checked ON broken_reference(cache_id, last_checked_at, ref_hash);
 
 -- Per-day ingest rollup for the Usage page's storage history, rebuilt by
 -- nightly GC for the days before server_config.ingest_rollup_until; readers

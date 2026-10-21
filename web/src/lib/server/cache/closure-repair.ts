@@ -51,8 +51,11 @@ export async function uncoveredReferences(
 	db: D1,
 	cacheId: number,
 	upstreams: Upstream[],
-	after = ''
+	after = '',
+	pageSize = PAGE_SIZE
 ) {
+	if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > PAGE_SIZE)
+		throw new Error('Invalid reference page size');
 	const coverage = upstreams.map((u) => ({
 		id: u.id,
 		cutoff: new Date(Date.now() - upstreamTtlSecs(u) * 1000).toISOString()
@@ -74,7 +77,7 @@ export async function uncoveredReferences(
 			   ON uc.upstream_id = json_extract(u.value, '$.id')
 			   WHERE uc.store_path_hash = r.ref_hash AND uc.present <> 0
 			   AND uc.checked_at >= json_extract(u.value, '$.cutoff'))
-			 GROUP BY r.ref_hash ORDER BY r.ref_hash LIMIT ${PAGE_SIZE + 1}
+			 GROUP BY r.ref_hash ORDER BY r.ref_hash LIMIT ${pageSize + 1}
 			)
 			SELECT u.ref_hash AS hash, MIN(j.value) AS name, u.referrers
 			FROM uncovered u JOIN object o ON o.id = u.parent_id JOIN json_each(o.refs) j
@@ -88,13 +91,13 @@ export async function uncoveredReferences(
 				JSON.stringify(coverage)
 			)
 	);
-	const references = results.slice(0, PAGE_SIZE).map(({ hash, name, referrers }) => ({
+	const references = results.slice(0, pageSize).map(({ hash, name, referrers }) => ({
 		hash,
 		store_path: `/nix/store/${name}`,
 		referrers
 	}));
 	return {
 		references,
-		next_cursor: results.length > PAGE_SIZE ? references.at(-1)!.hash : null
+		next_cursor: results.length > pageSize ? references.at(-1)!.hash : null
 	};
 }

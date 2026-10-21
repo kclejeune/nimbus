@@ -13,7 +13,8 @@ const ROW: CacheRow = {
 	upstream_cache_key_names: '[]',
 	compression: 'zstd',
 	retention_period: null,
-	retention_max_bytes: null
+	retention_max_bytes: null,
+	purge_broken_after_days: null
 };
 
 /**
