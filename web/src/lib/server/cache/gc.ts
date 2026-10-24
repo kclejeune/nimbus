@@ -23,6 +23,7 @@ import { instanceStats, type InstanceStats } from './stats';
 import { refreshIngestRollup } from './ingest';
 import { candidateTag } from './metadata';
 import { narinfoTag } from './store';
+import { readRpcResult } from './rpc';
 import { retentionCutoff } from './retention-explain';
 import { INTEGRITY_PUSH_GRACE_MS } from './closure-repair';
 import { runBrokenClosureGc } from './broken-closure-gc';
@@ -332,8 +333,8 @@ export async function enqueueTagsBestEffort(
 	if (!store) return { confirmed: 0, queued: 0, failed: new Set(tags).size };
 	const result = { confirmed: 0, queued: 0, failed: 0 };
 	result.failed = await eachTagBatch(tags, 'edge purge enqueue', async (batch) => {
-		const accepted = await store.enqueuePurgeTags(batch);
-		result[accepted.confirmed ? 'confirmed' : 'queued'] += batch.length;
+		const confirmed = readRpcResult(await store.enqueuePurgeTags(batch), (r) => r.confirmed);
+		result[confirmed ? 'confirmed' : 'queued'] += batch.length;
 	});
 	return result;
 }

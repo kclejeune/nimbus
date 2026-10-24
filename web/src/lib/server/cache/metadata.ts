@@ -6,7 +6,8 @@ import { stripSha256 } from '../attic/nix-base32';
 import { hedgedReplicaRead } from './read-hedge';
 import { findCacheCached } from './cache-lookup';
 import { AsyncMemo } from './async-memo';
-import { countLoopbackFallback, measure, candidateMetadata } from './latency';
+import { measure, candidateMetadata } from './latency';
+import { readViaStore } from './store-transport';
 
 export const CANDIDATES_TAG = 'candidates';
 export const candidateTag = (kind: string, hash: string) =>
@@ -110,25 +111,15 @@ export async function disposeLoopback(response: Response | undefined): Promise<v
 
 /**
  * Serve a read through the CachedStore loopback when it is available, else
- * directly. The Workers Caching pipeline intermittently mints an empty 502
- * without invoking CachedStore; read-path code never emits 502, so that
- * status alone identifies a caching-layer failure and the request is served
- * uncached instead of passing it through. Reusing `request` is safe: GET,
- * no body to disturb.
+ * directly. Caching-layer 502s and stalled headers get one uncached
+ * attempt; source-body stalls abort the transfer so clients can retry.
  */
-export async function viaStore(
+export function viaStore(
 	ctx: ExecutionContext | undefined,
 	request: Request,
 	direct: () => Promise<Response>
 ): Promise<Response> {
-	const store = ctx?.exports?.CachedStore;
-	if (!store) return direct();
-	const response = await store.fetch(request);
-	if (response.status !== 502) return response;
-	countLoopbackFallback();
-	console.warn(`store loopback returned 502; serving uncached: ${new URL(request.url).pathname}`);
-	await disposeLoopback(response);
-	return direct();
+	return readViaStore(ctx, request, direct);
 }
 
 /** The JSON body of an internal loopback response. Any non-2xx is a transient

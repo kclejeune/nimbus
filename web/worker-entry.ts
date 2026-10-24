@@ -27,6 +27,7 @@ import sveltekit from './.svelte-kit/cloudflare/_worker.js';
 import { runGc } from './src/lib/server/cache/gc';
 import { caughtResponse, handleCacheApi } from './src/lib/server/cache/router';
 import { serveStore } from './src/lib/server/cache/store';
+import { readRpcResult } from './src/lib/server/cache/rpc';
 
 export { PurgeCoordinator } from './purge-coordinator';
 
@@ -114,7 +115,9 @@ export class CachedStore extends WorkerEntrypoint {
 		}
 		let result: { confirmed: boolean };
 		try {
-			result = await coordinator.enqueue(tags, urgent);
+			result = readRpcResult(await coordinator.enqueue(tags, urgent), ({ confirmed }) => ({
+				confirmed
+			}));
 		} catch (error) {
 			// Keep the legacy journal as a transport-failure safety net. Cron transfers
 			// it to the durable queue before deleting any R2 obligations.
@@ -130,7 +133,8 @@ export class CachedStore extends WorkerEntrypoint {
 	private async purgeUnjournaled(tags: string[], urgent: boolean) {
 		const coordinator = this.coordinator();
 		if (!coordinator) return this.purge(tags);
-		confirmedOrDeferred(await coordinator.enqueue(tags, urgent), urgent);
+		const confirmed = readRpcResult(await coordinator.enqueue(tags, urgent), (r) => r.confirmed);
+		confirmedOrDeferred({ confirmed }, urgent);
 	}
 
 	/** Called only by the singleton coordinator. Return the rejection category

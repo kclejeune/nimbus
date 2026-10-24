@@ -47,6 +47,7 @@ import { TtlMemo } from './ttl-memo';
 import { withR2Retry, newFixedLengthStream, type ExecutionContext } from './platform';
 import { measure, countLoopbackFallback, streamObservation } from './latency';
 import { stripSha256 } from '../attic/nix-base32';
+import { readRpcResult } from './rpc';
 
 type Env = App.Platform['env'];
 
@@ -282,7 +283,7 @@ export async function invalidateAfterUpload(
 		// Coalesced across the isolate: one purge call per window, not per path.
 		await purgeCoalesced(
 			async (tags) => {
-				await store.enqueuePurgeTags(tags);
+				readRpcResult(await store.enqueuePurgeTags(tags), () => {});
 			},
 			[
 				narinfoTag(cache.name, storePathHash),
