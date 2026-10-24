@@ -116,6 +116,13 @@ npm run build        # vite build + Cloudflare adapter → .svelte-kit/cloudflar
 npm run dev:worker   # wrangler dev on localhost:8788
 ```
 
+Security overrides keep Typography's `postcss-selector-parser` and Miniflare's
+`undici` on patched releases until their upstream dependency constraints catch up.
+Keep Better Auth on the 1.6 maintenance line: its
+[1.7 migration](https://better-auth.com/docs/guides/1-7-upgrade-guide) replaces
+the generic OAuth client APIs and changes provider callback URLs, so it requires
+a coordinated authentication upgrade rather than an automatic audit fix.
+
 Copy `.dev.vars.example` to `.dev.vars`, fill in the secrets, and add
 `APP_URL=http://localhost:8788`. `dev:worker` presents every request as host
 `localhost:8788`; the Worker serves the cache API when that matches
