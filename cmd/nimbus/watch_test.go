@@ -11,6 +11,9 @@ func TestIgnoredStoreName(t *testing.T) {
 		".links",
 		".nfs00000123",
 		"0007zb8m6xivj5lhn8lfigmz82d1g1mb-editline-1.17.1.drv",
+		// Linux build sandboxes have a valid-looking hash prefix but are
+		// never registered store paths.
+		"03ggnf40fzbp8k3j2bi3b7d9ypalass4-vendor-registry.drv.chroot",
 		"0007zb8m6xivj5lhn8lfigmz82d1g1mb-editline-1.17.1.lock",
 		"0007zb8m6xivj5lhn8lfigmz82d1g1mb-editline-1.17.1.tmp-123",
 		"trash",
@@ -20,6 +23,8 @@ func TestIgnoredStoreName(t *testing.T) {
 	kept := []string{
 		"0007zb8m6xivj5lhn8lfigmz82d1g1mb-editline-1.17.1-unstable",
 		"vlpbcrw7vgahfbvpsn0by27ahlx59m3f-cdc-test-1",
+		"0007zb8m6xivj5lhn8lfigmz82d1g1mb-chroot",
+		"0007zb8m6xivj5lhn8lfigmz82d1g1mb-package.chroot",
 	}
 	for _, name := range ignored {
 		if !ignoredStoreName(name) {

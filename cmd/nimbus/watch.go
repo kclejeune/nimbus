@@ -377,6 +377,9 @@ var storeNameRE = regexp.MustCompile(`^[0-9a-df-np-sv-z]{32}-`)
 func ignoredStoreName(name string) bool {
 	return !storeNameRE.MatchString(name) ||
 		strings.HasSuffix(name, ".drv") ||
+		// Nix creates Linux build sandboxes beside their derivations; these
+		// directories are never registered as valid store paths.
+		strings.HasSuffix(name, ".drv.chroot") ||
 		strings.HasSuffix(name, ".lock") ||
 		strings.Contains(name, ".tmp")
 }
