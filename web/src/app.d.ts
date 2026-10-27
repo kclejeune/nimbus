@@ -113,7 +113,7 @@ declare global {
 				 * in production builds. */
 				OBSERVABILITY_FIXTURES?: string;
 			};
-			ctx: ExecutionContext;
+			ctx: { waitUntil(promise: Promise<unknown>): void };
 		}
 	}
 }

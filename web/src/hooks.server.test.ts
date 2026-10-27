@@ -9,7 +9,13 @@ const mocks = vi.hoisted(() => ({
 	readSession: vi.fn(),
 	setCookie: vi.fn()
 }));
-vi.mock('$app/environment', () => ({ building: false }));
+const worker = vi.hoisted(() => ({
+	env: {} as Record<string, unknown>,
+	exports: { CachedStore: {} },
+	waitUntil: vi.fn()
+}));
+vi.mock('$app/env', () => ({ building: false, dev: false }));
+vi.mock('cloudflare:workers', () => worker);
 vi.mock('better-auth/svelte-kit', () => ({
 	svelteKitHandler: ({ event, resolve }: { event: unknown; resolve: (e: unknown) => unknown }) =>
 		resolve(event)
@@ -38,6 +44,7 @@ const binding = {
 };
 beforeEach(() => {
 	vi.clearAllMocks();
+	for (const key of Object.keys(worker.env)) delete worker.env[key];
 	mocks.getSession.mockResolvedValue(null);
 	mocks.getDb.mockImplementation(() => {
 		throw new Error('unexpected full Access resolution');
@@ -47,6 +54,28 @@ beforeEach(() => {
 	mocks.readSession.mockReturnValue({
 		prepare: () => ({ bind: () => ({ first: mocks.replica }) })
 	});
+});
+it('supplies route bindings and purge loopbacks when the adapter provides no platform', async () => {
+	worker.env.ATTIC_DB = binding;
+	const event = {
+		request: new Request('https://app.test/login'),
+		url: new URL('https://app.test/login'),
+		route: { id: '/login' },
+		locals: {},
+		cookies: { get: () => undefined }
+	};
+	const resolve = vi.fn(async (resolved) => {
+		expect(resolved.platform.env).toBe(worker.env);
+		expect(resolved.platform.ctx.exports).toBe(worker.exports);
+		const pending = Promise.resolve();
+		resolved.platform.ctx.waitUntil(pending);
+		expect(worker.waitUntil).toHaveBeenCalledWith(pending);
+		return new Response('login');
+	});
+	expect((await handle({ event, resolve } as unknown as Parameters<typeof handle>[0])).status).toBe(
+		200
+	);
+	expect(resolve).toHaveBeenCalledOnce();
 });
 async function request(method = 'POST', admin = false, withCookie = true) {
 	const secret = 'test-session-secret';

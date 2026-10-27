@@ -2,7 +2,7 @@
 // account-scoped token, so it's config-gated: without CF_ACCOUNT_ID and
 // CF_ANALYTICS_TOKEN the page shows how to connect it (or, in local dev with
 // OBSERVABILITY_FIXTURES=1, generated sample data).
-import { dev } from '$app/environment';
+import { dev } from '$app/env';
 import { buildQueries, WINDOWS, type WindowKey } from './query';
 import { summarize, type Observability, type RawResults } from './parse';
 import { fixtureResults } from './fixtures';

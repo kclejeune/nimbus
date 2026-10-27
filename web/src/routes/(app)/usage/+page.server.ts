@@ -1,4 +1,4 @@
-import { dev } from '$app/environment';
+import { dev } from '$app/env';
 import { error } from '@sveltejs/kit';
 import { readSession } from '$lib/server/cache/db';
 import { instanceStatsSnapshot, type InstanceStats } from '$lib/server/cache/stats';

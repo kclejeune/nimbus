@@ -8,5 +8,5 @@ import { goto } from '$app/navigation';
  */
 export function replaceQuery(query: URLSearchParams | string): Promise<void> {
 	const qs = String(query).replace(/^\?/, '');
-	return goto(qs ? `?${qs}` : '?', { replaceState: true, keepFocus: true, noScroll: true });
+	return goto(qs ? `?${qs}` : '?', { replace: true, reset: false });
 }

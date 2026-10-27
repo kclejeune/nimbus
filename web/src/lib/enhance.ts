@@ -1,5 +1,5 @@
 import { toast } from 'svelte-sonner';
-import type { SubmitFunction } from '@sveltejs/kit';
+import type { SubmitFunction } from '$app/forms';
 import { ask, type ConfirmOptions } from '$lib/confirm.svelte';
 
 /**

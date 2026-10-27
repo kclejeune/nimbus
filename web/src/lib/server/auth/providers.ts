@@ -4,16 +4,16 @@ import type { SocialProviderList, SocialProviders } from 'better-auth/social-pro
 type Env = App.Platform['env'];
 type SocialProviderId = SocialProviderList[number];
 
-/**
- * A provider as shown in the UI. Discriminated by `kind` — better-auth
- * built-in social providers use signIn.social/linkSocial; generic OAuth
- * providers (registered via the genericOAuth plugin) use
- * signIn.oauth2/oauth2.link. Narrowing on `kind` narrows `id` to what the
- * corresponding client call accepts.
- */
-export type ProviderInfo =
-	| { id: SocialProviderId; label: string; kind: 'social' }
-	| { id: string; label: string; kind: 'oauth2' };
+// Keep existing IdP registrations working across the Better Auth 1.7 upgrade.
+// auth.ts maps these callback requests to the new core callback endpoint.
+const legacyCallbackURL = (appURL: string | undefined, id: string) =>
+	appURL ? `${appURL.replace(/\/$/, '')}/api/auth/oauth2/callback/${id}` : undefined;
+
+/** Generic OAuth and built-in providers share the social sign-in/link API. */
+export interface ProviderInfo {
+	id: string;
+	label: string;
+}
 
 const LABELS: Record<string, string> = {
 	oidc: 'SSO',
@@ -40,6 +40,7 @@ export function buildAuthProviders(env: Env): {
 	if (env.OIDC_ISSUER && env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET) {
 		oauth.push({
 			providerId: 'oidc',
+			redirectURI: legacyCallbackURL(env.APP_URL, 'oidc'),
 			discoveryUrl: `${env.OIDC_ISSUER.replace(/\/$/, '')}/.well-known/openid-configuration`,
 			clientId: env.OIDC_CLIENT_ID,
 			clientSecret: env.OIDC_CLIENT_SECRET,
@@ -54,6 +55,7 @@ export function buildAuthProviders(env: Env): {
 		const team = env.CF_ACCESS_TEAM_DOMAIN.replace(/\/$/, '');
 		oauth.push({
 			providerId: 'cloudflare',
+			redirectURI: legacyCallbackURL(env.APP_URL, 'cloudflare'),
 			discoveryUrl: `${team}/cdn-cgi/access/sso/oidc/${env.CF_SSO_CLIENT_ID}/.well-known/openid-configuration`,
 			clientId: env.CF_SSO_CLIENT_ID,
 			clientSecret: env.CF_SSO_CLIENT_SECRET,
@@ -89,13 +91,11 @@ export function configuredProviders(env: Env | undefined): ProviderInfo[] {
 	return [
 		...oauth.map((c): ProviderInfo => ({
 			id: c.providerId,
-			label: LABELS[c.providerId] ?? c.providerId,
-			kind: 'oauth2'
+			label: LABELS[c.providerId] ?? c.providerId
 		})),
 		...(Object.keys(social) as SocialProviderId[]).map((id): ProviderInfo => ({
 			id,
-			label: LABELS[id] ?? id,
-			kind: 'social'
+			label: LABELS[id] ?? id
 		}))
 	];
 }

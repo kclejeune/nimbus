@@ -39,21 +39,20 @@
 	async function link(provider: ProviderInfo) {
 		busy = provider.id;
 		errorMessage = '';
-		// Both calls redirect the page to the provider and come back here.
-		const { error } =
-			provider.kind === 'social'
-				? await authClient.linkSocial({ provider: provider.id, callbackURL: '/account' })
-				: await authClient.oauth2.link({ providerId: provider.id, callbackURL: '/account' });
+		const { error } = await authClient.linkSocial({
+			provider: provider.id,
+			callbackURL: '/account'
+		});
 		if (error) {
 			errorMessage = error.message ?? 'Linking failed. Try again.';
 			busy = '';
 		}
 	}
 
-	async function unlink(providerId: string, accountId: string) {
+	async function unlink(accountId: string) {
 		busy = `unlink:${accountId}`;
 		errorMessage = '';
-		const { error } = await authClient.unlinkAccount({ providerId, accountId });
+		const { error } = await authClient.unlinkAccount({ accountId });
 		if (error) {
 			errorMessage = error.message ?? 'Unlinking failed. Try again.';
 		} else {
@@ -176,7 +175,7 @@
 								class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
 								disabled={!unlinkable || busy !== ''}
 								title={unlinkable ? undefined : 'You can’t unlink your only sign-in method.'}
-								onclick={() => unlink(account.providerId, account.accountId)}
+								onclick={() => unlink(account.id)}
 							>
 								<Unlink /> Unlink
 							</Button>

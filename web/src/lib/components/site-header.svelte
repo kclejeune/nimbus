@@ -6,7 +6,7 @@
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 	import { breadcrumbs } from '$lib/nav';
 	import { palette } from '$lib/command-palette.svelte';
-	import { browser } from '$app/environment';
+	import { browser } from '$app/env';
 
 	// Show the platform's modifier in the shortcut hint.
 	const mod = $derived(browser && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl ');

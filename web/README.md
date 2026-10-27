@@ -127,10 +127,20 @@ backpressure is excluded from that deadline. Body diagnostics record both
 
 Security overrides keep Typography's `postcss-selector-parser` and Miniflare's
 `undici` on patched releases until their upstream dependency constraints catch up.
-Keep Better Auth on the 1.6 maintenance line: its
-[1.7 migration](https://better-auth.com/docs/guides/1-7-upgrade-guide) replaces
-the generic OAuth client APIs and changes provider callback URLs, so it requires
-a coordinated authentication upgrade rather than an automatic audit fix.
+The `runed` overrides move the versions used by Bits UI and LayerChart to the
+SvelteKit 3 peer dependency; older versions used by other libraries stay unchanged.
+SvelteKit 3 uses an explicit `$lib` alias in Vite and TypeScript. The server hook
+adapts `cloudflare:workers` bindings to the app's `platform.env`/`platform.ctx`
+contract, including the loopback exports used for cache purges.
+
+Better Auth 1.7 uses the social APIs for generic OAuth sign-in and linking.
+With `APP_URL` set, Nimbus retains the existing `/api/auth/oauth2/callback/oidc`
+and `/api/auth/oauth2/callback/cloudflare` redirect URIs and handles them through
+the new callback endpoint internally, so existing IdP registrations keep working.
+Account IDs and the database schema are unchanged; unlink requests now select
+the local account row ID. Pending sign-in attempts must be restarted after the
+upgrade because the patched OAuth state format changed. See the
+[1.7 migration guide](https://better-auth.com/docs/guides/1-7-upgrade-guide).
 
 Copy `.dev.vars.example` to `.dev.vars`, fill in the secrets, and add
 `APP_URL=http://localhost:8788`. `dev:worker` presents every request as host

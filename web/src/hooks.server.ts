@@ -1,6 +1,7 @@
-import { building } from '$app/environment';
+import { building, dev } from '$app/env';
 import { svelteKitHandler } from 'better-auth/svelte-kit';
-import { redirect, type Handle } from '@sveltejs/kit';
+import { redirect } from '@sveltejs/kit';
+import type { Handle } from '@sveltejs/kit/hooks';
 import { createAuth, type Auth } from '$lib/server/auth/auth';
 import { resolveCfAccessUser } from '$lib/server/auth/cf-access';
 import { isActiveUser } from '$lib/server/auth/guard';
@@ -14,6 +15,21 @@ import { refreshCachedUser } from '$lib/server/auth/refresh';
 // function reference that resolves the current request lazily, not at construction).
 const authCache = new WeakMap<object, Auth>();
 
+async function runtimePlatform(): Promise<App.Platform | undefined> {
+	try {
+		const { env, exports, waitUntil } = await import('cloudflare:workers');
+		return env.ATTIC_DB ? { env, ctx: { waitUntil, ...(dev ? {} : { exports }) } } : undefined;
+	} catch (error) {
+		// Vite preview loads the built server through Node's ESM loader. The
+		// adapter starts its Wrangler proxy, but cannot rewrite runtime imports.
+		// Only this loader error selects the adapter's Node-side binding proxy;
+		// actual Workers import failures must still fail the request.
+		if ((error as NodeJS.ErrnoException)?.code !== 'ERR_UNSUPPORTED_ESM_URL_SCHEME') throw error;
+		return (globalThis as typeof globalThis & { __sveltekit_cloudflare_platform?: App.Platform })
+			.__sveltekit_cloudflare_platform;
+	}
+}
+
 function getAuth(env: App.Platform['env']): Auth {
 	let auth = authCache.get(env.ATTIC_DB);
 	if (!auth) {
@@ -26,6 +42,13 @@ function getAuth(env: App.Platform['env']): Auth {
 // Cache-hostname traffic never reaches SvelteKit: worker-entry.ts dispatches
 // it to the binary-cache API before the SvelteKit worker runs.
 export const handle: Handle = async ({ event, resolve }) => {
+	// Adapter 8 exposes bindings through cloudflare:workers. Populate our app's
+	// platform contract once so route loads/actions retain the same bindings
+	// and loopback purge entrypoints. Node tests may supply their own platform.
+	if (!building && !event.platform) {
+		const platform = await runtimePlatform();
+		if (platform) Object.assign(event, { platform });
+	}
 	const env = event.platform?.env;
 	if (!env) {
 		event.locals.user = null;

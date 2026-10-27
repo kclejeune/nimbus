@@ -30,18 +30,11 @@
 	async function signIn(provider: ProviderInfo) {
 		loading = true;
 		errorMessage = '';
-		const { error } =
-			provider.kind === 'social'
-				? await authClient.signIn.social({
-						provider: provider.id,
-						callbackURL: redirectTo,
-						errorCallbackURL: '/login'
-					})
-				: await authClient.signIn.oauth2({
-						providerId: provider.id,
-						callbackURL: redirectTo,
-						errorCallbackURL: '/login'
-					});
+		const { error } = await authClient.signIn.social({
+			provider: provider.id,
+			callbackURL: redirectTo,
+			errorCallbackURL: '/login'
+		});
 		if (error) {
 			errorMessage = error.message ?? 'Sign-in failed. Try again.';
 			loading = false;

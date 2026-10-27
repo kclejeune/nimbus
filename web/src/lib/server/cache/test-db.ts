@@ -21,15 +21,23 @@ export function testDatabase({ admin = false }: { admin?: boolean } = {}) {
 	}
 	const totalChanges = () => Number(sqlite.prepare('SELECT total_changes() AS n').get()!.n);
 	const prepare = (sql: string) => {
-		let params: Record<string, SQLInputValue> = {};
+		let values: SQLInputValue[] = [];
+		const rows = (arrays = false) => {
+			const query = sqlite.prepare(sql);
+			if (arrays) query.setReturnArrays(true);
+			// Cache SQL uses ?1; Drizzle uses anonymous ? placeholders.
+			return /\?\d+/.test(sql)
+				? query.all(Object.fromEntries(values.map((v, i) => [String(i + 1), v])))
+				: query.all(...values);
+		};
 		const stmt = {
-			bind(...values: SQLInputValue[]) {
-				params = Object.fromEntries(values.map((v, i) => [String(i + 1), v]));
+			bind(...params: SQLInputValue[]) {
+				values = params;
 				return stmt;
 			},
 			execute() {
 				const before = totalChanges();
-				const results = sqlite.prepare(sql).all(params);
+				const results = rows();
 				return {
 					results,
 					success: true,
@@ -38,6 +46,9 @@ export function testDatabase({ admin = false }: { admin?: boolean } = {}) {
 						last_row_id: Number(sqlite.prepare('SELECT last_insert_rowid() AS id').get()!.id)
 					}
 				};
+			},
+			async raw() {
+				return rows(true);
 			},
 			async all() {
 				return stmt.execute();

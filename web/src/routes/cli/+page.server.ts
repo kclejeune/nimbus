@@ -62,6 +62,6 @@ export const actions: Actions = {
 		// Hand the token back to the CLI's loopback listener. The host is fixed to
 		// 127.0.0.1 (only the port is caller-supplied), so there is no open-redirect.
 		const target = `http://127.0.0.1:${port}/callback?token=${encodeURIComponent(minted.token)}&state=${encodeURIComponent(state)}`;
-		redirect(303, target);
+		redirect(303, target, { external: [`http://127.0.0.1:${port}`] });
 	}
 };

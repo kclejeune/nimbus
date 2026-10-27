@@ -23,7 +23,7 @@ export function createAuth(env: Env) {
 	const db = getDb(env.ATTIC_DB);
 	const { oauth, social } = buildAuthProviders(env);
 
-	return betterAuth({
+	const auth = betterAuth({
 		database: drizzleAdapter(db, { provider: 'sqlite', schema }),
 		secret: env.SESSION_SECRET,
 		baseURL: env.APP_URL,
@@ -80,12 +80,12 @@ export function createAuth(env: Env) {
 			// sign-up: the callback refreshes account.idToken with the groups claim.
 			after: createAuthMiddleware(async (ctx) => {
 				if (!env.OIDC_GROUPS_CLAIM) return;
-				// ctx.path is the route TEMPLATE ("/oauth2/callback/:providerId"),
+				// ctx.path is the route TEMPLATE ("/callback/:id"),
 				// never the concrete URL — the provider id rides in ctx.params.
 				// When params are unavailable, fall through: the account query
 				// below is already scoped to providerId 'oidc'.
-				if (!ctx.path.startsWith('/oauth2/callback')) return;
-				const providerId = (ctx.params as Record<string, string> | undefined)?.providerId;
+				if (ctx.path !== '/callback/:id') return;
+				const providerId = (ctx.params as Record<string, string> | undefined)?.id;
 				if (providerId && providerId !== 'oidc') return;
 				const userId = ctx.context.newSession?.user.id;
 				if (!userId) return;
@@ -112,6 +112,20 @@ export function createAuth(env: Env) {
 			sveltekitCookies(getRequestEvent)
 		]
 	});
+	return {
+		...auth,
+		handler(request: Request) {
+			// Generic OAuth moved onto the core callback route in 1.7. Keep
+			// existing IdP redirect URIs; both authorization and token exchange
+			// use the explicit redirectURI configured in providers.ts.
+			const url = new URL(request.url);
+			if (/^\/api\/auth\/oauth2\/callback\/(oidc|cloudflare)$/.test(url.pathname)) {
+				url.pathname = url.pathname.replace('/oauth2/callback/', '/callback/');
+				request = new Request(url, request);
+			}
+			return auth.handler(request);
+		}
+	};
 }
 
 export type Auth = ReturnType<typeof createAuth>;

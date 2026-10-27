@@ -20,7 +20,7 @@
 	import { SvelteSet } from 'svelte/reactivity';
 	import { untrack } from 'svelte';
 	import { toast } from 'svelte-sonner';
-	import type { SubmitFunction } from '@sveltejs/kit';
+	import type { SubmitFunction } from '$app/forms';
 	import { ask } from '$lib/confirm.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 

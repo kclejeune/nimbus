@@ -9,6 +9,7 @@ export default defineConfig({
 	// a bare `import "devalue"` in one chunk, which wrangler's esbuild then
 	// drops with an ignored-bare-import warning (devalue is side-effect free).
 	ssr: { noExternal: ['devalue'] },
+	resolve: { alias: { $lib: new URL('./src/lib', import.meta.url).pathname } },
 	plugins: [
 		tailwindcss(),
 		sveltekit({
