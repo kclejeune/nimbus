@@ -967,22 +967,29 @@ async function serveNar(
 	if (totalSize === null || totalSize > 512 * 1024 * 1024) {
 		baseHeaders.set('Cache-Control', 'no-store');
 	}
-	const stream = streamObservation(keys.length, totalSize);
+	const stream = streamObservation(keys.length, totalSize, narHashRaw);
 	const pump = async () => {
 		// Queue of gets for chunks not yet piped, in key order; fill() tops it
 		// up to the lookahead window.
-		const getChunk = async (key: string): Promise<{ body: ReadableStream<Uint8Array> } | null> => {
+		const getChunk = async (
+			key: string
+		): Promise<{
+			body: ReadableStream<Uint8Array>;
+			source: 'cache' | 'r2';
+		} | null> => {
 			if (chunkStore) {
 				const response = await chunkStore.fetch(
 					internalRequest(env, `/_chunk/${encodeURIComponent(key)}`)
 				);
-				if (response.ok && response.body) return { body: response.body };
+				if (response.ok && response.body) return { body: response.body, source: 'cache' };
 				await response.body?.cancel().catch(() => {});
 				if (response.status !== 502) throw new Error(`Chunk cache returned ${response.status}`);
 				countLoopbackFallback();
 			}
 			const object = await withR2Retry(() => env.CACHE_BUCKET.get(key));
-			return object ? { body: object.body as unknown as ReadableStream<Uint8Array> } : null;
+			return object
+				? { body: object.body as unknown as ReadableStream<Uint8Array>, source: 'r2' }
+				: null;
 		};
 		const inFlight: ReturnType<typeof getChunk>[] = [];
 		let next = 0;
@@ -999,7 +1006,11 @@ async function serveNar(
 		try {
 			fill();
 			for (let i = 0; i < keys.length; i++) {
-				const object = await stream.wait(inFlight.shift()!);
+				const object = await stream.wait(inFlight.shift()!, {
+					index: i,
+					key: keys[i],
+					source: chunkStore ? 'cache' : 'r2'
+				});
 				fill();
 				if (!object) throw new Error(`File not found in storage: ${keys[i]}`);
 				await stream.pipe(
@@ -1009,7 +1020,8 @@ async function serveNar(
 							// The pump's catch owns aborting the response stream.
 							preventAbort: true
 						}),
-					chunks[i].file_size
+					chunks[i].file_size,
+					object.source
 				);
 			}
 			await writable.close();
@@ -1027,7 +1039,7 @@ async function serveNar(
 	const pumping = pump()
 		.then(() => stream.finish('ok'))
 		.catch((e) => {
-			stream.finish('error');
+			stream.finish('error', e);
 			return writable.abort(e).catch(() => {});
 		});
 	ctx?.waitUntil(pumping);

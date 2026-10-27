@@ -81,9 +81,18 @@ export function uploadShape(chunks: number, rawBytes: number, compressedBytes?: 
  * blocks on (R2 or the chunk cache); the rest of the stream is piping, which
  * a slow client stretches through backpressure. */
 export interface StreamObserver {
-	wait<T>(get: Promise<T>): Promise<T>;
-	pipe(work: () => Promise<void>, bytes: number | null): Promise<void>;
-	finish(status: 'ok' | 'error'): void;
+	wait<T>(get: Promise<T>, chunk?: StreamChunk): Promise<T>;
+	pipe(
+		work: () => Promise<void>,
+		bytes: number | null,
+		source?: StreamChunk['source']
+	): Promise<void>;
+	finish(status: 'ok' | 'error', error?: unknown): void;
+}
+interface StreamChunk {
+	index: number;
+	key: string;
+	source: 'cache' | 'r2';
 }
 
 /**
@@ -96,7 +105,11 @@ export interface StreamObserver {
  * disconnects can fail a transfer after the pump closed. Start/progress events
  * also survive an invocation killed before its completion log.
  */
-export function streamObservation(chunks: number, bytes: number | null): StreamObserver {
+export function streamObservation(
+	chunks: number,
+	bytes: number | null,
+	narHash?: string
+): StreamObserver {
 	const sample = current.getStore();
 	const started = performance.now();
 	const retries = sample?.retries ?? 0;
@@ -106,20 +119,31 @@ export function streamObservation(chunks: number, bytes: number | null): StreamO
 	let completedChunks = 0;
 	let completedBytes: number | null = 0;
 	let phase = 'get';
+	let phaseStarted = started;
+	let chunk: StreamChunk | undefined;
 	let lastProgressMs = 0;
-	const emit = (event: string, status?: string) => {
+	const emit = (event: string, status?: string, error?: unknown) => {
 		const ms = performance.now() - started;
-		console.log(
+		const log = status === 'error' ? console.error : console.log;
+		log(
 			JSON.stringify({
 				event,
 				route: 'GET /_nar/:hash',
 				layer: 'store',
 				status,
+				narHash,
+				chunk,
+				error:
+					error instanceof Error ? error.message : error === undefined ? undefined : String(error),
+				errorType: error instanceof Error ? error.name : undefined,
+				errorCause:
+					error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined,
 				chunks,
 				bytes,
 				completedChunks,
 				completedBytes,
 				phase,
+				phaseMs: performance.now() - phaseStarted,
 				lastProgressMs,
 				ms,
 				waitMs,
@@ -133,9 +157,11 @@ export function streamObservation(chunks: number, bytes: number | null): StreamO
 	};
 	emit('nimbus.stream.start');
 	return {
-		async wait(get) {
+		async wait(get, currentChunk) {
 			phase = 'get';
 			const start = performance.now();
+			phaseStarted = start;
+			chunk = currentChunk;
 			try {
 				return await get;
 			} finally {
@@ -144,17 +170,20 @@ export function streamObservation(chunks: number, bytes: number | null): StreamO
 				maxWaitMs = Math.max(maxWaitMs, waited);
 			}
 		},
-		async pipe(work, bytes) {
+		async pipe(work, bytes, source) {
 			phase = 'pipe';
+			phaseStarted = performance.now();
+			if (chunk && source) chunk = { ...chunk, source };
 			await work();
 			completedChunks++;
 			completedBytes = completedBytes !== null && bytes !== null ? completedBytes + bytes : null;
 			lastProgressMs = performance.now() - started;
 			phase = 'close';
+			phaseStarted = performance.now();
 			if (completedChunks % 16 === 0) emit('nimbus.stream.progress');
 		},
-		finish(status) {
-			emit('nimbus.stream', status);
+		finish(status, error) {
+			emit('nimbus.stream', status, error);
 		}
 	};
 }

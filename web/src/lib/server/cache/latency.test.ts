@@ -47,6 +47,7 @@ it('appends diagnostics without moving existing Analytics Engine positions', asy
 it('samples uploads even when a read would be skipped, and records post-header fallbacks', async () => {
 	vi.spyOn(Math, 'random').mockReturnValue(0.99);
 	const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+	const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 	const env = {} as App.Platform['env'];
 	await observeRequest(
 		new Request('https://cache.test/_api/v1/upload-path/chunks/complete', { method: 'POST' }),
@@ -80,7 +81,7 @@ it('samples uploads even when a read would be skipped, and records post-header f
 	expect(JSON.parse(log.mock.calls.at(-1)![0]).loopbackFallbacks).toBe(0);
 	release();
 	await pumping;
-	expect(log.mock.calls.map(([value]) => JSON.parse(value))).toContainEqual(
+	expect(error.mock.calls.map(([value]) => JSON.parse(value))).toContainEqual(
 		expect.objectContaining({
 			event: 'nimbus.stream',
 			loopbackFallbacks: 1,
@@ -102,25 +103,31 @@ it('logs stream completion even for unsampled requests', async () => {
 
 it('records the completed prefix and pipe phase when a later chunk fails', async () => {
 	const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-	const stream = streamObservation(2, 6);
+	const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const stream = streamObservation(2, 6, 'nar-hash');
 	await stream.wait(Promise.resolve());
 	await stream.pipe(async () => {}, 3);
-	await stream.wait(Promise.resolve());
+	await stream.wait(Promise.resolve(), { index: 1, key: 'chunk/failed', source: 'cache' });
 	await expect(
 		stream.pipe(async () => {
 			throw new Error('disconnected');
 		}, 3)
 	).rejects.toThrow('disconnected');
-	stream.finish('error');
+	stream.finish('error', new Error('disconnected', { cause: new Error('source reset') }));
 	expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({
 		event: 'nimbus.stream.start',
 		completedChunks: 0
 	});
-	expect(JSON.parse(log.mock.calls.at(-1)![0])).toMatchObject({
+	expect(JSON.parse(error.mock.calls.at(-1)![0])).toMatchObject({
 		event: 'nimbus.stream',
 		status: 'error',
 		completedChunks: 1,
 		completedBytes: 3,
-		phase: 'pipe'
+		phase: 'pipe',
+		narHash: 'nar-hash',
+		chunk: { index: 1, key: 'chunk/failed', source: 'cache' },
+		error: 'disconnected',
+		errorType: 'Error',
+		errorCause: 'source reset'
 	});
 });

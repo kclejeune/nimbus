@@ -137,7 +137,11 @@ describe('store hardening', () => {
 		]);
 		expect(get).not.toHaveBeenCalled();
 	});
-	async function streamResponse(sizes: (number | null)[], bodies: (ReadableStream | null)[]) {
+	async function streamResponse(
+		sizes: (number | null)[],
+		bodies: (ReadableStream | null)[],
+		cacheStatus = 200
+	) {
 		const hash = 'b'.repeat(64);
 		const chunks = sizes.map((file_size, seq) => ({
 			file_size,
@@ -151,6 +155,8 @@ describe('store hardening', () => {
 					fetch: async (request: Request) => {
 						const path = new URL(request.url).pathname;
 						if (path.startsWith('/_chunk/')) {
+							if (cacheStatus !== 200)
+								return new Response('cache unavailable', { status: cacheStatus });
 							const key = decodeURIComponent(path.slice('/_chunk/'.length));
 							return new Response(bodies[Number(key.split('/')[1])]);
 						}
@@ -218,5 +224,36 @@ describe('store hardening', () => {
 		const { response, tasks } = await streamResponse([3, 3], [new Response('one').body!, null]);
 		await expect(response.arrayBuffer()).rejects.toThrow('File not found in storage');
 		await Promise.all(tasks);
+	});
+
+	it('reports the failing chunk and actual R2 source after a chunk-cache fallback', async () => {
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const broken = new ReadableStream<Uint8Array>({
+				pull(c) {
+					c.error(new Error('R2 body disconnected'));
+				}
+			});
+			const { response, tasks } = await streamResponse(
+				[null, 8],
+				[new Response('one').body!, broken],
+				502
+			);
+			await expect(response.arrayBuffer()).rejects.toThrow('R2 body disconnected');
+			await Promise.all(tasks);
+			expect(error.mock.calls.map(([entry]) => JSON.parse(entry))).toContainEqual(
+				expect.objectContaining({
+					event: 'nimbus.stream',
+					status: 'error',
+					narHash: 'b'.repeat(64),
+					chunk: { index: 1, key: 'chunk/1', source: 'r2' },
+					phase: 'pipe',
+					error: 'R2 body disconnected',
+					completedChunks: 1
+				})
+			);
+		} finally {
+			error.mockRestore();
+		}
 	});
 });
