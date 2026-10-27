@@ -12,7 +12,7 @@ self-hosting.
 CLI (repo root, Go 1.26 + mise):
 
 ```bash
-mise run check                  # lint + go test + build CLI and web (binary at build/nimbus)
+mise run check                  # CLI lint/tests/build + full web checks (binary at build/nimbus)
 mise run lint                   # golangci-lint --fix + prettier --write on web/ (rewrites files)
 go test ./...                   # all Go tests
 go test ./internal/chunker -run TestDifferentialCorpus -v   # one test
@@ -23,7 +23,8 @@ nix build .                     # flake package (bump vendorHash when go.mod cha
 Web (`cd web`, Node 24, scripts sequenced by wireit):
 
 ```bash
-npm run check                   # svelte-check
+npm run check                   # format check + types + tests + build + preview smoke
+npm run check:types             # svelte-check
 npm test                        # vitest run
 npx vitest run src/lib/server/auth/permissions.test.ts   # one test file
 npm run lint / npm run format   # prettier

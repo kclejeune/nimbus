@@ -110,12 +110,19 @@ scripts/                deploy helpers: migrate, config materialization, hostnam
 
 ```bash
 npm install
-npm run check        # svelte-check
+npm run check        # formatting, types, tests, build, and preview smoke
+npm run check:types  # svelte-check only
 npm test             # vitest over pure server modules and cache/test-db.ts (node:sqlite)
 npm run test:store-transport  # native workerd streams, including a 15 s stall
+npm run test:preview  # build, initialize Node preview, and exercise its routes
 npm run build        # vite build + Cloudflare adapter → .svelte-kit/cloudflare
 npm run dev:worker   # wrangler dev on localhost:8788
 ```
+
+`npm run check` is the full web validation task, also used by CI and
+`mise run check`. Vitest and type checking run independently of the build;
+`test:preview` depends on the build and checks the resulting server in Node.
+`check:watch` keeps watching types only.
 
 `test:store-transport` checks native BYOB reads, partial final batches, Range
 headers, truncated bodies, and cancellation without production bindings. Add

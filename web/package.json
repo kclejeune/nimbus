@@ -21,7 +21,9 @@
 		"lint": "prettier --check .",
 		"format": "prettier --write .",
 		"test": "wireit",
-		"test:store-transport": "node scripts/test-store-transport.mjs"
+		"test:store-transport": "wireit",
+		"check:types": "wireit",
+		"test:preview": "wireit"
 	},
 	"wireit": {
 		"build": {
@@ -74,7 +76,20 @@
 				"deploy:waf"
 			]
 		},
-		"check": {
+		"test": {
+			"command": "vitest run",
+			"files": [
+				"src/**",
+				"vite.config.ts",
+				"vitest.config.ts",
+				"tsconfig.json",
+				"schema/**",
+				"drizzle/**",
+				"scripts/**"
+			],
+			"output": []
+		},
+		"check:types": {
 			"command": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 			"files": [
 				"src/**",
@@ -84,13 +99,32 @@
 			],
 			"output": []
 		},
-		"test": {
-			"command": "vitest run",
+		"check": {
+			"dependencies": [
+				"lint",
+				"check:types",
+				"test",
+				"test:store-transport",
+				"test:preview"
+			]
+		},
+		"test:preview": {
+			"command": "node scripts/test-preview.mjs",
+			"dependencies": [
+				"build"
+			],
 			"files": [
-				"src/**",
-				"vite.config.ts",
-				"vitest.config.ts",
-				"tsconfig.json"
+				"scripts/test-preview.mjs"
+			],
+			"output": []
+		},
+		"test:store-transport": {
+			"command": "node scripts/test-store-transport.mjs",
+			"files": [
+				"scripts/test-store-transport.mjs",
+				"scripts/fixtures/store-transport-worker.ts",
+				"src/lib/server/cache/**",
+				"src/lib/server/request-body.ts"
 			],
 			"output": []
 		}

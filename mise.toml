@@ -26,7 +26,7 @@ description = "lint and format"
 depends = ["lint-web", "lint-cli"]
 
 [tasks.test]
-description = "Run all tests"
+description = "Run Go tests"
 sources = ["**/*.go", "go.mod", "go.sum"]
 run = ["go test ./..."]
 
@@ -72,6 +72,12 @@ description = "Refresh pkgs/nimbus vendorHash after a go.mod change"
 sources = ["go.mod", "go.sum"]
 run = ["nix run nixpkgs#nix-update -- --flake --version=skip nimbus"]
 
+[tasks.check-web]
+description = "Check web formatting, types, tests, build, and preview"
+dir = "./web"
+# Wireit owns freshness so changes to Svelte files, schema, and fixtures count.
+run = ["npm run check"]
+
 [tasks.check]
 description = "Lint, test, and build"
-depends = ["lint", "test", "build"]
+depends = ["lint-cli", "test", "build-cli", "check-web"]
