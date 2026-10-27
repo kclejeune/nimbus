@@ -17,7 +17,7 @@
 		"set-hostnames": "node scripts/set-hostnames.mjs",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "wireit",
-		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --tsgo --incremental --watch",
 		"lint": "prettier --check .",
 		"format": "prettier --write .",
 		"test": "wireit",
@@ -90,7 +90,7 @@
 			"output": []
 		},
 		"check:types": {
-			"command": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+			"command": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --tsgo --incremental",
 			"files": [
 				"src/**",
 				"static/**",
@@ -144,6 +144,7 @@
 		"@types/d3-scale": "^4.0.9",
 		"@types/d3-shape": "^3.2.0",
 		"@types/node": "^26.6.5",
+		"@typescript/native": "npm:typescript@^7.0.2",
 		"bits-ui": "^2.19.5",
 		"d3-scale": "^4.0.2",
 		"d3-shape": "^3.2.0",

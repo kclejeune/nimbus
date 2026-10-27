@@ -24,7 +24,7 @@ Web (`cd web`, Node 24, scripts sequenced by wireit):
 
 ```bash
 npm run check                   # format check + types + tests + build + preview smoke
-npm run check:types             # svelte-check
+npm run check:types             # svelte-check --tsgo (TS7 checker, TS6 tooling APIs)
 npm test                        # vitest run
 npx vitest run src/lib/server/auth/permissions.test.ts   # one test file
 npm run lint / npm run format   # prettier
