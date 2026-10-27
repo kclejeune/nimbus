@@ -130,7 +130,7 @@ async function signIn(provider = 'oidc', sessionCookie = '', link = false) {
 	);
 	expect(started.status).toBe(200);
 	const authorization = new URL((await started.json()).url);
-	const callback = `${app}/api/auth/oauth2/callback/${provider}`;
+	const callback = `${app}/api/auth/callback/${provider}`;
 	expect(authorization.searchParams.get('redirect_uri')).toBe(callback);
 	expect(authorization.searchParams.get('code_challenge_method')).toBe('S256');
 	nonce = authorization.searchParams.get('nonce')!;
@@ -144,7 +144,7 @@ async function signIn(provider = 'oidc', sessionCookie = '', link = false) {
 	return response;
 }
 
-it('signs in through the existing OIDC callback, syncs groups on every login, and reuses the account', async () => {
+it('signs in through the native OIDC callback, syncs groups on every login, and reuses the account', async () => {
 	const first = await signIn();
 	expect(first.headers.get('location')).toBe('/account');
 	expect(cookies(first)).toContain('session_token=');

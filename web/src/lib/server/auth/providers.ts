@@ -4,11 +4,6 @@ import type { SocialProviderList, SocialProviders } from 'better-auth/social-pro
 type Env = App.Platform['env'];
 type SocialProviderId = SocialProviderList[number];
 
-// Keep existing IdP registrations working across the Better Auth 1.7 upgrade.
-// auth.ts maps these callback requests to the new core callback endpoint.
-const legacyCallbackURL = (appURL: string | undefined, id: string) =>
-	appURL ? `${appURL.replace(/\/$/, '')}/api/auth/oauth2/callback/${id}` : undefined;
-
 /** Generic OAuth and built-in providers share the social sign-in/link API. */
 export interface ProviderInfo {
 	id: string;
@@ -40,7 +35,6 @@ export function buildAuthProviders(env: Env): {
 	if (env.OIDC_ISSUER && env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET) {
 		oauth.push({
 			providerId: 'oidc',
-			redirectURI: legacyCallbackURL(env.APP_URL, 'oidc'),
 			discoveryUrl: `${env.OIDC_ISSUER.replace(/\/$/, '')}/.well-known/openid-configuration`,
 			clientId: env.OIDC_CLIENT_ID,
 			clientSecret: env.OIDC_CLIENT_SECRET,
@@ -55,7 +49,6 @@ export function buildAuthProviders(env: Env): {
 		const team = env.CF_ACCESS_TEAM_DOMAIN.replace(/\/$/, '');
 		oauth.push({
 			providerId: 'cloudflare',
-			redirectURI: legacyCallbackURL(env.APP_URL, 'cloudflare'),
 			discoveryUrl: `${team}/cdn-cgi/access/sso/oidc/${env.CF_SSO_CLIENT_ID}/.well-known/openid-configuration`,
 			clientId: env.CF_SSO_CLIENT_ID,
 			clientSecret: env.CF_SSO_CLIENT_SECRET,

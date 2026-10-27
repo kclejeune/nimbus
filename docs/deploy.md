@@ -93,11 +93,11 @@ Configure at least one sign-in method that can **create** accounts:
 
 | Method                                       | Creates users | Vars                                        | Secrets                | Callback URL                                    |
 | -------------------------------------------- | ------------- | ------------------------------------------- | ---------------------- | ----------------------------------------------- |
-| Generic OIDC (Authentik, Keycloak, Auth0, …) | yes           | `OIDC_ISSUER`, `OIDC_CLIENT_ID`             | `OIDC_CLIENT_SECRET`   | `<APP_URL>/api/auth/oauth2/callback/oidc`       |
+| Generic OIDC (Authentik, Keycloak, Auth0, …) | yes           | `OIDC_ISSUER`, `OIDC_CLIENT_ID`             | `OIDC_CLIENT_SECRET`   | `<APP_URL>/api/auth/callback/oidc`       |
 | Cloudflare Access (header assertion)         | yes           | `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`    | —                      | —                                               |
 | GitHub OAuth app                             | link only     | `GITHUB_CLIENT_ID`                          | `GITHUB_CLIENT_SECRET` | `<APP_URL>/api/auth/callback/github`            |
 | Google OAuth client                          | link only     | `GOOGLE_CLIENT_ID`                          | `GOOGLE_CLIENT_SECRET` | `<APP_URL>/api/auth/callback/google`            |
-| Cloudflare SSO (Access for SaaS, OIDC)       | link only     | `CF_SSO_CLIENT_ID`, `CF_ACCESS_TEAM_DOMAIN` | `CF_SSO_CLIENT_SECRET` | `<APP_URL>/api/auth/oauth2/callback/cloudflare` |
+| Cloudflare SSO (Access for SaaS, OIDC)       | link only     | `CF_SSO_CLIENT_ID`, `CF_ACCESS_TEAM_DOMAIN` | `CF_SSO_CLIENT_SECRET` | `<APP_URL>/api/auth/callback/cloudflare` |
 
 Link-only providers sign in accounts that already exist and have linked
 that provider from the **Account** page. Admins can also pre-provision an

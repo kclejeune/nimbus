@@ -23,7 +23,7 @@ export function createAuth(env: Env) {
 	const db = getDb(env.ATTIC_DB);
 	const { oauth, social } = buildAuthProviders(env);
 
-	const auth = betterAuth({
+	return betterAuth({
 		database: drizzleAdapter(db, { provider: 'sqlite', schema }),
 		secret: env.SESSION_SECRET,
 		baseURL: env.APP_URL,
@@ -112,20 +112,6 @@ export function createAuth(env: Env) {
 			sveltekitCookies(getRequestEvent)
 		]
 	});
-	return {
-		...auth,
-		handler(request: Request) {
-			// Generic OAuth moved onto the core callback route in 1.7. Keep
-			// existing IdP redirect URIs; both authorization and token exchange
-			// use the explicit redirectURI configured in providers.ts.
-			const url = new URL(request.url);
-			if (/^\/api\/auth\/oauth2\/callback\/(oidc|cloudflare)$/.test(url.pathname)) {
-				url.pathname = url.pathname.replace('/oauth2/callback/', '/callback/');
-				request = new Request(url, request);
-			}
-			return auth.handler(request);
-		}
-	};
 }
 
 export type Auth = ReturnType<typeof createAuth>;

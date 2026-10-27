@@ -147,9 +147,10 @@ adapts `cloudflare:workers` bindings to the app's `platform.env`/`platform.ctx`
 contract, including the loopback exports used for cache purges.
 
 Better Auth 1.7 uses the social APIs for generic OAuth sign-in and linking.
-With `APP_URL` set, Nimbus retains the existing `/api/auth/oauth2/callback/oidc`
-and `/api/auth/oauth2/callback/cloudflare` redirect URIs and handles them through
-the new callback endpoint internally, so existing IdP registrations keep working.
+Register `<APP_URL>/api/auth/callback/oidc` with the primary OIDC provider and
+`<APP_URL>/api/auth/callback/cloudflare` with the Cloudflare Access for SaaS app
+when that provider is enabled. These are Better Auth's native callback routes.
+Cloudflare Access header assertions use a separate authentication path.
 Account IDs and the database schema are unchanged; unlink requests now select
 the local account row ID. Pending sign-in attempts must be restarted after the
 upgrade because the patched OAuth state format changed. See the
