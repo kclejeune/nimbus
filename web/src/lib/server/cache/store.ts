@@ -478,7 +478,7 @@ async function serveAnonymousNarInfo(
 	// errors, deletion races or local signing fallbacks. The envelope key has
 	// no signing identity, so a fallback must retry key access on the next read.
 	// Existing purges cover this key.
-	const candidatePolicy = candidateCacheControl(rows.length > 0);
+	const candidatePolicy = candidateCacheControl(rows.length > 0, !winner && response.ok);
 	const age = (policy: string) => Number(/max-age=(\d+)/.exec(policy)?.[1] ?? 0);
 	const ttl = Math.min(age(candidatePolicy), age(response.headers.get('Cache-Control') ?? ''));
 	const cacheable =

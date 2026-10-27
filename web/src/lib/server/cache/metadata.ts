@@ -75,8 +75,17 @@ const CANDIDATE_STALE_SECONDS = 7 * 24 * 60 * 60;
 const LONG_CACHE_CONTROL = `public, max-age=3600, stale-while-revalidate=${CANDIDATE_STALE_SECONDS}`;
 const EMPTY_MAX_AGE_MS = 30_000;
 const EMPTY_CACHE_CONTROL = `public, max-age=300, stale-while-revalidate=${CANDIDATE_STALE_SECONDS}, stale-if-error=0`;
-export const candidateCacheControl = (listed: boolean): string =>
-	listed ? LONG_CACHE_CONTROL : EMPTY_CACHE_CONTROL;
+/** A successful upstream body can reuse empty membership for an hour:
+ * content-addressed upstream hits don't need a local holder. Final misses
+ * still confirm membership after EMPTY_MAX_AGE_MS, independently of this
+ * freshness policy; uploads also purge the candidate tag. The envelope's
+ * own TTL is capped by the upstream body's max-age in serveAnonymousNarInfo. */
+export const candidateCacheControl = (listed: boolean, upstreamHit = false): string =>
+	listed
+		? LONG_CACHE_CONTROL
+		: upstreamHit
+			? `${LONG_CACHE_CONTROL}, stale-if-error=0`
+			: EMPTY_CACHE_CONTROL;
 const SHORT_CACHE_CONTROL = 'public, max-age=30, must-revalidate';
 
 // When a candidate list was read from D1. The edge keeps it with the entry,

@@ -428,6 +428,61 @@ it('does not cache upstream uncertainty or remember it as absence', async () => 
 	expect((await get(hash)).status).toBe(200);
 });
 
+it('keeps successful upstream envelopes fresh across repeated closure walks without D1 reads', async () => {
+	const hash = freshHash();
+	await upstream(hash);
+	const { get, entries } = edge();
+	expect((await get(hash)).status).toBe(200);
+	expect(entries.get(route(hash))!.headers.get('Cache-Control')).toContain('max-age=3600');
+	vi.useFakeTimers({ toFake: ['Date'] });
+	try {
+		vi.setSystemTime(Date.now() + 10 * 60_000);
+		const prepare = vi.spyOn(fixture.db, 'prepare');
+		expect((await get(hash)).status).toBe(200);
+		expect(prepare).not.toHaveBeenCalled();
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+it('caps successful envelope freshness at the upstream TTL', async () => {
+	const hash = freshHash();
+	await upstream(hash);
+	fixture.sqlite.exec('UPDATE upstream SET ttl = 120');
+	const { get, entries } = edge();
+	expect((await get(hash)).status).toBe(200);
+	expect(entries.get(route(hash))!.headers.get('Cache-Control')).toContain('max-age=120,');
+});
+
+it('keeps a genuinely absent envelope on the five-minute negative TTL', async () => {
+	const hash = freshHash();
+	const { get, entries } = edge();
+	expect((await get(hash)).status).toBe(404);
+	expect(entries.get(route(hash))!.headers.get('Cache-Control')).toContain('max-age=300,');
+});
+
+it('confirms old empty membership before an expired upstream hit can become a final miss', async () => {
+	const hash = freshHash();
+	const remote = await upstream(hash);
+	const { get, entries } = edge();
+	expect((await get(hash)).status).toBe(200);
+	vi.useFakeTimers({ toFake: ['Date'] });
+	try {
+		vi.setSystemTime(Date.now() + 2 * 24 * 60 * 60 * 1000);
+		clearUpstreamsMemo();
+		for (const path of entries.keys())
+			if (path.startsWith('/_proxy_upstream/')) entries.delete(path);
+		remote.fetch.mockImplementation(async () => new Response(null, { status: 404 }));
+		// Simulate an upload whose purge has not reached the envelope's colo.
+		hold(hash);
+		const response = await get(hash);
+		expect(response.status).toBe(200);
+		expect(await response.text()).toContain(`${hash}-test`);
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
 it.each(['authenticated', 'anonymous'] as const)(
 	'shares one local body key between authenticated and anonymous reads (%s first)',
 	async (first) => {
@@ -480,7 +535,7 @@ it('reuses week-old metadata while refreshing a narinfo past its upstream lifeti
 	const { get, fetch, entries } = edge();
 	expect((await get(hash)).status).toBe(200);
 	expect(entries.get(route(hash))!.headers.get('Cache-Control')).toBe(
-		'public, max-age=300, stale-while-revalidate=604800, stale-if-error=0'
+		'public, max-age=3600, stale-while-revalidate=604800, stale-if-error=0'
 	);
 	vi.useFakeTimers({ toFake: ['Date'] });
 	try {
