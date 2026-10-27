@@ -12,8 +12,142 @@ const context = (fetch: (request: Request) => Promise<Response>) =>
 	({ exports: { CachedStore: { fetch } } }) as unknown as ExecutionContext;
 
 beforeEach(() => {
+	vi.spyOn(console, 'log').mockImplementation(() => {});
 	vi.spyOn(console, 'warn').mockImplementation(() => {});
 	vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+it('uses one body watchdog across a burst of fragments', async () => {
+	const timeout = vi.spyOn(globalThis, 'setTimeout');
+	let remaining = 1000;
+	const source = new ReadableStream<Uint8Array>({
+		pull(c) {
+			if (remaining-- > 0) c.enqueue(new Uint8Array([42]));
+			else c.close();
+		}
+	});
+	const response = await readViaStore(
+		context(async () => new Response(source)),
+		request(),
+		vi.fn()
+	);
+	expect(await response.bytes()).toEqual(new Uint8Array(1000).fill(42));
+	// One header deadline and one body watchdog, independent of fragment count.
+	expect(timeout).toHaveBeenCalledTimes(2);
+});
+
+it.each([2, 4])(
+	'rejects a cached body whose declared length %i contradicts its bytes',
+	async (length) => {
+		const response = await readViaStore(
+			context(
+				async () =>
+					new Response('abc', {
+						headers: { 'Content-Length': String(length) }
+					})
+			),
+			request(),
+			vi.fn()
+		);
+		await expect(response.bytes()).rejects.toThrow('Content-Length');
+		expect(console.error).toHaveBeenCalledOnce();
+	}
+);
+
+it('does not time out between downstream pulls even with an armed watchdog', async () => {
+	vi.useFakeTimers();
+	let calls = 0;
+	const source = new ReadableStream<Uint8Array>(
+		{
+			pull(c) {
+				if (calls++ < 2) c.enqueue(new Uint8Array([1, 2]));
+				else c.close();
+			}
+		},
+		{ highWaterMark: 0 }
+	);
+	const response = await readViaStore(
+		context(async () => new Response(source)),
+		request(),
+		vi.fn()
+	);
+	const reader = response.body!.getReader();
+	expect((await reader.read()).value).toEqual(new Uint8Array([1, 2]));
+	await vi.advanceTimersByTimeAsync(STORE_BODY_IDLE_TIMEOUT_MS * 2);
+	expect((await reader.read()).value).toEqual(new Uint8Array([1, 2]));
+	expect((await reader.read()).done).toBe(true);
+	expect(vi.getTimerCount()).toBe(0);
+	expect(console.error).not.toHaveBeenCalled();
+});
+
+it('cancels a pending body read when the caller disconnects after headers', async () => {
+	vi.useFakeTimers();
+	const abort = new AbortController();
+	const cancel = vi.fn();
+	const source = new ReadableStream<Uint8Array>({ cancel }, { highWaterMark: 0 });
+	const response = await readViaStore(
+		context(async () => new Response(source)),
+		new Request(request(), { signal: abort.signal }),
+		vi.fn()
+	);
+	const failed = expect(response.bytes()).rejects.toThrow('caller disconnected');
+	await vi.advanceTimersByTimeAsync(0);
+	abort.abort(new Error('caller disconnected'));
+	await failed;
+	expect(cancel).toHaveBeenCalledOnce();
+	expect(vi.getTimerCount()).toBe(0);
+	expect(console.error).not.toHaveBeenCalled();
+});
+
+it('aborts the store invocation and releases its lock even when body cancellation hangs', async () => {
+	vi.useFakeTimers();
+	let signal!: AbortSignal;
+	const cancel = vi.fn(() => new Promise<void>(() => {}));
+	const source = new ReadableStream<Uint8Array>({ cancel }, { highWaterMark: 0 });
+	const response = await readViaStore(
+		context(async (r) => {
+			signal = r.signal;
+			return new Response(source);
+		}),
+		request(),
+		vi.fn()
+	);
+	const failed = expect(response.bytes()).rejects.toBeInstanceOf(AdmissionError);
+	await vi.advanceTimersByTimeAsync(STORE_BODY_IDLE_TIMEOUT_MS);
+	await failed;
+	expect(signal.aborted).toBe(true);
+	expect(source.locked).toBe(false);
+	expect(cancel).toHaveBeenCalledOnce();
+	expect(vi.getTimerCount()).toBe(0);
+});
+
+it('keeps a watchdog accurate across multiple progress intervals', async () => {
+	vi.useFakeTimers();
+	let controller!: ReadableStreamDefaultController<Uint8Array>;
+	const source = new ReadableStream<Uint8Array>(
+		{
+			start(c) {
+				controller = c;
+			}
+		},
+		{ highWaterMark: 0 }
+	);
+	const response = await readViaStore(
+		context(async () => new Response(source)),
+		request(),
+		vi.fn()
+	);
+	const reader = response.body!.getReader();
+	for (let i = 0; i < 3; i++) {
+		const reading = reader.read();
+		await vi.advanceTimersByTimeAsync(STORE_BODY_IDLE_TIMEOUT_MS - 1000);
+		controller.enqueue(new Uint8Array([i]));
+		expect((await reading).value).toEqual(new Uint8Array([i]));
+	}
+	const failed = expect(reader.read()).rejects.toBeInstanceOf(AdmissionError);
+	await vi.advanceTimersByTimeAsync(STORE_BODY_IDLE_TIMEOUT_MS);
+	await failed;
+	expect(vi.getTimerCount()).toBe(0);
 });
 afterEach(() => {
 	vi.useRealTimers();

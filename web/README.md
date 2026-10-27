@@ -112,9 +112,18 @@ scripts/                deploy helpers: migrate, config materialization, hostnam
 npm install
 npm run check        # svelte-check
 npm test             # vitest over pure server modules and cache/test-db.ts (node:sqlite)
+npm run test:store-transport  # native workerd streams, including a 15 s stall
 npm run build        # vite build + Cloudflare adapter → .svelte-kit/cloudflare
 npm run dev:worker   # wrangler dev on localhost:8788
 ```
+
+`test:store-transport` checks native BYOB reads, partial final batches, Range
+headers, truncated bodies, and cancellation without production bindings. Add
+`-- --benchmark` to compare guarded and native forwarding of 64 MiB. Large
+native bodies use a 64 KiB minimum fill and 128 KiB buffer capacity with a
+15-second progress deadline on the internal store transport; downstream
+backpressure is excluded from that deadline. Body diagnostics record both
+`batchBytes` (minimum fill) and `bufferBytes` (capacity) for production comparisons.
 
 Security overrides keep Typography's `postcss-selector-parser` and Miniflare's
 `undici` on patched releases until their upstream dependency constraints catch up.
