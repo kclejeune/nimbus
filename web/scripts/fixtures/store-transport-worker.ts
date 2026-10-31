@@ -1,6 +1,6 @@
 // Native stream fixture for scripts/test-store-transport.mjs. No real bindings.
 import { readViaStore } from '../../src/lib/server/cache/store-transport';
-import type { ExecutionContext } from '../../src/lib/server/cache/platform';
+import { readAll, type ExecutionContext } from '../../src/lib/server/cache/platform';
 
 let timers = 0;
 let batchReads = 0;
@@ -97,6 +97,12 @@ export default {
 				}
 			})()
 		);
+		if (mode?.startsWith('collect')) {
+			const hint = Number(url.searchParams.get('hint') ?? size);
+			const limit = Number(url.searchParams.get('limit') ?? size + 10);
+			const bytes = await readAll(readable, limit, hint, { batch: mode !== 'collect-plain' });
+			return bytes ? new Response(bytes) : new Response('oversized', { status: 413 });
+		}
 		const headers = new Headers({ 'Content-Length': String(size) });
 		if (mode === 'range') headers.set('Content-Range', `bytes 0-${size - 1}/${size + 1}`);
 		const response = new Response(readable, { status: mode === 'range' ? 206 : 200, headers });

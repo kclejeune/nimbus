@@ -237,3 +237,134 @@ it('does not buffer completion bodies while admission is full, and releases hold
 	if (acquired) uploadMemory.release(held);
 	expect(acquired).toBe(true);
 });
+
+it('buffers the next body while the current body is still reading, within two slots', async () => {
+	const { manifest, raws } = await seed();
+	const firstReading = deferred<void>();
+	const secondReading = deferred<void>();
+	const resume = deferred<void>();
+	let index = 0;
+	vi.spyOn(storage.bucket, 'get').mockImplementation(async () => {
+		const i = index++;
+		if (i === 1) await firstReading.promise;
+		return {
+			size: raws[i].length,
+			body: new ReadableStream<Uint8Array>(
+				{
+					async pull(controller) {
+						(i === 0 ? firstReading : secondReading).resolve();
+						await resume.promise;
+						controller.enqueue(raws[i]);
+						controller.close();
+					}
+				},
+				{ highWaterMark: 0 }
+			),
+			json: async () => null
+		};
+	});
+	const completion = handleCdcComplete(env, undefined, manifest);
+	try {
+		await secondReading.promise;
+		expect(uploadMemory.tryAcquire(1)).toBe(false);
+		expect(await withWasmSlot(async () => 'available')).toBe('available');
+	} finally {
+		resume.resolve();
+	}
+	expect((await completion).status).toBe(200);
+	expect(uploadMemory.tryAcquire(2 * UPLOAD_SLOT_BYTES)).toBe(true);
+	uploadMemory.release(2 * UPLOAD_SLOT_BYTES);
+});
+
+it('cancels a buffered next body immediately when verification of the current chunk fails', async () => {
+	const { manifest } = await seed();
+	const firstReading = deferred<void>();
+	const secondReading = deferred<void>();
+	const resume = deferred<void>();
+	const cancel = vi.fn(() => new Promise<void>(() => {}));
+	let index = 0;
+	vi.spyOn(storage.bucket, 'get').mockImplementation(async () => {
+		const i = index++;
+		if (i === 1) await firstReading.promise;
+		return {
+			size: 3,
+			body: new ReadableStream<Uint8Array>(
+				{
+					async pull(controller) {
+						if (i === 1) {
+							secondReading.resolve();
+							return new Promise<void>(() => {});
+						}
+						firstReading.resolve();
+						await resume.promise;
+						controller.enqueue(new Uint8Array([9, 9, 9]));
+						controller.close();
+					},
+					cancel
+				},
+				{ highWaterMark: 0 }
+			),
+			json: async () => null
+		};
+	});
+	const completion = handleCdcComplete(env, undefined, manifest);
+	await secondReading.promise;
+	resume.resolve();
+	expect((await completion).status).toBe(409);
+	expect(cancel).toHaveBeenCalledOnce();
+	expect(fixture.sqlite.prepare('SELECT COUNT(*) AS n FROM nar').get()!.n).toBe(0);
+	expect(
+		fixture.sqlite.prepare('SELECT COUNT(*) AS n FROM chunk WHERE holders_count != 0').get()!.n
+	).toBe(0);
+	expect(uploadMemory.tryAcquire(2 * UPLOAD_SLOT_BYTES)).toBe(true);
+	uploadMemory.release(2 * UPLOAD_SLOT_BYTES);
+});
+
+it('lets two completions progress when their leading chunks occupy both slots', async () => {
+	const { manifest } = await seed();
+	const firstKey = [...storage.objects.keys()][0];
+	const bothReading = deferred<void>();
+	const resume = deferred<void>();
+	let leaders = 0;
+	vi.spyOn(storage.bucket, 'get').mockImplementation(async (key) => {
+		if (key !== firstKey) await bothReading.promise;
+		return {
+			size: 3,
+			body: new ReadableStream<Uint8Array>(
+				{
+					async pull(controller) {
+						if (key === firstKey) {
+							if (++leaders === 2) bothReading.resolve();
+							await resume.promise;
+						}
+						controller.enqueue(storage.objects.get(key)!);
+						controller.close();
+					}
+				},
+				{ highWaterMark: 0 }
+			),
+			json: async () => null
+		};
+	});
+	const other = {
+		...manifest,
+		nar_info: {
+			...manifest.nar_info,
+			store_path_hash: 'b'.repeat(32),
+			store_path: `/nix/store/${'b'.repeat(32)}-test`
+		}
+	};
+	const completions = [
+		handleCdcComplete(env, undefined, manifest),
+		handleCdcComplete(env, undefined, other)
+	];
+	try {
+		await bothReading.promise;
+		expect(uploadMemory.tryAcquire(1)).toBe(false);
+	} finally {
+		resume.resolve();
+	}
+	expect((await Promise.all(completions)).map((r) => r.status)).toEqual([200, 200]);
+	expect(uploadMemory.tryAcquire(2 * UPLOAD_SLOT_BYTES)).toBe(true);
+	uploadMemory.release(2 * UPLOAD_SLOT_BYTES);
+});

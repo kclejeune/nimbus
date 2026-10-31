@@ -28,6 +28,25 @@ const stream = async (size, mode = '') =>
 	fetch(new URL(`/_nar_v2/fixture.nar?size=${size}&mode=${mode}`, await mf.ready));
 
 try {
+	// The completion collector uses native batching into its output buffer.
+	// Incorrect size hints must still trim/grow and enforce the byte limit.
+	for (const [size, hint] of [
+		[65535, 65535],
+		[65536, 65536],
+		[131089, 131089],
+		[131089, 65536],
+		[65536, 131072],
+		[17, 0]
+	]) {
+		const response = await stream(size, `collect&hint=${hint}`);
+		assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.alloc(size, 42));
+		const result = await stats();
+		assert.equal(result.activeTimers, 0);
+		assert.equal(result.timers, 1);
+		if (hint === size) assert.ok(result.batchReads <= Math.ceil(size / 65536) + 1);
+	}
+	assert.equal((await stream(65537, 'collect&hint=65536&limit=65536')).status, 413);
+	assert.equal((await stats()).activeTimers, 0);
 	for (const size of [65535, 65536, 131071, 131072, 2 * 131072 + 17]) {
 		const response = await stream(size);
 		assert.equal(response.status, 200);
@@ -73,6 +92,22 @@ try {
 	assert.ok(stopped.diagnostic.pendingReadMs >= 15000);
 
 	if (process.argv.includes('--benchmark')) {
+		for (const mode of ['collect-plain', 'collect']) {
+			for (let run = 0; run < 3; run++) {
+				const started = performance.now();
+				const size = 8 * 1024 * 1024;
+				const response = await stream(size, mode);
+				assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.alloc(size, 42));
+				console.log(
+					JSON.stringify({
+						mode,
+						run,
+						ms: Math.round(performance.now() - started),
+						...(await stats())
+					})
+				);
+			}
+		}
 		for (const mode of ['native', 'guarded']) {
 			for (let run = 0; run < 3; run++) {
 				const size = 64 * 1024 * 1024;

@@ -6,7 +6,8 @@ export async function* prefetchInOrder<I, T>(
 	ahead: number,
 	load: (item: I) => Promise<T>,
 	dispose: (value: T) => Promise<unknown>,
-	defer?: (cleanup: Promise<unknown>) => void
+	defer?: (cleanup: Promise<unknown>) => void,
+	stop?: () => void
 ): AsyncGenerator<T> {
 	if (!Number.isInteger(ahead) || ahead < 1) throw new RangeError('Read-ahead must be positive');
 	const pending: Promise<T>[] = [];
@@ -30,6 +31,9 @@ export async function* prefetchInOrder<I, T>(
 			}
 		}
 	} finally {
+		// Interrupt buffered read-ahead before awaiting its disposal. A failed
+		// consumer must not wait for an unused body's idle timeout.
+		stop?.();
 		if (pending.length) {
 			const cleanup = Promise.allSettled(pending.map(async (work) => dispose(await work)));
 			// An unused fetch may still be waiting on storage headers. Its

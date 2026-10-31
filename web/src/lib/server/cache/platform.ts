@@ -5,7 +5,7 @@
 // import only wrangler's bundler understands.
 import type { PurgeResult } from './purge-queue';
 import { countR2, countRetry, measure } from './latency';
-import { bodyDeadline, readWithTimeout } from '../request-body';
+import { bodyDeadline, bodyWatchdog } from '../request-body';
 
 /**
  * Execution context extended with the loopback bindings for the entrypoints
@@ -262,19 +262,32 @@ export async function mapConcurrent<T, R>(
  * the returned view, including an empty EOF read. Incorrect size hints
  * still grow or trim the result, and a separate read verifies EOF at the
  * limit rather than trusting Content-Length. */
+interface BodyOptions {
+	signal?: AbortSignal;
+	/** Trusted storage reads, not client uploads: batch native fragments. */
+	batch?: boolean;
+}
+
+/** Minimum bytes per native batched read (workerd's `readAtLeast`). */
+export const BODY_READ_BYTES = 64 * 1024;
+export type BatchReader = ReadableStreamBYOBReader & {
+	readAtLeast(
+		min: number,
+		view: Uint8Array
+	): Promise<ReadableStreamReadResult<Uint8Array<ArrayBuffer>>>;
+};
+
 async function readSizedBody(
 	reader: ReadableStreamBYOBReader,
 	limit: number,
-	size: number
+	size: number,
+	options: BodyOptions
 ): Promise<Uint8Array | null> {
 	let out = new Uint8Array(size);
 	let total = 0;
 	let view: Uint8Array<ArrayBuffer>;
-	const deadline = bodyDeadline();
-	const timedReader = {
-		read: () => reader.read(view),
-		cancel: () => reader.cancel()
-	};
+	const watchdog = bodyWatchdog(reader, bodyDeadline(), options.signal);
+	const batch = options.batch ? (reader as Partial<BatchReader>).readAtLeast : undefined;
 	try {
 		for (;;) {
 			const capacity = out.length;
@@ -282,7 +295,11 @@ async function readSizedBody(
 			// Past the hint, a 1-byte probe confirms EOF; any byte it finds
 			// grows `out` and later reads land there directly.
 			view = intoOutput ? out.subarray(total) : new Uint8Array(1);
-			const { done, value } = await readWithTimeout(timedReader, deadline);
+			const { done, value } = await watchdog.read(() =>
+				batch
+					? batch.call(reader, Math.min(BODY_READ_BYTES, view.byteLength), view)
+					: reader.read(view)
+			);
 			if (intoOutput) {
 				if (!value) throw new Error('Body read cancelled');
 				out = new Uint8Array(value.buffer, 0, capacity);
@@ -303,6 +320,7 @@ async function readSizedBody(
 			}
 		}
 	} finally {
+		watchdog.close();
 		reader.releaseLock();
 	}
 	// Trim an inaccurate hint so upload admission can account for the actual
@@ -318,7 +336,8 @@ async function readSizedBody(
 export async function readAll(
 	body: ReadableStream<Uint8Array>,
 	limit: number,
-	expectedSize?: number
+	expectedSize?: number,
+	options: BodyOptions = {}
 ): Promise<Uint8Array | null> {
 	const sized =
 		expectedSize !== undefined &&
@@ -332,16 +351,16 @@ export async function readAll(
 		} catch {
 			// User-created streams and Node test fixtures may not be byte streams.
 		}
-		if (byob) return readSizedBody(byob, limit, expectedSize!);
+		if (byob) return readSizedBody(byob, limit, expectedSize!, options);
 	}
 	const parts: Uint8Array[] = [];
 	let out = sized ? new Uint8Array(expectedSize!) : undefined;
 	let total = 0;
 	const reader = body.getReader();
-	const deadline = bodyDeadline();
+	const watchdog = bodyWatchdog(reader, bodyDeadline(), options.signal);
 	try {
 		for (;;) {
-			const { done, value } = await readWithTimeout(reader, deadline);
+			const { done, value } = await watchdog.read(() => reader.read());
 			if (done) break;
 			if (!value || value.length === 0) continue;
 			const offset = total;
@@ -360,6 +379,7 @@ export async function readAll(
 			} else parts.push(value);
 		}
 	} finally {
+		watchdog.close();
 		reader.releaseLock();
 	}
 	if (out) return out.length === total ? out : out.slice(0, total);

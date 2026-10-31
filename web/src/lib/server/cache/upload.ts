@@ -94,6 +94,10 @@ export type UploadAdmission = (() => void) & { shrink(bytes: number): void };
 async function acquireUpload(weight: number, waitMs: number): Promise<UploadAdmission> {
 	if (!(await measure('admission', () => uploadMemory.acquireBounded(weight, 64, waitMs))))
 		throw new AdmissionError('Upload memory busy; retry shortly', 5);
+	return uploadReservation(weight);
+}
+
+function uploadReservation(weight: number): UploadAdmission {
 	let held = weight;
 	let released = false;
 	const release = () => {
@@ -1248,6 +1252,21 @@ async function repairChunk(
 	return json({ ok: true, deduplicated: false, repaired: true, proof });
 }
 
+async function readCompletionChunk(
+	object: { body: unknown; size: number },
+	ctx?: ExecutionContext,
+	signal?: AbortSignal
+): Promise<Uint8Array | null> {
+	return withSpan(ctx, 'complete chunk read', () =>
+		measure('cdcRead', () =>
+			readAll(object.body as ReadableStream<Uint8Array>, CDC_MAX_CHUNK + 1024 * 1024, object.size, {
+				signal,
+				batch: true
+			})
+		)
+	);
+}
+
 /**
  * POST /_api/v1/upload-path/chunks/complete — assemble the NAR from chunk
  * references. Locks every chunk; if any vanished (e.g. GC raced), responds
@@ -1347,8 +1366,9 @@ export async function handleCdcComplete(
 	}
 
 	// A SHA-256 of the ordered bytes cannot be inferred from chunk hashes.
-	// Read one chunk at a time under the shared upload memory budget, with
-	// one R2 header fetch ahead. Only verification holds a WASM slot; network
+	// Read and verify in order under the shared upload memory budget, with
+	// one optional body buffered ahead when a spare full slot is available.
+	// Only verification holds a WASM slot; network
 	// reads cannot monopolize it. Buffered bytes stay bounded regardless of NAR size.
 	// Storage outcomes map to the client's recovery paths: a chunk that
 	// vanished (GC raced the upload, or the row outlived its object) or whose
@@ -1363,6 +1383,9 @@ export async function handleCdcComplete(
 	const vanished: string[] = [];
 	let verified = false;
 	let compressedBytes = 0;
+	let prefetchedChunks = 0;
+	let consuming = false;
+	const readAhead = new AbortController();
 	try {
 		const loads = prefetchInOrder(
 			body.chunks,
@@ -1376,37 +1399,55 @@ export async function handleCdcComplete(
 								withR2Retry(() => env.CACHE_BUCKET.get(key))
 							)
 						: null;
-					return { chunk, row, object };
+					// Read ahead only while the consumer already owns its slot.
+					// Speculation never queues for memory: two completions holding
+					// one slot each must not wait on each other's next chunk.
+					let release: UploadAdmission | undefined;
+					let compressed: Uint8Array | null | undefined;
+					if (
+						object &&
+						consuming &&
+						!readAhead.signal.aborted &&
+						uploadMemory.tryAcquire(UPLOAD_SLOT_BYTES)
+					) {
+						release = uploadReservation(UPLOAD_SLOT_BYTES);
+						try {
+							compressed = await readCompletionChunk(object, ctx, readAhead.signal);
+						} catch (error) {
+							release();
+							throw error;
+						}
+					}
+					return { chunk, row, object, compressed, release };
 				} catch {
 					throw new AdmissionError('Chunk storage temporarily unavailable', 5);
 				}
 			},
-			async ({ object }) => {
-				await object?.body.cancel().catch(() => {});
+			async ({ object, release }) => {
+				release?.();
+				void object?.body.cancel().catch(() => {});
 			},
-			deferTo(ctx)
+			deferTo(ctx),
+			() => readAhead.abort(new Error('verification stopped'))
 		);
-		for await (const { chunk, row, object } of loads) {
+		for await (const loaded of loads) {
+			const { chunk, row, object } = loaded;
 			if (!object) {
 				vanished.push(chunk.hash);
 				break;
 			}
 			// Reserve before consuming the body. Admission is per chunk, so a
 			// large completion cannot reserve all memory while waiting on R2.
-			const release = await acquireUpload(UPLOAD_SLOT_BYTES, ADMISSION_WAIT_MS);
+			const release = loaded.release ?? (await acquireUpload(UPLOAD_SLOT_BYTES, ADMISSION_WAIT_MS));
+			consuming = true;
 			let ok: boolean;
 			try {
 				let compressed: Uint8Array | null;
 				try {
-					compressed = await withSpan(ctx, 'complete chunk read', () =>
-						measure('cdcRead', () =>
-							readAll(
-								object.body as unknown as ReadableStream<Uint8Array>,
-								CDC_MAX_CHUNK + 1024 * 1024,
-								object.size
-							)
-						)
-					);
+					const prefetched = loaded.compressed;
+					if (prefetched !== undefined) prefetchedChunks++;
+					compressed =
+						prefetched !== undefined ? prefetched : await readCompletionChunk(object, ctx);
 					compressedBytes += compressed?.byteLength ?? 0;
 				} catch {
 					throw new AdmissionError('Chunk storage temporarily unavailable', 5);
@@ -1435,6 +1476,7 @@ export async function handleCdcComplete(
 					)
 				);
 			} finally {
+				consuming = false;
 				release();
 			}
 			if (!ok) {
@@ -1454,7 +1496,7 @@ export async function handleCdcComplete(
 		}
 		verified = true;
 	} finally {
-		uploadShape(body.chunks.length, body.nar_size, compressedBytes);
+		uploadShape(body.chunks.length, body.nar_size, compressedBytes, prefetchedChunks);
 		if (!verified) {
 			await writer.abort(new Error('verification stopped')).catch(() => {});
 			await releaseChunkLocks(env, [...lockedByHash.values()]);

@@ -23,29 +23,84 @@ export const BODY_MAX_DURATION_MS = 10 * 60_000;
 
 export const bodyDeadline = (): number => Date.now() + BODY_MAX_DURATION_MS;
 
+/** One watchdog for a collected body, including native batched reads. Time
+ * between reads is not idle; the absolute deadline still bounds trickles.
+ * Cancellation rejects a pending read even if the source's cancel hangs. */
+export function bodyWatchdog(
+	reader: { cancel(): Promise<unknown> },
+	deadline: number,
+	signal?: AbortSignal
+) {
+	let readingSince: number | undefined;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let failure: unknown;
+	let rejectRead: ((error: unknown) => void) | undefined;
+	const fail = (error: unknown) => {
+		if (failure !== undefined) return;
+		failure = error;
+		rejectRead?.(error);
+		void reader.cancel().catch(() => {});
+	};
+	const check = () => {
+		timer = undefined;
+		if (readingSince === undefined || failure !== undefined) return;
+		const now = Date.now();
+		const remaining = Math.min(BODY_IDLE_TIMEOUT_MS - (now - readingSince), deadline - now);
+		if (remaining > 0) timer = setTimeout(check, remaining);
+		else
+			fail(
+				new RequestBodyError(
+					408,
+					now >= deadline ? 'Request body deadline exceeded' : 'Request body stalled'
+				)
+			);
+	};
+	const aborted = () =>
+		fail(
+			signal!.reason === undefined
+				? new DOMException('Body read aborted', 'AbortError')
+				: signal!.reason
+		);
+	signal?.addEventListener('abort', aborted, { once: true });
+	if (signal?.aborted) aborted();
+	return {
+		async read<T>(op: () => Promise<T>): Promise<T> {
+			if (failure !== undefined) throw failure;
+			readingSince = Date.now();
+			if (readingSince >= deadline)
+				fail(new RequestBodyError(408, 'Request body deadline exceeded'));
+			if (failure !== undefined) throw failure;
+			if (timer === undefined)
+				timer = setTimeout(check, Math.min(BODY_IDLE_TIMEOUT_MS, deadline - readingSince));
+			try {
+				// Keep only the current waiter. Repeatedly racing one long-lived
+				// rejected promise would retain a handler for every past fragment.
+				return await new Promise<T>((resolve, reject) => {
+					rejectRead = reject;
+					op().then(resolve, reject);
+				});
+			} finally {
+				rejectRead = undefined;
+				readingSince = undefined;
+			}
+		},
+		close() {
+			clearTimeout(timer);
+			signal?.removeEventListener('abort', aborted);
+		}
+	};
+}
+
 /** Both idle and absolute deadlines matter: a trickle must not hold admission forever. */
 export async function readWithTimeout<T>(
 	reader: Pick<ReadableStreamDefaultReader<T>, 'read' | 'cancel'>,
 	deadline: number
 ): Promise<ReadableStreamReadResult<T>> {
-	const timeoutMs = Math.min(BODY_IDLE_TIMEOUT_MS, deadline - Date.now());
-	if (timeoutMs <= 0) {
-		void reader.cancel().catch(() => {});
-		throw new RequestBodyError(408, 'Request body deadline exceeded');
-	}
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	const watchdog = bodyWatchdog(reader, deadline);
 	try {
-		return await Promise.race([
-			reader.read(),
-			new Promise<never>((_, reject) => {
-				timer = setTimeout(() => {
-					reject(new RequestBodyError(408, 'Request body stalled'));
-					void reader.cancel().catch(() => {});
-				}, timeoutMs);
-			})
-		]);
+		return await watchdog.read(() => reader.read());
 	} finally {
-		clearTimeout(timer);
+		watchdog.close();
 	}
 }
 

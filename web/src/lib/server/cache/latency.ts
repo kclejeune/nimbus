@@ -46,7 +46,12 @@ interface Sample {
 	d1PrimarySqlMs: number;
 	d1Attempts: number;
 	candidate?: { source: string; listed: boolean };
-	upload?: { chunks: number; rawBytes: number; compressedBytes?: number };
+	upload?: {
+		chunks: number;
+		rawBytes: number;
+		compressedBytes?: number;
+		prefetchedChunks?: number;
+	};
 }
 const current = new AsyncLocalStorage<Sample>();
 
@@ -72,9 +77,14 @@ export function candidateMetadata(source: string, listed: boolean): void {
 	const s = current.getStore();
 	if (s) s.candidate = { source, listed };
 }
-export function uploadShape(chunks: number, rawBytes: number, compressedBytes?: number): void {
+export function uploadShape(
+	chunks: number,
+	rawBytes: number,
+	compressedBytes?: number,
+	prefetchedChunks?: number
+): void {
 	const s = current.getStore();
-	if (s) s.upload = { chunks, rawBytes, compressedBytes };
+	if (s) s.upload = { chunks, rawBytes, compressedBytes, prefetchedChunks };
 }
 
 /** A multi-chunk NAR stream's timing: `wait` wraps each chunk get the pump
@@ -218,6 +228,7 @@ export function routeTemplate(request: Request): string {
 	const parts = new URL(request.url).pathname.split('/').filter(Boolean);
 	let path: string;
 	if (parts[0] === '_upstream_nar') path = '/_upstream_nar/:scope/:file';
+	else if (parts[0] === '_upstream_config') path = '/_upstream_config/:version';
 	else if (parts[0] === '_anonymous_narinfo_v2') path = '/_anonymous_narinfo_v2/:hash';
 	else if (parts[0] === '_meta') path = '/_meta/:kind/:hash';
 	else if (parts[0] === '_touch') path = '/_touch/:cache/:hash';
