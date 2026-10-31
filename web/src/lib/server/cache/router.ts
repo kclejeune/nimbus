@@ -27,6 +27,7 @@ import {
 } from './cache-config';
 import { findCacheCached } from './cache-lookup';
 import { hedgedReplicaRead } from './read-hedge';
+import { readStoreMetadata, withStoreRecovery } from './store-transport';
 import { handleAuthConfig, handleDeviceStart, handleDeviceToken } from './cli-auth';
 import { readDeviceCode, readMissingPaths } from './request-input';
 import { RequestBodyError, isRecord, JSON_LIMITS, readJson } from '../request-body';
@@ -619,10 +620,14 @@ async function anonymousNarInfo(
 		`/_anonymous_narinfo_v2/${hash}`,
 		request.headers.get('CF-Connecting-IP')
 	);
-	const result = await measure('candidateLoopback', () =>
-		viaStore(ctx, internal, () => serveStore(internal, env, ctx))
+	const { response: result, value: envelope } = await measure('candidateLoopback', () =>
+		readStoreMetadata(
+			ctx,
+			internal,
+			() => serveStore(internal, env, ctx),
+			(response) => internalJson<AnonymousNarInfo>(response, 'Narinfo temporarily unavailable')
+		)
 	);
-	const envelope = await internalJson<AnonymousNarInfo>(result, 'Narinfo temporarily unavailable');
 	const cached = await resolveCandidates(
 		env,
 		ctx,
@@ -1464,7 +1469,8 @@ async function handleV1(
 					env,
 					cacheName,
 					body as import('./cache-config').CreateCacheOptions,
-					token.sub
+					token.sub,
+					ctx
 				);
 				return jsonResponse({ name: cacheName, created: true, public_key });
 			}
@@ -1505,7 +1511,7 @@ async function handleV1(
 				if (!permissionForCache(token, newName).createCache) {
 					return errorResponse(403, 'Permission denied: create cache (target name)');
 				}
-				await renameCache(env, cacheName, newName);
+				await renameCache(env, cacheName, newName, ctx);
 				return jsonResponse({ name: newName, renamed_from: cacheName, renamed: true });
 			}
 		} catch (e) {
@@ -1549,22 +1555,24 @@ export async function handleCacheApi(
 	ctx?: ExecutionContext,
 	route?: string
 ): Promise<Response> {
-	return observeRequest(
-		request,
-		env,
-		'gateway',
-		async () => {
-			try {
-				return await handleCacheApiInner(request, env, ctx);
-			} catch (e) {
-				// Without this boundary an unhandled throw (a D1/R2 hiccup mid-upload, a
-				// read-path error crossing the CachedStore RPC) surfaces to Cloudflare as
-				// a raw 1101 with no logged stack. caughtResponse logs the stack and
-				// returns a controlled 500/503 so client retry paths engage.
-				return caughtResponse('cache-api unhandled', request, e);
-			}
-		},
-		route
+	return withStoreRecovery(() =>
+		observeRequest(
+			request,
+			env,
+			'gateway',
+			async () => {
+				try {
+					return await handleCacheApiInner(request, env, ctx);
+				} catch (e) {
+					// Without this boundary an unhandled throw (a D1/R2 hiccup mid-upload, a
+					// read-path error crossing the CachedStore RPC) surfaces to Cloudflare as
+					// a raw 1101 with no logged stack. caughtResponse logs the stack and
+					// returns a controlled 500/503 so client retry paths engage.
+					return caughtResponse('cache-api unhandled', request, e);
+				}
+			},
+			route
+		)
 	);
 }
 

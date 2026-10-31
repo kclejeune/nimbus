@@ -1,17 +1,25 @@
 import { AdmissionError } from './admission';
 import { countLoopbackFallback } from './latency';
-import { withinMs, type ExecutionContext } from './platform';
+import { BODY_READ_BYTES, withinMs, type BatchReader, type ExecutionContext } from './platform';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 // Leave room for upstream probes' five-second timeout and normal backend
 // work, but bound the 60–70 s caching-pipeline stalls seen in production.
 // Only one uncached attempt follows, with normal backend admission intact.
 export const STORE_HEADER_TIMEOUT_MS = 10_000;
 export const STORE_BODY_IDLE_TIMEOUT_MS = 15_000;
-const BODY_READ_BYTES = 64 * 1024;
 const BODY_READ_BUFFER_BYTES = 128 * 1024;
-type BatchReader = ReadableStreamBYOBReader & {
-	readAtLeast(min: number, view: Uint8Array): Promise<ReadableStreamReadResult<Uint8Array>>;
-};
+interface Recovery {
+	bypass: boolean;
+}
+const recovery = new AsyncLocalStorage<Recovery>();
+
+/** A failed transport bypasses further loopbacks in this recovery path.
+ * Successful calls never consume another call's timeout or cache access. */
+export function withStoreRecovery<T>(op: () => T): T {
+	if (recovery.getStore()) return op();
+	return recovery.run({ bypass: false }, op);
+}
 
 /** Cleanup must not make the fallback wait for the same broken transport. */
 export function cancelStoreBody(response: Response | undefined): void {
@@ -218,8 +226,17 @@ export async function readViaStore(
 	request: Request,
 	direct: () => Promise<Response>
 ): Promise<Response> {
+	return withStoreRecovery(() => readStore(ctx, request, direct));
+}
+
+async function readStore(
+	ctx: ExecutionContext | undefined,
+	request: Request,
+	direct: () => Promise<Response>
+): Promise<Response> {
 	const store = ctx?.exports?.CachedStore;
-	if (!store) return direct();
+	const state = recovery.getStore()!;
+	if (!store || state.bypass) return direct();
 	const abort = new AbortController();
 	const signal = AbortSignal.any([request.signal, abort.signal]);
 	const pending = store.fetch(new Request(request, { signal }));
@@ -229,6 +246,7 @@ export async function readViaStore(
 	if (response && response.status !== 502) return guardBody(response, request, abort);
 	if (request.signal.aborted) throw request.signal.reason;
 	const reason = response ? '502' : 'header_timeout';
+	state.bypass = true;
 	countLoopbackFallback();
 	diagnostic(request, 'headers', { reason });
 	// Abort is best-effort: a transport that ignores the signal may still
@@ -238,4 +256,52 @@ export async function readViaStore(
 	cancelStoreBody(response);
 	if (!response) void pending.then(cancelStoreBody, () => {});
 	return direct();
+}
+
+/** Metadata stays private until fully consumed, so a broken cached body can
+ * safely retry once as a whole. NAR streams must keep using readViaStore:
+ * bytes already delivered to a client can never be replaced or spliced. */
+export function readStoreMetadata<T>(
+	ctx: ExecutionContext | undefined,
+	request: Request,
+	direct: () => Promise<Response>,
+	consume: (response: Response) => Promise<T>,
+	stale?: (response: Response) => boolean
+): Promise<{ response: Response; value: T }> {
+	return withStoreRecovery(async () => {
+		const result = await readMetadataOnce(ctx, request, direct, consume);
+		// An expired edge entry must not hand its contents a new lifetime.
+		if (!stale?.(result.response)) return result;
+		const response = await direct();
+		return { response, value: await consume(response) };
+	});
+}
+
+async function readMetadataOnce<T>(
+	ctx: ExecutionContext | undefined,
+	request: Request,
+	direct: () => Promise<Response>,
+	consume: (response: Response) => Promise<T>
+): Promise<{ response: Response; value: T }> {
+	let attemptedDirect = false;
+	let refused = false;
+	const uncached = () => {
+		attemptedDirect = true;
+		return direct();
+	};
+	try {
+		const response = await readViaStore(ctx, request, uncached);
+		refused = !response.ok;
+		return { response, value: await consume(response) };
+	} catch (error) {
+		if (request.signal.aborted || attemptedDirect || refused) throw error;
+		recovery.getStore()!.bypass = true;
+		countLoopbackFallback();
+		diagnostic(request, 'metadata', {
+			reason: 'transport_error',
+			error: error instanceof Error ? error.message : String(error)
+		});
+		const response = await uncached();
+		return { response, value: await consume(response) };
+	}
 }

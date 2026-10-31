@@ -3,7 +3,7 @@
 // admin UI calls them in-process (no more service-binding hop).
 
 import { invalidateCacheRow } from './cache-lookup';
-import { clearUpstreamsMemo } from './missing-paths';
+import { clearUpstreamsMemo, UPSTREAM_CONFIG_TAG } from './missing-paths';
 import { validateCompressionConfig } from './compression/config';
 import * as db from './db';
 import { purgeTagsBestEffort } from './gc';
@@ -149,7 +149,8 @@ export async function createCache(
 	env: Env,
 	name: string,
 	body: CreateCacheOptions,
-	grantFullControlTo?: string
+	grantFullControlTo?: string,
+	ctx?: ExecutionContext
 ): Promise<{ public_key: string }> {
 	if (!CACHE_NAME_RE.test(name) || RESERVED_CACHE_NAMES.has(name)) {
 		throw new CacheConfigError(400, `Invalid cache name: ${name}`);
@@ -189,6 +190,7 @@ export async function createCache(
 	// The live-cache list feeds upstream resolution (the root union, persist
 	// targets); other isolates rely on redirect fills reading it fresh.
 	clearUpstreamsMemo();
+	await purgeTagsBestEffort(ctx, [UPSTREAM_CONFIG_TAG, ROOT_UPSTREAM_TAG]);
 
 	if (grantFullControlTo) {
 		const user = await env.ATTIC_DB.prepare('SELECT 1 AS x FROM user WHERE id = ?1')
@@ -309,6 +311,10 @@ export async function configureCache(
 		tags.push(CANDIDATES_TAG);
 	}
 	if (options.is_public !== undefined) tags.push(PUBLIC_NARS_TAG);
+	if (options.priority !== undefined) {
+		clearUpstreamsMemo();
+		tags.push(UPSTREAM_CONFIG_TAG, ROOT_UPSTREAM_TAG);
+	}
 	// A rotated keypair re-signs every narinfo; evict the cache's cached
 	// copies so clients don't fail signature verification until they expire.
 	if (keypair) tags.push(cacheTag(name));
@@ -337,12 +343,18 @@ export async function destroyCache(env: Env, name: string, ctx?: ExecutionContex
 		PUBLIC_NARS_TAG,
 		CANDIDATES_TAG,
 		upstreamPassthroughTag(name),
-		ROOT_UPSTREAM_TAG
+		ROOT_UPSTREAM_TAG,
+		UPSTREAM_CONFIG_TAG
 	]);
 }
 
 /** Rename, keeping the keypair so existing signatures stay valid. */
-export async function renameCache(env: Env, oldName: string, newName: string): Promise<void> {
+export async function renameCache(
+	env: Env,
+	oldName: string,
+	newName: string,
+	ctx?: ExecutionContext
+): Promise<void> {
 	if (!CACHE_NAME_RE.test(newName) || RESERVED_CACHE_NAMES.has(newName)) {
 		throw new CacheConfigError(400, `Invalid cache name: ${newName}`);
 	}
@@ -363,6 +375,11 @@ export async function renameCache(env: Env, oldName: string, newName: string): P
 	await env.ATTIC_DB.prepare('UPDATE permission_grant SET pattern = ?2 WHERE pattern = ?1')
 		.bind(oldName, newName)
 		.run();
+	await purgeTagsBestEffort(ctx, [
+		UPSTREAM_CONFIG_TAG,
+		ROOT_UPSTREAM_TAG,
+		upstreamPassthroughTag(oldName)
+	]);
 }
 
 /** The discovery document (attic-cache-info / GET cache-config), built from

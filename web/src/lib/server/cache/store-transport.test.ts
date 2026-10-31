@@ -3,6 +3,8 @@ import { AdmissionError } from './admission';
 import type { ExecutionContext } from './platform';
 import {
 	readViaStore,
+	readStoreMetadata,
+	withStoreRecovery,
 	STORE_BODY_IDLE_TIMEOUT_MS,
 	STORE_HEADER_TIMEOUT_MS
 } from './store-transport';
@@ -312,4 +314,99 @@ it('does not retry a caller-aborted fetch', async () => {
 	abort.abort(new Error('caller disconnected'));
 	await expect(reading).rejects.toThrow('caller disconnected');
 	expect(direct).not.toHaveBeenCalled();
+});
+
+it('retries a partial private metadata body once without combining representations', async () => {
+	const broken = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(new TextEncoder().encode('{"old":'));
+		},
+		pull(controller) {
+			controller.error(new Error('metadata connection lost'));
+		}
+	});
+	const fetch = vi.fn(async () => new Response(broken));
+	const direct = vi.fn(async () => Response.json({ fresh: true }));
+	const { response, value } = await readStoreMetadata(
+		context(fetch),
+		request(),
+		direct,
+		(response) => response.json()
+	);
+	expect(value).toEqual({ fresh: true });
+	expect(response.bodyUsed).toBe(true);
+	expect(fetch).toHaveBeenCalledOnce();
+	expect(direct).toHaveBeenCalledOnce();
+});
+
+it('gives successful sequential cache calls their own full timeout', async () => {
+	vi.useFakeTimers();
+	const fetch = vi.fn(async () => {
+		await new Promise((resolve) => setTimeout(resolve, 8000));
+		return new Response('cached');
+	});
+	const direct = vi.fn(async () => new Response('direct'));
+	const result = withStoreRecovery(async () => {
+		const bodies = [];
+		for (let i = 0; i < 3; i++)
+			bodies.push(await (await readViaStore(context(fetch), request(), direct)).text());
+		return bodies;
+	});
+	await vi.advanceTimersByTimeAsync(24_000);
+	expect(await result).toEqual(['cached', 'cached', 'cached']);
+	expect(fetch).toHaveBeenCalledTimes(3);
+	expect(direct).not.toHaveBeenCalled();
+});
+
+it('bypasses further recovery loopbacks only after an actual transport timeout', async () => {
+	vi.useFakeTimers();
+	const fetch = vi.fn(() => new Promise<Response>(() => {}));
+	const ctx = context(fetch);
+	const direct = vi.fn(async () =>
+		readViaStore(ctx, request(), async () => new Response('origin'))
+	);
+	const result = withStoreRecovery(() => readViaStore(ctx, request(), direct));
+	await vi.advanceTimersByTimeAsync(STORE_HEADER_TIMEOUT_MS - 1);
+	expect(direct).not.toHaveBeenCalled();
+	await vi.advanceTimersByTimeAsync(1);
+	expect(await (await result).text()).toBe('origin');
+	expect(fetch).toHaveBeenCalledOnce();
+	expect(direct).toHaveBeenCalledOnce();
+});
+
+it('does not retry a backend refusal or a failed uncached metadata retry', async () => {
+	const direct = vi.fn(async () => {
+		throw new Error('origin unavailable');
+	});
+	const refused = await readStoreMetadata(
+		context(async () => new Response('busy', { status: 503 })),
+		request(),
+		direct,
+		(response) => response.text()
+	);
+	expect(refused.response.status).toBe(503);
+	expect(direct).not.toHaveBeenCalled();
+	await expect(
+		readStoreMetadata(
+			context(async () => new Response('busy', { status: 503 })),
+			request(),
+			direct,
+			async (response) => {
+				await response.body?.cancel();
+				throw new AdmissionError('busy', 60);
+			}
+		)
+	).rejects.toBeInstanceOf(AdmissionError);
+	expect(direct).not.toHaveBeenCalled();
+	await expect(
+		readStoreMetadata(
+			context(async () => {
+				throw new Error('cache unavailable');
+			}),
+			request(),
+			direct,
+			(response) => response.text()
+		)
+	).rejects.toThrow('origin unavailable');
+	expect(direct).toHaveBeenCalledOnce();
 });

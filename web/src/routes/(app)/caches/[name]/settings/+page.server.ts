@@ -188,7 +188,7 @@ export const actions: Actions = {
 		);
 
 		try {
-			await renameCache(platform.env, params.name, newName);
+			await renameCache(platform.env, params.name, newName, platform.ctx);
 		} catch (e) {
 			const status = e instanceof CacheConfigError ? e.status : 502;
 			return fail(status, {

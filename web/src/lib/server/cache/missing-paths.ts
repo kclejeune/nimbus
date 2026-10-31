@@ -26,6 +26,8 @@ import { TtlMemo } from './ttl-memo';
 import { AdmissionError, requireBackendReadBudget, takeBudget, takeBudgetUnits } from './admission';
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
 import { validateUpstreamUrl } from './upstream-url';
+import { internalJson, internalRequest, remainingFreshMs } from './metadata';
+import { readStoreMetadata } from './store-transport';
 
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];
@@ -693,8 +695,8 @@ export async function fetchUpstreamNarInfo(
 	const attempt = async (
 		upstream: Upstream
 	): Promise<{ text: string; upstream: Upstream } | null | UpstreamUncertain> => {
-		if (!(await takeProbeBudget(guard))) return PROBE_REFUSED;
 		try {
+			if (!(await takeProbeBudget(guard))) return PROBE_REFUSED;
 			return await upstreamHealth.run(
 				healthKey(upstream),
 				async (): Promise<{ text: string; upstream: Upstream } | null | UpstreamUncertain> => {
@@ -742,26 +744,26 @@ export async function fetchUpstreamNarInfo(
 	// steady-state upstream traffic matches the old loop (typically one fetch).
 	const firstBelieved = candidates.findIndex((u) => cached.has(u.id));
 	const eager = firstBelieved === -1 ? candidates : candidates.slice(0, firstBelieved + 1);
+	// A stale believed hit must not turn the remaining upstreams back into a
+	// staircase of five-second timeouts. Bound the fan-out and retain priority
+	// order, the probe budgets, and the same uncertainty/absence semantics.
+	const batches = [eager];
+	for (let start = eager.length; start < candidates.length; start += PROBE_CONCURRENCY)
+		batches.push(candidates.slice(start, start + PROBE_CONCURRENCY));
 	let uncertain: UpstreamUncertain | null = null;
-	const inFlight = eager.map(attempt);
-	for (let i = 0; i < inFlight.length; i++) {
-		const hit = await inFlight[i];
-		if (isUncertain(hit)) {
-			uncertain = hit;
-			continue;
+	for (const batch of batches) {
+		const inFlight = batch.map(attempt);
+		for (let i = 0; i < inFlight.length; i++) {
+			const hit = await inFlight[i];
+			if (isUncertain(hit)) uncertain = hit;
+			else if (hit) {
+				// Losing probes outlive the early return so their verdicts still
+				// record: the fan-out's extra fetches warm the verdict cache once
+				// instead of repeating on every future cold read of this path.
+				for (const p of inFlight.slice(i + 1)) ctx?.waitUntil(p);
+				return hit;
+			}
 		}
-		if (hit) {
-			// Losing probes outlive the early return so their verdicts still
-			// record: the fan-out's extra fetches warm the verdict cache once
-			// instead of repeating on every future cold read of this path.
-			for (const p of inFlight.slice(i + 1)) ctx?.waitUntil(p);
-			return hit;
-		}
-	}
-	for (const upstream of candidates.slice(eager.length)) {
-		const hit = await attempt(upstream);
-		if (isUncertain(hit)) uncertain = hit;
-		else if (hit) return hit;
 	}
 	return uncertain;
 }
@@ -962,6 +964,45 @@ export interface UpstreamConfig {
 // day across isolates for a config that changes a few times a month.
 const UPSTREAMS_MEMO_TTL_MS = 10 * 60_000;
 const configMemo = new AsyncMemo<UpstreamConfig>(UPSTREAMS_MEMO_TTL_MS, 1);
+export const UPSTREAM_CONFIG_TAG = 'upstream-config';
+type ConfigWire = Omit<UpstreamConfig, 'overrides'> & {
+	overrides: [number, [number, string][]][];
+};
+/** Fills read D1 rather than an older isolate memo. As with other edge
+ * entries, replica lag and in-flight fills can still race a purge.
+ * No stale-on-error for trust configuration. */
+export async function serveUpstreamConfig(env: Env, ctx?: ExecutionContext): Promise<Response> {
+	const config = await hedgedReplicaRead(env.ATTIC_DB, ctx, fetchUpstreamConfig);
+	const wire: ConfigWire = {
+		...config,
+		overrides: [...config.overrides].map(([id, modes]) => [id, [...modes]])
+	};
+	return Response.json(wire, {
+		headers: {
+			'Cache-Control': `public, max-age=${UPSTREAMS_MEMO_TTL_MS / 1000}, must-revalidate`,
+			'Cache-Tag': UPSTREAM_CONFIG_TAG
+		}
+	});
+}
+
+/** Consult the purgeable edge snapshot on every use. Retaining it in an
+ * isolate memo would hide completed tag purges until that memo expired. */
+export async function cachedUpstreamConfig(
+	env: Env,
+	ctx?: ExecutionContext
+): Promise<UpstreamConfig> {
+	if (!ctx?.exports?.CachedStore) return upstreamConfig(env.ATTIC_DB, ctx);
+	const request = internalRequest(env, '/_upstream_config/v1');
+	const { value: wire } = await readStoreMetadata(
+		ctx,
+		request,
+		() => serveUpstreamConfig(env, ctx),
+		(response) =>
+			internalJson<ConfigWire>(response, 'Upstream configuration temporarily unavailable'),
+		(response) => remainingFreshMs(response.headers) <= 0
+	);
+	return { ...wire, overrides: new Map(wire.overrides.map(([id, modes]) => [id, new Map(modes)])) };
+}
 
 export function clearUpstreamsMemo(): void {
 	upstreamHealth.clear();

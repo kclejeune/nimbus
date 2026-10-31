@@ -13,14 +13,14 @@ import {
 	loadManifest,
 	serveTouch,
 	serveCandidates,
+	candidateSnapshot,
 	candidateTag,
 	internalRequest,
 	chargeBackendRead,
 	invalidateCandidates,
 	candidateCacheControl,
 	CANDIDATES_TAG,
-	FILLED_AT_HEADER,
-	viaStore
+	FILLED_AT_HEADER
 } from './metadata';
 import { errorResponse, withVisibility } from '../attic/http';
 import { addNarInfoSignature, buildNarInfo, narInfoSignatureValid } from '../attic/narinfo';
@@ -32,6 +32,8 @@ import { AdmissionError, CLIENT_IP_HEADER } from './admission';
 import * as db from './db';
 import {
 	allLiveUpstreams,
+	cachedUpstreamConfig,
+	serveUpstreamConfig,
 	fetchUpstreamNarInfo,
 	isUncertain,
 	PROBE_REFUSED,
@@ -48,6 +50,7 @@ import { withR2Retry, newFixedLengthStream, type ExecutionContext } from './plat
 import { measure, countLoopbackFallback, streamObservation } from './latency';
 import { stripSha256 } from '../attic/nix-base32';
 import { readRpcResult } from './rpc';
+import { readStoreMetadata, withStoreRecovery } from './store-transport';
 
 type Env = App.Platform['env'];
 
@@ -308,7 +311,17 @@ export async function serveStore(
 	env: Env,
 	ctx?: ExecutionContext
 ): Promise<Response> {
+	return withStoreRecovery(() => serveStoreInner(request, env, ctx));
+}
+
+async function serveStoreInner(
+	request: Request,
+	env: Env,
+	ctx?: ExecutionContext
+): Promise<Response> {
 	const segments = new URL(request.url).pathname.split('/').filter(Boolean);
+	if (segments.length === 2 && segments[0] === '_upstream_config' && segments[1] === 'v1')
+		return serveUpstreamConfig(env, ctx);
 	// Internal-only: the gateway exposes no route to individual shared chunks.
 	if (segments.length === 2 && segments[0] === '_chunk') {
 		const key = decodeURIComponent(segments[1]);
@@ -423,13 +436,11 @@ async function serveAnonymousNarInfo(
 	hash: string
 ): Promise<Response> {
 	if (hash.length !== 32) return errorResponse(400, 'Invalid store path hash');
-	const rows = await hedgedReplicaRead(env.ATTIC_DB, ctx, (session) =>
-		db.cachesWithStorePathHash(session, hash)
-	);
-	const filledAt = Date.now();
+	const { rows, filledAt } = await candidateSnapshot(env, hash, ctx);
 	const winner = pickReadableWinner(null, rows);
 	let proxySigningAvailable = !winner;
 	let response: Response;
+	let text: string;
 	try {
 		// Reuse the existing narinfo edge entry on envelope refills. Refreshing
 		// five-minute metadata must not turn an hour-long upstream TTL into a
@@ -454,7 +465,14 @@ async function serveAnonymousNarInfo(
 			url.searchParams.set('policy', STORE_POLICY_VERSION);
 		}
 		const keyed = new Request(url, body);
-		response = await viaStore(ctx, keyed, () => serveStore(keyed, env, ctx));
+		const result = await readStoreMetadata(
+			ctx,
+			keyed,
+			() => serveStore(keyed, env, ctx),
+			(response) => response.text()
+		);
+		response = result.response;
+		text = result.value;
 	} catch (error) {
 		// Keep candidate metadata available for the gateway's confirmation:
 		// an upstream outage must not hide an upload behind a stale empty list.
@@ -463,6 +481,7 @@ async function serveAnonymousNarInfo(
 			error instanceof AdmissionError
 				? error.response()
 				: errorResponse(503, 'Narinfo temporarily unavailable', undefined, { 'Retry-After': '60' });
+		text = await response.text();
 	}
 	const envelope: AnonymousNarInfo = {
 		rows,
@@ -470,7 +489,7 @@ async function serveAnonymousNarInfo(
 		status: response.status,
 		responseFilledAt: Date.now() - (Number(response.headers.get('Age')) || 0) * 1000,
 		headers: [...response.headers.entries()],
-		text: await response.text()
+		text
 	};
 	// The combined entry must refresh when either membership or the narinfo
 	// expires. Metadata retains its week-long reuse; the gateway separately
@@ -480,7 +499,13 @@ async function serveAnonymousNarInfo(
 	// Existing purges cover this key.
 	const candidatePolicy = candidateCacheControl(rows.length > 0, !winner && response.ok);
 	const age = (policy: string) => Number(/max-age=(\d+)/.exec(policy)?.[1] ?? 0);
-	const ttl = Math.min(age(candidatePolicy), age(response.headers.get('Cache-Control') ?? ''));
+	const ttl = Math.max(
+		0,
+		Math.min(
+			age(candidatePolicy) - Math.floor((Date.now() - filledAt) / 1000),
+			age(response.headers.get('Cache-Control') ?? '')
+		)
+	);
 	const cacheable =
 		(response.ok || (!winner && response.status === 404)) &&
 		proxySigningAvailable &&
@@ -555,7 +580,7 @@ async function serveRootUpstreamNarInfo(
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
 	const session = db.readSession(env.ATTIC_DB);
-	const upstreams = await allLiveUpstreams(env.ATTIC_DB, ctx);
+	const upstreams = await allLiveUpstreams(env.ATTIC_DB, ctx, await cachedUpstreamConfig(env, ctx));
 	// The cache-wide ~upstream tag lets registry changes purge every root
 	// passthrough in one call, like cacheTag() does for a real cache.
 	const tag = `${narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash)},${ROOT_UPSTREAM_TAG}`;
@@ -583,6 +608,7 @@ async function serveRootUpstreamNarInfo(
 		);
 	if (hit) {
 		try {
+			// Unknown-path 404s need no signing key or cold-isolate D1 read.
 			const keypair = await getProxyKeypair(env);
 			const text = await addNarInfoSignature(hit.text, keypair);
 			return withVisibility(upstreamNarinfoResponse({ ...hit, text }, tag), true);
@@ -845,7 +871,12 @@ async function serveNarInfo(
 		// closure needs the upstream's narinfo served through this cache. A
 		// persist-mode subscription resolves into this cache (upstreamsForCache
 		// sets persistInto).
-		const upstreams = await upstreamsForCache(env.ATTIC_DB, cache, ctx);
+		const upstreams = await upstreamsForCache(
+			env.ATTIC_DB,
+			cache,
+			ctx,
+			await cachedUpstreamConfig(env, ctx)
+		);
 		const hit = await fetchUpstreamNarInfo(session, upstreams, storePathHash, ctx, {
 			env,
 			ip: request.headers.get('CF-Connecting-IP')

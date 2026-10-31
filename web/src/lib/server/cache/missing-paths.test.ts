@@ -383,6 +383,53 @@ describe('concurrent upstream probing', () => {
 		expect(result).toMatchObject({ upstream: { id: 2 } });
 	});
 
+	it('fans out the remaining narinfo probes when a believed holder fails, preserving priority', async () => {
+		const hash = freshHash();
+		const slow = deferred();
+		const three = [...ups, upstream({ id: 3, url: 'https://c.example' })];
+		const text = `StorePath: /nix/store/${hash}-test\nNarHash: sha256:${'a'.repeat(64)}\nNarSize: 1`;
+		const spy = stubFetch((url) =>
+			url.startsWith('https://a.example')
+				? new Response(null, { status: 503 })
+				: url.startsWith('https://b.example')
+					? slow.promise
+					: new Response(text)
+		);
+		const result = fetchUpstreamNarInfo(
+			dbWithVerdicts([{ upstream_id: 1, present: VERDICT_PRESENT }]),
+			three,
+			hash,
+			undefined
+		);
+		await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(3));
+		slow.resolve(new Response(text));
+		expect(await result).toMatchObject({ upstream: { id: 2 } });
+	});
+
+	it('settles every remaining probe if budget acquisition itself throws', async () => {
+		const three = [...ups, upstream({ id: 3, url: 'https://c.example' })];
+		let gets = 0;
+		const env = Object.defineProperty({}, 'UPSTREAM_PROBE_LIMITER', {
+			get() {
+				if (++gets > 1) throw new Error('binding unavailable');
+				return { limit: async () => ({ success: true }) };
+			}
+		}) as App.Platform['env'];
+		const fetch = stubFetch(() => new Response(null, { status: 503 }));
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		expect(
+			await fetchUpstreamNarInfo(
+				dbWithVerdicts([{ upstream_id: 1, present: VERDICT_PRESENT }]),
+				three,
+				freshHash(),
+				undefined,
+				{ env, ip: '192.0.2.1' }
+			)
+		).toBe(UPSTREAM_UNAVAILABLE);
+		expect(gets).toBe(3);
+		expect(fetch).toHaveBeenCalledOnce();
+	});
+
 	it.each([200, 503])(
 		'probes after 250 ms of D1 wait and ignores late absent hints (%s)',
 		async (status) => {

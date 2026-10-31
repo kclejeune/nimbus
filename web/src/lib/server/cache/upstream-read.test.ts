@@ -9,7 +9,7 @@ let fixture: ReturnType<typeof testDatabase>;
 beforeEach(async () => {
 	vi.resetModules();
 	upstreams = await import('./missing-paths');
-	fixture = testDatabase();
+	fixture = testDatabase({ admin: true });
 	fixture.sqlite.exec(`
 		INSERT INTO cache (id,name,keypair,compression,created_at) VALUES (1,'test','','zstd',datetime('now'));
 		INSERT INTO upstream (id,url,public_key,ttl,default_mode,enforced,position,created_at) VALUES (1,'https://up.example','',86400,'redirect',0,0,datetime('now'));
@@ -177,4 +177,52 @@ it('does not issue a verdict batch for an empty closure', async () => {
 		deferred: []
 	});
 	expect(batch).not.toHaveBeenCalled();
+});
+
+it('observes another isolate’s edge purge without retaining an older local snapshot', async () => {
+	let cached: Response | undefined;
+	let filledAt = Date.now();
+	const env = { ATTIC_DB: fixture.db, CACHE_BASE_URL: 'https://cache.test' } as App.Platform['env'];
+	const fetch = vi.fn(async () => {
+		if (!cached) {
+			cached = await upstreams.serveUpstreamConfig(env);
+			filledAt = Date.now();
+		}
+		const response = cached.clone();
+		response.headers.set('Age', String(Math.floor((Date.now() - filledAt) / 1000)));
+		return response;
+	});
+	const ctx = { exports: { CachedStore: { fetch } } } as unknown as ExecutionContext;
+	expect((await upstreams.cachedUpstreamConfig(env, ctx)).overrides.get(1)?.get(1)).toBe('persist');
+	const prepare = vi.spyOn(fixture.db, 'prepare');
+	expect((await upstreams.cachedUpstreamConfig(env, ctx)).overrides.get(1)?.get(1)).toBe('persist');
+	expect(prepare).not.toHaveBeenCalled();
+	fixture.sqlite.exec("UPDATE cache_upstream SET mode = 'off'");
+	cached = undefined; // Purged by another isolate; do not clear this one's memos.
+	expect((await upstreams.cachedUpstreamConfig(env, ctx)).overrides.get(1)?.get(1)).toBe('off');
+	expect(fetch).toHaveBeenCalledTimes(3);
+	// A missed purge is still bounded: never use an expired trust snapshot.
+	fixture.sqlite.exec("UPDATE cache_upstream SET mode = 'persist'");
+	await vi.advanceTimersByTimeAsync(600_000);
+	expect((await upstreams.cachedUpstreamConfig(env, ctx)).overrides.get(1)?.get(1)).toBe('persist');
+	expect(fetch).toHaveBeenCalledTimes(4);
+});
+
+it('purges the shared configuration when subscription or cache lifecycle changes', async () => {
+	const { setCacheUpstreamModes } = await import('./upstream-registry');
+	const { createCache, renameCache, configureCache, destroyCache } = await import('./cache-config');
+	const purgeTags = vi.fn(async (_tags: string[]) => {});
+	const ctx = { exports: { CachedStore: { purgeTags } } } as unknown as ExecutionContext;
+	const env = { ATTIC_DB: fixture.db } as App.Platform['env'];
+	await setCacheUpstreamModes(fixture.db, 1, [{ upstreamId: 1, mode: 'off' }], {
+		allowPersist: true,
+		ctx,
+		cacheName: 'test'
+	});
+	await createCache(env, 'new-cache', {}, undefined, ctx);
+	await renameCache(env, 'new-cache', 'renamed', ctx);
+	await configureCache(env, 'renamed', { priority: 1 }, { trustAuthorized: true, ctx });
+	await destroyCache(env, 'renamed', ctx);
+	expect(purgeTags).toHaveBeenCalledTimes(5);
+	for (const [tags] of purgeTags.mock.calls) expect(tags).toContain(upstreams.UPSTREAM_CONFIG_TAG);
 });

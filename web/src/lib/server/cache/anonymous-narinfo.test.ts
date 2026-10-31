@@ -3,7 +3,12 @@ import { handleCacheApi } from './router';
 import { invalidateAfterUpload, serveStore } from './store';
 import { testDatabase } from './test-db';
 import { invalidateCacheRow } from './cache-lookup';
-import { clearCandidateMemos } from './metadata';
+import {
+	clearCandidateMemos,
+	candidateSnapshot,
+	chargeBackendRead,
+	internalRequest
+} from './metadata';
 import { clearUpstreamsMemo, PERSIST_MAX_NAR_BYTES } from './missing-paths';
 import { configureCache } from './cache-config';
 import { getProxyKeypair } from './proxy';
@@ -142,6 +147,7 @@ it('serves local narinfo in one warm loopback, with no D1 read on a warm hit', a
 	expect(prepare).not.toHaveBeenCalled();
 	expect(fetch.mock.calls.map(([request]) => new URL(request.url).pathname)).toEqual([
 		route(hash),
+		`/_meta/path/${hash}`,
 		`/_proxy/test/${hash}.narinfo`,
 		route(hash)
 	]);
@@ -168,7 +174,8 @@ it.each(['both lookups', 'envelope lookup', 'body lookup'] as const)(
 			failure === 'envelope lookup'
 		);
 		expect(entries.has(route(hash))).toBe(false);
-		if (failure !== 'envelope lookup') expect(entries.size).toBe(0);
+		if (failure !== 'envelope lookup')
+			expect([...entries.keys()].filter((path) => !path.startsWith('/_meta/'))).toEqual([]);
 		const recovered = await get(hash);
 		expect(recovered.status).toBe(200);
 		expect(await narInfoSignatureValid(await recovered.text(), publicKey)).toBe(true);
@@ -190,7 +197,11 @@ it('does not cache a stored-signature fallback when proxy signing itself fails',
 	const fallback = await get(hash);
 	expect(fallback.status).toBe(200);
 	expect(await fallback.text()).toContain('Sig: foreign:AAAA');
-	expect(entries.size).toBe(0);
+	expect(
+		[...entries.keys()].filter(
+			(path) => !path.startsWith('/_meta/') && !path.startsWith('/_upstream_config/')
+		)
+	).toEqual([]);
 	const recovered = await get(hash);
 	expect(await narInfoSignatureValid(await recovered.text(), publicKey)).toBe(true);
 	expect(entries.has(route(hash))).toBe(true);
@@ -251,7 +262,7 @@ it('serves proxy-signed upstream narinfo in one warm loopback with an absolute U
 	const prepare = vi.spyOn(fixture.db, 'prepare');
 	expect(await (await get(hash)).text()).toBe(text);
 	expect(prepare).not.toHaveBeenCalled();
-	expect(fetch).toHaveBeenCalledTimes(3);
+	expect(fetch).toHaveBeenCalledTimes(5);
 	expect(remote.fetch).toHaveBeenCalledOnce();
 });
 
@@ -320,7 +331,11 @@ it.each(['key lookup', 'signing'] as const)(
 		const failed = await get(hash);
 		expect(failed.status).toBe(503);
 		expect(failed.headers.get('Cache-Control')).toContain('no-store');
-		expect(entries.size).toBe(0);
+		expect(
+			[...entries.keys()].filter(
+				(path) => !path.startsWith('/_meta/') && !path.startsWith('/_upstream_config/')
+			)
+		).toEqual([]);
 		const recovered = await get(hash);
 		expect(recovered.status).toBe(200);
 		expect(await narInfoSignatureValid(await recovered.text(), publicKey)).toBe(true);
@@ -547,9 +562,12 @@ it('reuses week-old metadata while refreshing a narinfo past its upstream lifeti
 		expect((await get(hash)).status).toBe(200);
 		expect(fetch.mock.calls.map(([request]) => new URL(request.url).pathname)).toEqual([
 			route(hash),
+			`/_meta/path/${hash}`,
 			`/_proxy_upstream/${hash}.narinfo`,
+			'/_upstream_config/v1',
 			route(hash),
-			`/_proxy_upstream/${hash}.narinfo`
+			`/_proxy_upstream/${hash}.narinfo`,
+			'/_upstream_config/v1'
 		]);
 		expect(
 			prepare.mock.calls.filter(([sql]) => sql.includes('o.store_path_hash = ?1'))
@@ -569,16 +587,105 @@ it('keeps the anonymous internal route inaccessible through the public gateway',
 	).toBeGreaterThanOrEqual(400);
 });
 
-it('recovers a combined transport failure through separate metadata and body reads', async () => {
+it('keeps the configuration snapshot inaccessible through the public gateway', async () => {
+	const { ctx } = edge();
+	expect(
+		(await handleCacheApi(new Request(`${env.CACHE_BASE_URL}/_upstream_config/v1`), env, ctx))
+			.status
+	).toBe(404);
+});
+
+it('recovers a combined transport failure without repeating nested cache loopbacks', async () => {
 	const hash = freshHash();
 	hold(hash);
 	const { get, fetch } = edge();
 	fetch.mockRejectedValueOnce(new Error('loopback reset'));
 	vi.spyOn(console, 'warn').mockImplementation(() => {});
 	expect((await get(hash)).status).toBe(200);
-	expect(fetch.mock.calls.map(([request]) => new URL(request.url).pathname)).toEqual([
-		route(hash),
-		`/_meta/path/${hash}`,
-		`/_proxy/test/${hash}.narinfo`
-	]);
+	expect(fetch.mock.calls.map(([request]) => new URL(request.url).pathname)).toEqual([route(hash)]);
+});
+
+it('reuses tagged membership on an envelope refill without renewing its original age', async () => {
+	const hash = freshHash();
+	hold(hash);
+	const { get, entries } = edge();
+	expect((await get(hash)).status).toBe(200);
+	const stamp = entries.get(route(hash))!.headers.get('X-Nimbus-Filled-At');
+	entries.delete(route(hash));
+	vi.useFakeTimers({ toFake: ['Date'] });
+	try {
+		vi.setSystemTime(Date.now() + 45_000);
+		const prepare = vi.spyOn(fixture.db, 'prepare');
+		expect((await get(hash)).status).toBe(200);
+		expect(
+			prepare.mock.calls.filter(([sql]) => sql.includes('o.store_path_hash = ?1'))
+		).toHaveLength(0);
+		expect(entries.get(route(hash))!.headers.get('X-Nimbus-Filled-At')).toBe(stamp);
+		expect(entries.get(route(hash))!.headers.get('Cache-Control')).toContain('max-age=3555,');
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+it('recovers an inner metadata body failure without caching an error envelope', async () => {
+	const hash = freshHash();
+	hold(hash);
+	const { get, fetch, entries } = edge();
+	const serve = fetch.getMockImplementation()!;
+	let failed = false;
+	fetch.mockImplementation(async (request) => {
+		if (!failed && new URL(request.url).pathname.startsWith('/_proxy/')) {
+			failed = true;
+			return new Response(
+				new ReadableStream({
+					start(controller) {
+						controller.error(new Error('body reset'));
+					}
+				})
+			);
+		}
+		return serve(request);
+	});
+	vi.spyOn(console, 'warn').mockImplementation(() => {});
+	const response = await get(hash);
+	expect(response.status).toBe(200);
+	expect(
+		await narInfoSignatureValid(await response.text(), extractPublicKey(await getProxyKeypair(env)))
+	).toBe(true);
+	expect(entries.get(route(hash))!.text).not.toContain('body reset');
+});
+
+it('does not charge candidate snapshot reads after envelope admission, including a stale retry', async () => {
+	let charges = 0;
+	const limit = vi.fn(async () => ({ success: ++charges === 1 }));
+	const admittedEnv = { ...env, BACKEND_READ_LIMITER: { limit } } as unknown as App.Platform['env'];
+	await chargeBackendRead(admittedEnv, internalRequest(admittedEnv, '/envelope', '192.0.2.1'));
+	const hash = freshHash();
+	expect((await candidateSnapshot(admittedEnv, hash)).rows).toEqual([]);
+	const ctx = {
+		exports: {
+			CachedStore: {
+				fetch: async () =>
+					Response.json([], {
+						headers: {
+							'Cache-Control': 'public, max-age=300',
+							Age: '301',
+							'X-Nimbus-Filled-At': String(Date.now() - 301_000)
+						}
+					})
+			}
+		}
+	} as unknown as ExecutionContext;
+	expect((await candidateSnapshot(admittedEnv, hash, ctx)).rows).toEqual([]);
+	expect(limit).toHaveBeenCalledOnce();
+});
+
+it('does not load a proxy signing key for a confirmed upstream miss', async () => {
+	const hash = freshHash();
+	await upstream(hash);
+	vi.mocked(globalThis.fetch).mockResolvedValue(new Response(null, { status: 404 }));
+	const key = vi.spyOn(proxy, 'getProxyKeypair');
+	const { get } = edge();
+	expect((await get(hash)).status).toBe(404);
+	expect(key).not.toHaveBeenCalled();
 });

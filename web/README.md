@@ -132,11 +132,32 @@ keeps watching types only.
 
 `test:store-transport` checks native BYOB reads, partial final batches, Range
 headers, truncated bodies, and cancellation without production bindings. Add
-`-- --benchmark` to compare guarded and native forwarding of 64 MiB. Large
+`-- --benchmark` to compare guarded and native forwarding of 64 MiB and batched
+versus ordinary native collection of an 8 MiB chunk. Large
 native bodies use a 64 KiB minimum fill and 128 KiB buffer capacity with a
 15-second progress deadline on the internal store transport; downstream
 backpressure is excluded from that deadline. Body diagnostics record both
 `batchBytes` (minimum fill) and `bufferBytes` (capacity) for production comparisons.
+
+Each store call has its own ten-second cache-header timeout. After a transport
+failure, recovery bypasses further cache loopbacks within that request. Internal
+metadata is decoded once before release and can retry once as a whole; partially
+delivered NAR streams still abort so the client can retry safely. Anonymous
+envelope fills reuse fresh tagged membership without renewing its original age.
+Upstream configuration is shared through an internal edge snapshot with a
+ten-minute TTL and no stale-on-error; registry, subscription, and cache lifecycle
+changes purge its tag. Each use consults the edge snapshot, so an isolate memo
+cannot hide a completed purge. Replica lag and fills already in flight can still
+race a mutation; purges are not atomic with origin fills.
+
+CDC completion can buffer one subsequent chunk body while verifying the current
+chunk, using the same shared upload memory budget. Speculative reads take a spare
+full slot immediately or fall back to header-only read-ahead. They never queue
+for memory, and verification failure cancels unused body reads. Completion timing
+logs include `upload.prefetchedChunks` to measure adoption in production.
+Read-ahead can occupy the second full slot until consumed, trading upload
+concurrency for completion latency within the unchanged 64 MiB byte budget.
+Collector reads retain their 30-second idle and ten-minute absolute deadlines.
 
 Security overrides keep Typography's `postcss-selector-parser` and Miniflare's
 `undici` on patched releases until their upstream dependency constraints catch up.

@@ -7,7 +7,7 @@ import { hedgedReplicaRead } from './read-hedge';
 import { findCacheCached } from './cache-lookup';
 import { AsyncMemo } from './async-memo';
 import { measure, candidateMetadata } from './latency';
-import { readViaStore } from './store-transport';
+import { readStoreMetadata, readViaStore } from './store-transport';
 
 export const CANDIDATES_TAG = 'candidates';
 export const candidateTag = (kind: string, hash: string) =>
@@ -176,6 +176,31 @@ export async function serveCandidates(
 	return response;
 }
 
+/** Reuse a fresh, tagged membership entry when an anonymous envelope fills.
+ * A stale snapshot must not gain a new membership lifetime via the envelope. */
+export async function candidateSnapshot(
+	env: App.Platform['env'],
+	hash: string,
+	ctx?: ExecutionContext
+): Promise<{ rows: db.LiveCacheRow[]; filledAt: number }> {
+	// The enclosing envelope fill already charged backend admission.
+	const internal = internalRequest(env, `/_meta/path/${hash}`);
+	const { response, value: rows } = await readStoreMetadata(
+		ctx,
+		internal,
+		() => serveCandidates(internal, env, 'path', hash, ctx),
+		candidateRows,
+		(response) =>
+			response.ok &&
+			(!(Number(response.headers.get(FILLED_AT_HEADER)) > 0) ||
+				remainingFreshMs(response.headers) <= 0)
+	);
+	return { rows, filledAt: Number(response.headers.get(FILLED_AT_HEADER)) };
+}
+
+const candidateRows = (response: Response) =>
+	internalJson<db.LiveCacheRow[]>(response, 'Candidate resolution temporarily unavailable');
+
 export interface Candidates {
 	/** Listed caches that still exist, with current visibility. */
 	rows: db.LiveCacheRow[];
@@ -213,12 +238,13 @@ export async function loadCandidates(
 		`/_meta/${kind}/${encodeURIComponent(canonical)}`,
 		request.headers.get('CF-Connecting-IP')
 	);
-	const response = await measure('candidateLoopback', () =>
-		viaStore(ctx, internal, () => serveCandidates(internal, env, kind, canonical, ctx))
-	);
-	const rows = await internalJson<db.LiveCacheRow[]>(
-		response,
-		'Candidate resolution temporarily unavailable'
+	const { response, value: rows } = await measure('candidateLoopback', () =>
+		readStoreMetadata(
+			ctx,
+			internal,
+			() => serveCandidates(internal, env, kind, canonical, ctx),
+			candidateRows
+		)
 	);
 	return resolveCandidates(env, ctx, request, kind, canonical, rows, response.headers);
 }

@@ -36,7 +36,8 @@ export const actions: Actions = {
 					compression,
 					retention_period: retention
 				},
-				locals.user.id
+				locals.user.id,
+				platform.ctx
 			);
 		} catch (e) {
 			const status = e instanceof CacheConfigError ? e.status : 502;

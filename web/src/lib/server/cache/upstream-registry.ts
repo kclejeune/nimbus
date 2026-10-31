@@ -8,6 +8,7 @@ import { listCacheNames } from '$lib/server/db/queries';
 import { purgeTagsBestEffort } from './gc';
 import {
 	clearUpstreamsMemo,
+	UPSTREAM_CONFIG_TAG,
 	effectiveUpstreamMode,
 	fetchUpstreamConfig,
 	normalizeUpstreamMode,
@@ -55,7 +56,11 @@ export interface UpstreamInput {
 async function purgeUpstreamEdge(db: D1, ctx: ExecutionContext | undefined): Promise<void> {
 	if (!ctx) return;
 	const names = await listCacheNames(db);
-	await purgeTagsBestEffort(ctx, [ROOT_UPSTREAM_TAG, ...names.map(upstreamPassthroughTag)]);
+	await purgeTagsBestEffort(ctx, [
+		ROOT_UPSTREAM_TAG,
+		UPSTREAM_CONFIG_TAG,
+		...names.map(upstreamPassthroughTag)
+	]);
 }
 
 export async function listRegistry(db: D1): Promise<RegistryUpstream[]> {
@@ -238,6 +243,7 @@ export async function setCacheUpstreamModes(
 	// can change what it may serve too.
 	await purgeTagsBestEffort(opts.ctx, [
 		ROOT_UPSTREAM_TAG,
+		UPSTREAM_CONFIG_TAG,
 		...(opts.cacheName ? [upstreamPassthroughTag(opts.cacheName)] : [])
 	]);
 }
