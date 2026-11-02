@@ -21,6 +21,11 @@ export function withStoreRecovery<T>(op: () => T): T {
 	return recovery.run({ bypass: false }, op);
 }
 
+/** Origin recovery must not rejoin work owned by the failed loopback. */
+export function isStoreRecoveryBypassed(): boolean {
+	return recovery.getStore()?.bypass === true;
+}
+
 /** Cleanup must not make the fallback wait for the same broken transport. */
 export function cancelStoreBody(response: Response | undefined): void {
 	void response?.body?.cancel().catch(() => {});

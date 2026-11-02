@@ -78,3 +78,50 @@ it('hands an unmemoized result to waiting callers instead of serializing them', 
 	expect(await memo.get('a', load, noMemo)).toEqual([2]);
 	expect(load).toHaveBeenCalledOnce();
 });
+
+it.each([false, true])(
+	'revokes an older settled lease across replacement generations, clearAll=%s',
+	async (all) => {
+		vi.useFakeTimers();
+		const memo = new AsyncMemo<string>(10_000, 10);
+		let finish!: (value: string) => void;
+		const leader = memo.get(
+			'a',
+			() => new Promise<string>((resolve) => (finish = resolve)),
+			() => 0
+		);
+		const fresh = vi.fn(async () => 'fresh');
+		const waiter = memo.get('a', fresh);
+		finish('old');
+		await leader;
+		// This positively cached generation must not detach the older waiter's
+		// invalidation flag when its lease finishes.
+		expect(await memo.get('a', async () => 'replacement')).toBe('replacement');
+		memo.clear(all ? undefined : 'a');
+		await vi.advanceTimersByTimeAsync(50);
+		expect(await waiter).toBe('fresh');
+		expect(fresh).toHaveBeenCalledOnce();
+	}
+);
+
+it('reclaims completed zero-TTL fills before evicting an active lease', async () => {
+	vi.useFakeTimers();
+	const memo = new AsyncMemo<string>(0, 2, 15_000);
+	const noTtl = () => 0;
+	let finish!: (value: string) => void;
+	const leader = memo.get(
+		'active',
+		() => new Promise<string>((resolve) => (finish = resolve)),
+		noTtl
+	);
+	const duplicate = vi.fn(async () => 'duplicate');
+	const waiter = memo.get('active', duplicate, noTtl);
+	await memo.get('finished', async () => 'finished', noTtl);
+	await memo.get('next', async () => 'next', noTtl);
+	await vi.advanceTimersByTimeAsync(100);
+	expect(duplicate).not.toHaveBeenCalled();
+	finish('shared');
+	await leader;
+	await vi.advanceTimersByTimeAsync(50);
+	expect(await waiter).toBe('shared');
+});

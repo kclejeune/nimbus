@@ -150,6 +150,15 @@ changes purge its tag. Each use consults the edge snapshot, so an isolate memo
 cannot hide a completed purge. Replica lag and fills already in flight can still
 race a mutation; purges are not atomic with origin fills.
 
+Concurrent fills for the same membership/configuration key coalesce completed
+results without retaining a new isolate cache. Candidate admission remains per
+caller and the original fill timestamp is preserved. Timing logs distinguish
+`metadataReads.origin` from `metadataReads.coalesced`. After an explicit D1
+overload, speculative primary hedges pause for two seconds; normal retries and
+error-driven failover retain the existing primary rate limit. See the
+[performance objectives and measurement procedure](../docs/traceway-performance.md)
+for Traceway alert definitions and upload concurrency comparisons.
+
 CDC completion can buffer one subsequent chunk body while verifying the current
 chunk, using the same shared upload memory budget. Speculative reads take a spare
 full slot immediately or fall back to header-only read-ahead. They never queue

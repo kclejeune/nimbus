@@ -28,6 +28,30 @@ const stream = async (size, mode = '') =>
 	fetch(new URL(`/_nar_v2/fixture.nar?size=${size}&mode=${mode}`, await mf.ready));
 
 try {
+	// Distinct HTTP requests must await only their own I/O, even when sharing
+	// a completed metadata result. Node tests cannot enforce this Workers rule.
+	const coalescedUrl = new URL('/coalesced-read', await mf.ready);
+	const readers = await Promise.all(Array.from({ length: 6 }, () => fetch(coalescedUrl)));
+	assert.ok(readers.every((r) => r.status === 200));
+	assert.deepEqual(await Promise.all(readers.map((r) => r.json())), Array(6).fill({ value: 1 }));
+	assert.deepEqual(await (await fetch(coalescedUrl)).json(), { value: 2 });
+	const failingUrl = new URL('/coalesced-read?key=failed&fail=1', await mf.ready);
+	const failures = await Promise.all(Array.from({ length: 6 }, () => fetch(failingUrl)));
+	assert.ok(failures.every((r) => r.status === 503));
+	await Promise.all(failures.map((r) => r.text()));
+	assert.deepEqual(
+		await (await fetch(new URL('/coalesced-read?key=failed', await mf.ready))).json(),
+		{ value: 4 }
+	);
+	assert.equal((await stats()).activeTimers, 0);
+	// An invocation can end without settling its lease. An uncached recovery
+	// in another real request must not join that abandoned fill.
+	assert.equal(await (await fetch(new URL('/abandon-fill', await mf.ready))).text(), 'registered');
+	const recovered = await fetch(new URL('/recover-fill', await mf.ready), {
+		signal: AbortSignal.timeout(5_000)
+	});
+	assert.equal(recovered.status, 200);
+	assert.deepEqual(await recovered.json(), { value: 42 });
 	// The completion collector uses native batching into its output buffer.
 	// Incorrect size hints must still trim/grow and enforce the byte limit.
 	for (const [size, hint] of [

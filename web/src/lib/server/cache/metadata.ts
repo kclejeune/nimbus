@@ -6,6 +6,7 @@ import { stripSha256 } from '../attic/nix-base32';
 import { hedgedReplicaRead } from './read-hedge';
 import { findCacheCached } from './cache-lookup';
 import { AsyncMemo } from './async-memo';
+import { ReadCoalescer } from './read-coalescer';
 import { measure, candidateMetadata } from './latency';
 import { readStoreMetadata, readViaStore } from './store-transport';
 
@@ -153,6 +154,8 @@ export function remainingFreshMs(headers: Headers): number {
 	return Math.max(0, Number(maxAge[1]) - age) * 1000;
 }
 
+const candidateFills = new ReadCoalescer<{ rows: db.LiveCacheRow[]; filledAt: number }>();
+
 /** Never exposed by the gateway: candidate rows contain private cache names.
  * Charges admission itself so the uncached fallback in loadCandidates pays
  * the same as a store miss. */
@@ -164,15 +167,18 @@ export async function serveCandidates(
 	ctx?: ExecutionContext
 ): Promise<Response> {
 	await chargeBackendRead(env, request);
-	const rows = await hedgedReplicaRead(env.ATTIC_DB, ctx, (session) =>
-		readCandidateRows(session, kind, hash)
-	);
+	const { rows, filledAt } = await candidateFills.get(`${kind}:${stripSha256(hash)}`, async () => ({
+		rows: await hedgedReplicaRead(env.ATTIC_DB, ctx, (session) =>
+			readCandidateRows(session, kind, hash)
+		),
+		filledAt: Date.now()
+	}));
 	const response = cachedJson(
 		rows,
 		candidateTag(kind, hash),
 		candidateCacheControl(rows.length > 0)
 	);
-	response.headers.set(FILLED_AT_HEADER, String(Date.now()));
+	response.headers.set(FILLED_AT_HEADER, String(filledAt));
 	return response;
 }
 
@@ -218,8 +224,12 @@ export interface Candidates {
 // No per-isolate memo in front of the loopback: repeats of one hash arrive
 // minutes apart and from other colos, so a five-second positive memo hit
 // 1 of 942 sampled lookups in prod (2026-09-27); the edge entry is the cache.
+// candidateFills (behind the loopback) only joins fills still in flight.
+// That historical gateway sample does not measure same-key origin overlap;
+// metadataReads counters measure whether coalescing helps the current workload.
 export function invalidateCandidates(kind: 'nar' | 'path', hash: string): void {
 	const key = `${kind}:${stripSha256(hash)}`;
+	candidateFills.clear(key);
 	confirmedCandidates.clear(key);
 	refreshedEmpty.clear(key);
 }
@@ -281,6 +291,7 @@ const CONFIRMED_TTL_MS = 60_000;
 const confirmedCandidates = new AsyncMemo<db.LiveCacheRow[]>(CONFIRMED_TTL_MS, 10_000);
 
 export function clearCandidateMemos(): void {
+	candidateFills.clear();
 	confirmedCandidates.clear();
 	refreshedEmpty.clear();
 }

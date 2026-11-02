@@ -3,6 +3,7 @@
 // database.
 
 import { countD1, measure } from './latency';
+import { noteD1Overload } from './d1-pressure';
 import type { D1Database, D1PreparedStatement, D1Result } from '@cloudflare/workers-types';
 import { isActiveUser } from '../auth/types';
 import { withRetry } from './platform';
@@ -36,18 +37,29 @@ export function isTransientD1Error(e: unknown): boolean {
  * jittered exponential backoff (~40/80/160 ms). Non-transient errors rethrow
  * on the first failure. */
 export const withD1Retry = <T>(op: () => Promise<T>, attempts = 4): Promise<T> =>
-	withRetry(op, {
-		attempts,
-		baseMs: 40,
-		shouldRetry: (e) => {
-			const transient = isTransientD1Error(e);
-			// Surface queue pressure even when the retry succeeds: the
-			// 2026-08-22 primary stalls were invisible until reads failed
-			// outright, because absorbed retries logged nothing.
-			if (transient) console.warn(`transient D1 error, retrying: ${e}`);
-			return transient;
+	withRetry(
+		// Every attempt, including the last, reports overload to the hedge backoff.
+		async () => {
+			try {
+				return await op();
+			} catch (e) {
+				noteD1Overload(e);
+				throw e;
+			}
+		},
+		{
+			attempts,
+			baseMs: 40,
+			shouldRetry: (e) => {
+				const transient = isTransientD1Error(e);
+				// Surface queue pressure even when the retry succeeds: the
+				// 2026-08-22 primary stalls were invisible until reads failed
+				// outright, because absorbed retries logged nothing.
+				if (transient) console.warn(`transient D1 error, retrying: ${e}`);
+				return transient;
+			}
 		}
-	});
+	);
 
 /** Prepared-statement execution wrappers that retry transient D1 errors and
  * account statements and rows to the request's latency record. Every

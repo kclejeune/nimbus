@@ -1,6 +1,10 @@
 // Native stream fixture for scripts/test-store-transport.mjs. No real bindings.
 import { readViaStore } from '../../src/lib/server/cache/store-transport';
 import { readAll, type ExecutionContext } from '../../src/lib/server/cache/platform';
+import { ReadCoalescer } from '../../src/lib/server/cache/read-coalescer';
+
+const coalesced = new ReadCoalescer<number>();
+let fills = 0;
 
 let timers = 0;
 let batchReads = 0;
@@ -48,6 +52,32 @@ prototype.readAtLeast = function (min, view) {
 export default {
 	async fetch(request: Request, _env: unknown, ctx: ExecutionContext) {
 		const url = new URL(request.url);
+		if (url.pathname === '/abandon-fill') {
+			void coalesced.get('abandoned', () => new Promise<number>(() => {}));
+			return new Response('registered');
+		}
+		if (url.pathname === '/recover-fill') {
+			return readViaStore(
+				{
+					exports: { CachedStore: { fetch: async () => new Response(null, { status: 502 }) } }
+				} as unknown as ExecutionContext,
+				request,
+				async () => Response.json({ value: await coalesced.get('abandoned', async () => 42) })
+			);
+		}
+		if (url.pathname === '/coalesced-read') {
+			try {
+				const value = await coalesced.get(url.searchParams.get('key') ?? 'path', async () => {
+					const value = ++fills;
+					await new Promise((resolve) => setTimeout(resolve, 250));
+					if (url.searchParams.has('fail')) throw new Error('fixture storage overloaded');
+					return value;
+				});
+				return Response.json({ value });
+			} catch {
+				return new Response('storage overloaded', { status: 503 });
+			}
+		}
 		if (url.pathname === '/stats')
 			return Response.json({
 				timers,

@@ -5,6 +5,7 @@ import { testDatabase } from './test-db';
 import { invalidateCacheRow } from './cache-lookup';
 import {
 	clearCandidateMemos,
+	serveCandidates,
 	candidateSnapshot,
 	chargeBackendRead,
 	internalRequest
@@ -20,6 +21,7 @@ import { mintAtticToken } from '../attic-token';
 import { persistUpstreamPath } from './pullthrough';
 import * as db from './db';
 import type { ExecutionContext } from './platform';
+import { readStoreMetadata, STORE_HEADER_TIMEOUT_MS } from './store-transport';
 
 vi.mock('./compression', async () => (await import('./test-db')).fakeCompression());
 vi.mock('./pullthrough', () => ({ persistUpstreamPath: vi.fn(async () => {}) }));
@@ -688,4 +690,68 @@ it('does not load a proxy signing key for a confirmed upstream miss', async () =
 	const { get } = edge();
 	expect((await get(hash)).status).toBe(404);
 	expect(key).not.toHaveBeenCalled();
+});
+
+it('coalesces overlapping membership fills, preserves their stamp, and reloads after completion', async () => {
+	vi.useFakeTimers();
+	try {
+		let resolve!: (rows: db.LiveCacheRow[]) => void;
+		const pending = new Promise<db.LiveCacheRow[]>((done) => (resolve = done));
+		const read = vi.spyOn(db, 'cachesWithStorePathHash').mockReturnValueOnce(pending);
+		const hash = freshHash();
+		const request = internalRequest(env, `/_meta/path/${hash}`);
+		const first = serveCandidates(request, env, 'path', hash);
+		const second = serveCandidates(request, env, 'path', hash);
+		await vi.advanceTimersByTimeAsync(3_500);
+		expect(read).toHaveBeenCalledOnce();
+		resolve([]);
+		const response = await first;
+		await vi.advanceTimersByTimeAsync(100);
+		const shared = await second;
+		expect(shared.headers.get('X-Nimbus-Filled-At')).toBe(
+			response.headers.get('X-Nimbus-Filled-At')
+		);
+		expect(await shared.json()).toEqual([]);
+		hold(hash);
+		expect(await (await serveCandidates(request, env, 'path', hash)).json()).toMatchObject([
+			{ id: 1 }
+		]);
+		expect(read).toHaveBeenCalledTimes(2);
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+it('recovers membership at the loopback deadline without joining an abandoned candidate fill', async () => {
+	vi.useFakeTimers();
+	try {
+		const hash = freshHash();
+		const request = internalRequest(env, `/_meta/path/${hash}`);
+		const read = vi
+			.spyOn(db, 'cachesWithStorePathHash')
+			.mockReturnValueOnce(new Promise<db.LiveCacheRow[]>(() => {}));
+		// The old invocation never reaches finally and never settles this fill.
+		void serveCandidates(request, env, 'path', hash);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(read).toHaveBeenCalledOnce();
+		hold(hash);
+		const ctx = {
+			exports: { CachedStore: { fetch: () => new Promise<Response>(() => {}) } }
+		} as unknown as ExecutionContext;
+		const received = vi.fn();
+		const result = readStoreMetadata(
+			ctx,
+			request,
+			() => serveCandidates(request, env, 'path', hash),
+			(response) => response.json()
+		).then(received);
+		await vi.advanceTimersByTimeAsync(STORE_HEADER_TIMEOUT_MS);
+		expect(received).toHaveBeenCalledWith(
+			expect.objectContaining({ value: [expect.objectContaining({ id: 1 })] })
+		);
+		expect(read).toHaveBeenCalledTimes(2);
+		await result;
+	} finally {
+		vi.useRealTimers();
+	}
 });
