@@ -132,7 +132,9 @@ func (c *Client) do(req *http.Request) (*http.Response, int, error) {
 		var retryTooLong bool
 		if res != nil {
 			status = res.StatusCode
-			retryDelay, retryTooLong = retryAfter(res)
+			if transientStatus(status) {
+				retryDelay, retryTooLong = retryAfter(res)
+			}
 		}
 		var cooldown time.Duration
 		if isUploadPressure(status) {
