@@ -2,11 +2,12 @@
 // worker's d1.rs so both implementations stay drop-in compatible on the same
 // database.
 
-import { countD1, measure } from './latency';
-import { noteD1Overload } from './d1-pressure';
+import { countD1, countRetry, measure } from './latency';
+import { isD1Overload, noteD1Overload } from './d1-pressure';
+import { d1ReadBudget } from './d1-read-budget';
 import type { D1Database, D1PreparedStatement, D1Result } from '@cloudflare/workers-types';
 import { isActiveUser } from '../auth/types';
-import { withRetry } from './platform';
+import { sleep } from './platform';
 import { assertIntInRange, assertMaxLength, RequestBodyError } from '../request-body';
 
 /** D1 caps bound parameters per statement; IN-lists are windowed to this. */
@@ -29,37 +30,47 @@ export const STMT_BATCH = 100;
 const TRANSIENT_D1_ERROR =
 	/queued for too long|Network connection lost|storage (?:caused|operation)|reset because|connection (?:lost|reset)|please try again|replica disconnected/i;
 
-export function isTransientD1Error(e: unknown): boolean {
-	return TRANSIENT_D1_ERROR.test(e instanceof Error ? e.message : String(e));
+export function isTransientD1Error(e: unknown, readOnly = false): boolean {
+	const message = e instanceof Error ? e.message : String(e);
+	return (
+		TRANSIENT_D1_ERROR.test(message) ||
+		isD1Overload(e) ||
+		(readOnly && /^D1_ERROR: internal error; reference = [a-z0-9]+$/i.test(message))
+	);
 }
 
-/** Retry a D1 operation on transient primary-queue/connection errors with
- * jittered exponential backoff (~40/80/160 ms). Non-transient errors rethrow
- * on the first failure. */
-export const withD1Retry = <T>(op: () => Promise<T>, attempts = 4): Promise<T> =>
-	withRetry(
-		// Every attempt, including the last, reports overload to the hedge backoff.
-		async () => {
-			try {
-				return await op();
-			} catch (e) {
-				noteD1Overload(e);
-				throw e;
-			}
-		},
-		{
-			attempts,
-			baseMs: 40,
-			shouldRetry: (e) => {
-				const transient = isTransientD1Error(e);
-				// Surface queue pressure even when the retry succeeds: the
-				// 2026-08-22 primary stalls were invisible until reads failed
-				// outright, because absorbed retries logged nothing.
-				if (transient) console.warn(`transient D1 error, retrying: ${e}`);
-				return transient;
-			}
+/** Queue overload backs off 250/500/1000 ms plus jitter; other transient
+ * failures retain the shorter 40/80/160 ms schedule. Hedged reads share two
+ * retries and a five-second retry window. This never cancels in-flight D1
+ * calls or makes an unsafe write replayable. */
+export async function withD1Retry<T>(op: () => Promise<T>, attempts = 4): Promise<T> {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			return await op();
+		} catch (error) {
+			noteD1Overload(error);
+			const budget = d1ReadBudget();
+			if (attempt >= attempts || !isTransientD1Error(error, !!budget)) throw error;
+			const overload = isD1Overload(error);
+			const base = Math.min(1_000, (overload ? 250 : 40) * 2 ** (attempt - 1));
+			const delayMs = base + Math.random() * base;
+			if (budget && !budget.reserve(delayMs)) throw error;
+			console.warn(
+				JSON.stringify({
+					event: 'nimbus.d1_retry',
+					kind: overload ? 'overload' : 'transient',
+					attempt: attempt + 1,
+					delayMs,
+					readRetries: budget?.used,
+					error: String(error)
+				})
+			);
+			countRetry();
+			await sleep(delayMs);
+			if (budget && budget.remainingMs <= 0) throw error;
 		}
-	);
+	}
+}
 
 /** Prepared-statement execution wrappers that retry transient D1 errors and
  * account statements and rows to the request's latency record. Every
@@ -97,14 +108,15 @@ export const dbRun = (stmt: D1PreparedStatement, retry?: Retry) =>
 		(r) => [r],
 		retry
 	);
-export const dbAll = <T = unknown>(stmt: D1PreparedStatement) =>
+export const dbAll = <T = unknown>(stmt: D1PreparedStatement, retry?: Retry) =>
 	instrumented(
 		1,
 		() => stmt.all<T>(),
-		(r) => [r]
+		(r) => [r],
+		retry
 	);
-export const dbFirst = <T = unknown>(stmt: D1PreparedStatement) =>
-	dbAll<T>(stmt).then((r) => r.results[0] ?? null);
+export const dbFirst = <T = unknown>(stmt: D1PreparedStatement, retry?: Retry) =>
+	dbAll<T>(stmt, retry).then((r) => r.results[0] ?? null);
 export const dbBatch = <T = unknown>(db: D1Database, stmts: D1PreparedStatement[], retry?: Retry) =>
 	instrumented(
 		stmts.length,
@@ -456,8 +468,8 @@ const TOUCH_UPDATE_SQL = `UPDATE object SET last_accessed_at = ?5 WHERE ${TOUCH_
  * two isolates racing the same window still write once each at most, and
  * replica lag costs only a redundant write that would have happened regardless.
  *
- * Both statements are raw, per the best-effort carve-out documented on
- * dbRun/dbFirst above: a touch that fails is skipped and the next download
+ * Both statements are instrumented but single-attempt: a failed touch is
+ * skipped and the next download
  * re-decides, so retrying would only add load to a primary or replica that is
  * already signalling contention.
  */
@@ -477,10 +489,11 @@ export async function touchObjectsForNarHash(
 	const stale = await dbFirst(
 		readSession(db)
 			.prepare(TOUCH_PROBE_SQL)
-			.bind(...args)
+			.bind(...args),
+		ONCE
 	);
 	if (!stale) return;
-	await dbRun(db.prepare(TOUCH_UPDATE_SQL).bind(...args, new Date(now).toISOString()));
+	await dbRun(db.prepare(TOUCH_UPDATE_SQL).bind(...args, new Date(now).toISOString()), ONCE);
 }
 
 /** Pin a store path's closure against garbage collection. */

@@ -1,7 +1,8 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import { isTransientD1Error, primarySession, readSession } from './db';
-import { withinMs, type ExecutionContext } from './platform';
+import { sleep, withinMs, type ExecutionContext } from './platform';
 import { d1OverloadDelay, isD1Overload } from './d1-pressure';
+import { d1ReadBudget, withD1ReadBudget } from './d1-read-budget';
 import { settled, valueOf } from './result';
 
 const HEDGE_AFTER_MS = 500;
@@ -14,12 +15,13 @@ let nextAllowed = 0;
 /** Why a speculative primary read must wait now, and how long to poll. */
 function admissionWait(
 	now: number,
-	replicaFailed: boolean
+	replicaError?: unknown
 ): { reason: 'active' | 'rate' | 'overload'; delay: number } | null {
 	if (active && active.deadline > now) return { reason: 'active', delay: HEDGE_POLL_MS };
 	if (now < nextAllowed) return { reason: 'rate', delay: nextAllowed - now };
-	// Overload defers only speculation; a failed replica still fails over.
-	const overload = replicaFailed ? 0 : d1OverloadDelay();
+	// Overload failures also back off; connection failures still fail over.
+	const overload =
+		replicaError !== undefined && !isD1Overload(replicaError) ? 0 : d1OverloadDelay();
 	if (overload > 0) return { reason: 'overload', delay: Math.min(overload, HEDGE_POLL_MS) };
 	return null;
 }
@@ -34,14 +36,23 @@ function admissionWait(
  * A pending replica rechecks admission rather than forfeiting its hedge for
  * the entire request when another read briefly owns the shared budget.
  * Explicit overload pauses speculative primary reads for two seconds after
- * the latest rejection. Error-driven failover and foreground retries remain
- * available under the existing primary concurrency/start-rate limits. */
-export async function hedgedReplicaRead<T>(
+ * the latest rejection. Overload-driven failover waits within the read retry
+ * window; connection failures remain eligible immediately. */
+export function hedgedReplicaRead<T>(
+	db: D1Database,
+	ctx: ExecutionContext | undefined,
+	read: (session: D1Database) => Promise<T>
+): Promise<T> {
+	return withD1ReadBudget(() => hedgedRead(db, ctx, read));
+}
+
+async function hedgedRead<T>(
 	db: D1Database,
 	ctx: ExecutionContext | undefined,
 	read: (session: D1Database) => Promise<T>
 ): Promise<T> {
 	if (!ctx || typeof db.withSession !== 'function') return read(readSession(db));
+	const budget = d1ReadBudget()!;
 	const startedAt = Date.now();
 	const replica = settled(Promise.resolve().then(() => read(readSession(db))));
 	let first = await withinMs(replica, HEDGE_AFTER_MS);
@@ -49,9 +60,9 @@ export async function hedgedReplicaRead<T>(
 	const logged = new Set<string>();
 	while (true) {
 		if (first?.ok) return first.value;
-		if (first && !isTransientD1Error(first.error)) throw first.error;
+		if (first && !isTransientD1Error(first.error, true)) throw first.error;
 		const now = Date.now();
-		const wait = admissionWait(now, !!first);
+		const wait = admissionWait(now, first?.error);
 		if (!wait) break;
 		if (!logged.has(wait.reason)) {
 			logged.add(wait.reason);
@@ -59,9 +70,14 @@ export async function hedgedReplicaRead<T>(
 				JSON.stringify({ event: 'nimbus.d1_hedge_wait', reason: wait.reason, ms: now - startedAt })
 			);
 		}
-		// A failed replica already has a retryable outcome. Preserve that error
-		// rather than delaying a failed request or spinning on a settled promise.
-		if (first) return valueOf(first);
+		// A settled failure needs its own timer: polling the settled promise
+		// would spin. Only overload waits; occupied primary capacity fails fast.
+		if (first) {
+			const remaining = budget.remainingMs;
+			if (wait.reason !== 'overload' || remaining <= 0) return valueOf(first);
+			await sleep(Math.min(wait.delay + Math.random() * 25, remaining));
+			continue;
+		}
 		// Poll only this request's I/O; never await another request's primary
 		// promise. Rechecking and taking the lease below have no intervening await.
 		first = await withinMs(replica, wait.delay + Math.random() * 25);
@@ -92,6 +108,7 @@ export async function hedgedReplicaRead<T>(
 				event: 'nimbus.d1_hedge',
 				reason,
 				replicaOverloaded,
+				readRetries: budget.used,
 				winner,
 				ms: Date.now() - startedAt
 			})

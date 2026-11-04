@@ -1,5 +1,5 @@
-// Value-only, per-isolate backoff for speculative reads. Foreground reads,
-// retries and consistency-required confirmations retain their own policies.
+// Value-only, per-isolate backoff for speculative and overload-driven primary
+// reads. Statement retries and consistency-required reads have their own bounds.
 const OVERLOAD_COOLDOWN_MS = 2_000;
 let overloadedUntil = 0;
 

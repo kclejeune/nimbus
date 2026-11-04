@@ -118,19 +118,47 @@ show little useful sharing.
 The configuration fill also uses one shared key across different path hashes;
 its overlap is not estimated by the historical per-path gateway memo statistic.
 
-An explicit D1 overload pauses **speculative** primary hedges for two seconds
-after the last observed rejection in an isolate. Normal replica reads, retries,
-primary-required reads and error-driven failover retain their policies. The
-existing one-active-hedge and one-start-per-second limits still apply.
+An explicit D1 overload pauses speculative and overload-driven primary attempts
+for two seconds after the last observed rejection in an isolate. Connection
+failures can still fail over promptly. A settled overload failure waits only
+within its five-second read retry window; occupied primary capacity still
+returns the replica's failure. The existing one-active-hedge and
+one-start-per-second limits remain.
 `nimbus.d1_hedge_wait` records `reason=overload`; compare overload warnings,
 primary hedge wins, gateway tails and failed requests together. Reducing primary
 load can increase latency for a read whose replica remains slow during cooldown.
 `nimbus.d1_hedge.replicaOverloaded` distinguishes overload-driven failover from
 other replica failures. An unconstrained read may itself have used the primary,
 so an overload result does not establish which database instance was unhealthy.
-Upload/write overloads also pause speculative read hedges in the same isolate;
-this shared pressure signal is deliberate, while foreground retry policies and
-error-driven failover remain unchanged.
+Upload/write overloads also pause read hedges in the same isolate; this shared
+pressure signal is deliberate.
+
+Queue-overload retries back off by 250/500/1000 ms plus up to an equal amount
+of jitter. Other transient failures retain 40/80/160 ms plus jitter. Replica
+and primary SELECTs share at most two **additional** attempts within five
+seconds; their initial statements are not limited, so a multi-query config read
+can still complete. The losing read cannot schedule more retries after a winner
+returns. The window bounds retry scheduling, not D1 execution: a binding call
+already in flight is not cancelled, and a successful result can arrive later.
+Uncached loopback recovery still starts an independent logical read.
+
+`D1_ERROR: internal error; reference = ...` is recoverable only inside that
+SELECT-only scope. Unsafe writes, including hold releases, remain single-attempt.
+Both download-touch statements are also single-attempt: their best-effort work
+must not add a retry burst when reads are already under pressure.
+`nimbus.d1_retry` records the scheduled next `attempt`, `delayMs`, error and
+shared `readRetries` reservations. `nimbus.d1_hedge.readRetries` reports that
+same budget use. A scheduled retry may be suppressed if another attempt wins;
+use D1 statement counters and spans to count executed work.
+
+The CLI shares upload concurrency and pressure feedback across its requests,
+including chunks and retries: eight requests maximum, halved toward one after
+429/503 responses, with a shared cooldown and gradual recovery. A failed
+preflight also pauses uploads. This is per client, while the Worker cooldown is
+per isolate; neither is a database-wide admission limit. The maintainer CI sets
+two path-upload jobs separately from Nix's build-job count. Compare completion
+throughput, narinfo failures, queue-overload events and retry counts together;
+the initial limits and delays are tunable starting values.
 
 ## Compare upload concurrency without deduplication bias
 
