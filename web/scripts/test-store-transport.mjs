@@ -67,6 +67,7 @@ try {
 		const result = await stats();
 		assert.equal(result.activeTimers, 0);
 		assert.equal(result.timers, 1);
+		assert.equal(result.collectedBytes, size);
 		if (hint === size) assert.ok(result.batchReads <= Math.ceil(size / 65536) + 1);
 	}
 	assert.equal((await stream(65537, 'collect&hint=65536&limit=65536')).status, 413);

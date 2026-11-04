@@ -44,6 +44,17 @@ async function install(plan, projectId, origin) {
 	const channels = list(channelList, 'channels');
 	const objectives = list(sloList, 'slos');
 	const rules = list(ruleList, 'rules');
+	// Preview the exact filters against the last day before changing settings.
+	// A missing span name must not silently create an objective with no data.
+	for (const objective of plan.objectives) {
+		const { sliKind, sliConfig, bucketMinutes, name } = objective.body;
+		const preview = await api('slos/preview', 'POST', { sliKind, sliConfig, bucketMinutes });
+		if (!Number.isFinite(preview.total) || preview.total <= 0)
+			throw new Error(
+				`No events matched ${name} in the last 24 hours; no configuration was created.`
+			);
+		console.log(`Preview ${name}: ${preview.good}/${preview.total} good events (${preview.sli}%).`);
+	}
 	/** @param {unknown} value */
 	const decode = (value) => (typeof value === 'string' ? JSON.parse(value) : value);
 	/** @param {unknown} expected @param {unknown} actual @returns {boolean} */

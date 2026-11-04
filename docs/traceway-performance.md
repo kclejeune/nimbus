@@ -56,8 +56,10 @@ credentials. The recipient appears only in the generated local file; keep it
 out of version control. The installer uses the dashboard's existing session only against
 that origin, checks channel/SLO/rule access before writing, reuses matching
 configuration by name, and refuses to overwrite differing existing settings.
-It creates one email channel, six objectives and eight rules, without sending
-a test message. A server without SLO support fails before any writes. If a
+It previews all six objectives against the last 24 hours and refuses to create
+configuration if any objective matches no events. It then creates one email
+channel, six objectives and eight rules, without sending a test message.
+A server without SLO support fails before any configuration writes. If a
 later request fails, earlier successful creates remain; rerunning reuses them.
 
 The manual equivalent is:
@@ -78,16 +80,17 @@ The manual equivalent is:
    top level of the request body. Reconcile by name rather than creating
    duplicates on a second application.
 
-The November 1 investigation could list rules with the installed CLI, but its
+The November 1 and November 3 investigations could list rules with the installed CLI, but its
 `traceway:read` session returned 401 for channel discovery and 404 for
 `/api/slos`. Traceway's agent route allowlist deliberately excludes creating
 channels, rules and SLOs even for write credentials. These operations require a
-dashboard session. The maintainer Nix package pins Traceway 2.0.7; if that
-dashboard also lacks span SLOs, update Traceway before applying this plan rather
-than substituting outer request durations. No live configuration has been
+dashboard session. Traceway 2.0.8 added SLOs; the November 3 preflight was against
+the older 2.0.7 server. Update the server before applying this plan, then use a
+signed-in dashboard session rather than an agent credential. Keep the latency
+objectives on gateway child spans. No live configuration has been
 changed by preparing these files.
 
-References: [Traceway SLOs](https://docs.tracewayapp.com/learn/slos) and
+References: [Traceway 2.0.8](https://github.com/tracewayapp/traceway/releases/tag/backend%2Fv2.0.8), [Traceway SLOs](https://docs.tracewayapp.com/learn/slos) and
 [alert rules](https://docs.tracewayapp.com/learn/alerts).
 
 ## Measure D1 burst mitigation after deployment
@@ -130,6 +133,33 @@ this shared pressure signal is deliberate, while foreground retry policies and
 error-driven failover remain unchanged.
 
 ## Compare upload concurrency without deduplication bias
+
+Upload diagnostics are independent of retained trace sampling:
+
+- `nimbus.upload_admission` records every refusal and successful waits of at
+  least one second. It includes the requested reservation, wait limit, and
+  memory state before and after waiting. `kind` distinguishes path, chunk and
+  completion admission.
+- `nimbus.upload_chunk` distinguishes CDC R2 `get` (including retries) from
+  compressed `body` reads. Operations taking at least one second emit a final
+  record; a pending operation emits at five seconds and every fifteen seconds
+  afterward. Failures, missing objects and invalid bodies also emit a record.
+  Intentional read-ahead cancellation is labelled `cancelled`.
+- Body records include cumulative compressed `bytes`, `expectedBytes` and
+  `idleMs` since the last successful source read, alongside the NAR hash and
+  zero-based chunk index. Progress measures storage reads, not client transfer.
+- Every record includes a process-local `memory.isolate` identifier so
+  contention can be correlated across requests sharing the budget. Reserved
+  bytes, active reservations and live queued callers describe admission, not
+  measured heap usage. `prefetchBytes` and `prefetchActive` are the speculative
+  subset; they stop counting a buffer once the foreground consumer takes it.
+
+For a slow completion, correlate its trace and chunk indices, then compare
+admission failures with the same isolate identifier. A slow body that keeps
+advancing bytes differs from an idle read; a long `get` precedes body transfer.
+Per-operation durations, `cdcRead` and R2 totals can overlap and must not be
+summed into request wall time. The diagnostics do not change memory limits,
+admission waits, read-ahead, client concurrency or storage timeouts.
 
 Do not push the same closure twice to the same instance and interpret the
 second, deduplicated push as a concurrency improvement. Different cache names

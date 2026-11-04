@@ -24,6 +24,8 @@ function dashboard(unsupported = false) {
 		expect(url.origin).toBe(origin);
 		expect(url.searchParams.get('projectId')).toBe(project);
 		const path = url.pathname.split('/').at(-1)!;
+		if (path === 'preview')
+			return { ok: true, json: async () => ({ good: 98, total: 100, sli: 98 }) };
 		if (unsupported && path === 'slos') return { ok: false, status: 404 };
 		if (options.method === 'GET')
 			return {
@@ -54,7 +56,10 @@ it('creates the email channel, header SLOs and rules once, then reuses matching 
 	]);
 	expect(records.slos).toHaveLength(6);
 	expect(records['notification-rules']).toHaveLength(8);
-	const posts = () => fetch.mock.calls.filter(([, options]) => options.method === 'POST');
+	const posts = () =>
+		fetch.mock.calls.filter(
+			([url, options]) => options.method === 'POST' && !url.pathname.endsWith('/preview')
+		);
 	expect(posts()).toHaveLength(15);
 	await run();
 	expect(posts()).toHaveLength(15);
@@ -76,7 +81,24 @@ it('does not overwrite an existing channel with different recipients', async () 
 		enabled: true
 	});
 	await expect(run()).rejects.toThrow('Existing settings differ');
-	expect(fetch.mock.calls.every(([, options]) => options.method === 'GET')).toBe(true);
+	expect(
+		fetch.mock.calls.every(
+			([url, options]) => options.method === 'GET' || url.pathname.endsWith('/preview')
+		)
+	).toBe(true);
+});
+
+it('previews all objectives before creating any configuration and rejects empty filters', async () => {
+	const { fetch, run, records } = dashboard();
+	fetch.mockImplementation(async (url, options) => {
+		if (url.pathname.endsWith('/preview'))
+			return { ok: true, json: async () => ({ good: 0, total: 0, sli: null }) };
+		const path = url.pathname.split('/').at(-1)!;
+		expect(options.method).toBe('GET');
+		return { ok: true, json: async () => ({ [WIRE_KEY[path]]: records[path] }) };
+	});
+	await expect(run()).rejects.toThrow('No events matched');
+	expect(Object.values(records).flat()).toHaveLength(0);
 });
 
 it('never uses a dashboard credential on a different origin', async () => {

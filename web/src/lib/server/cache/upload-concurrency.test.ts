@@ -215,6 +215,7 @@ it('does not buffer completion bodies while admission is full, and releases hold
 		json: async () => null
 	}));
 	const held = 2 * UPLOAD_SLOT_BYTES;
+	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
 	expect(uploadMemory.tryAcquire(held)).toBe(true);
 	vi.useFakeTimers();
 	try {
@@ -223,6 +224,21 @@ it('does not buffer completion bodies while admission is full, and releases hold
 		expect(read).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(5100);
 		expect(await completion).toMatchObject({ message: 'Upload memory busy; retry shortly' });
+		expect(warning.mock.calls.map(([line]) => JSON.parse(line))).toContainEqual(
+			expect.objectContaining({
+				event: 'nimbus.upload_admission',
+				kind: 'completion',
+				outcome: 'refused',
+				requestedBytes: UPLOAD_SLOT_BYTES,
+				waitLimitMs: 5_000,
+				after: expect.objectContaining({
+					usedBytes: held,
+					active: 1,
+					prefetchBytes: 0,
+					prefetchActive: 0
+				})
+			})
+		);
 		expect(read).not.toHaveBeenCalled();
 		expect(cancelled).toHaveBeenCalledTimes(2);
 		expect(
@@ -268,6 +284,29 @@ it('buffers the next body while the current body is still reading, within two sl
 		await secondReading.promise;
 		expect(uploadMemory.tryAcquire(1)).toBe(false);
 		expect(await withWasmSlot(async () => 'available')).toBe('available');
+		const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		vi.useFakeTimers();
+		try {
+			const admission = admitUpload(chunkRequest(new Uint8Array([1])), 'chunk');
+			const refused = expect(admission).rejects.toMatchObject({
+				message: 'Upload memory busy; retry shortly'
+			});
+			await vi.advanceTimersByTimeAsync(5_000);
+			await refused;
+			expect(JSON.parse(warning.mock.calls.at(-1)![0])).toMatchObject({
+				event: 'nimbus.upload_admission',
+				kind: 'chunk',
+				outcome: 'refused',
+				after: {
+					usedBytes: 2 * UPLOAD_SLOT_BYTES,
+					active: 2,
+					prefetchBytes: UPLOAD_SLOT_BYTES,
+					prefetchActive: 1
+				}
+			});
+		} finally {
+			vi.useRealTimers();
+		}
 	} finally {
 		resume.resolve();
 	}

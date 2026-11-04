@@ -8,6 +8,7 @@ let fills = 0;
 
 let timers = 0;
 let batchReads = 0;
+let collectedBytes = 0;
 let readConfig: { min: number; capacity: number } | undefined;
 let cancelled = false;
 let headersSeen: unknown;
@@ -82,6 +83,7 @@ export default {
 			return Response.json({
 				timers,
 				batchReads,
+				collectedBytes,
 				readConfig,
 				activeTimers: activeTimers.size,
 				cancelled,
@@ -89,6 +91,7 @@ export default {
 				diagnostic
 			});
 		timers = batchReads = 0;
+		collectedBytes = 0;
 		readConfig = undefined;
 		cancelled = false;
 		headersSeen = undefined;
@@ -130,7 +133,12 @@ export default {
 		if (mode?.startsWith('collect')) {
 			const hint = Number(url.searchParams.get('hint') ?? size);
 			const limit = Number(url.searchParams.get('limit') ?? size + 10);
-			const bytes = await readAll(readable, limit, hint, { batch: mode !== 'collect-plain' });
+			const bytes = await readAll(readable, limit, hint, {
+				batch: mode !== 'collect-plain',
+				onProgress: (bytes) => {
+					collectedBytes = bytes;
+				}
+			});
 			return bytes ? new Response(bytes) : new Response('oversized', { status: 413 });
 		}
 		const headers = new Headers({ 'Content-Length': String(size) });
