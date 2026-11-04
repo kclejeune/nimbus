@@ -21,6 +21,7 @@ type Client struct {
 	endpoint string
 	token    string
 	hc       *http.Client
+	uploads  uploadGate
 }
 
 func New(endpoint, token string) *Client {
@@ -102,9 +103,50 @@ func (e *Error) Error() string {
 // gets a single attempt. Returns the attempt count for error reporting.
 func (c *Client) do(req *http.Request) (*http.Response, int, error) {
 	retry := canReplay(req) && (req.Body == nil || req.GetBody != nil)
+	upload := isUploadRequest(req)
 	backoff := 500 * time.Millisecond
 	for attempt := 1; ; attempt++ {
+		if upload {
+			if err := c.uploads.acquire(req.Context()); err != nil {
+				// Client.Do normally owns closing the body, but it has not run.
+				// Retry bodies are opened only after admission below.
+				if attempt == 1 && req.Body != nil {
+					_ = req.Body.Close()
+				}
+				return nil, attempt, err
+			}
+		}
+		if attempt > 1 && req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				if upload {
+					c.uploads.finish(0, 0)
+				}
+				return nil, attempt, err
+			}
+			req.Body = body
+		}
 		res, err := c.hc.Do(req)
+		status := 0
+		var retryDelay time.Duration
+		var retryTooLong bool
+		if res != nil {
+			status = res.StatusCode
+			retryDelay, retryTooLong = retryAfter(res)
+		}
+		var cooldown time.Duration
+		if isUploadPressure(status) {
+			cooldown = retryDelay
+			if cooldown <= 0 {
+				cooldown = time.Second
+			}
+			cooldown += rand.N(500 * time.Millisecond)
+		}
+		if upload {
+			c.uploads.finish(status, cooldown)
+		} else if cooldown > 0 {
+			c.uploads.backoff(cooldown)
+		}
 		if !retry || attempt >= 3 {
 			return res, attempt, err
 		}
@@ -119,10 +161,10 @@ func (c *Client) do(req *http.Request) (*http.Response, int, error) {
 		}
 		wait := backoff + rand.N(backoff)
 		if err == nil {
-			if ra, tooLong := retryAfter(res); tooLong {
+			if retryTooLong {
 				return res, attempt, nil
-			} else if ra > 0 {
-				wait = ra + rand.N(backoff)
+			} else if retryDelay > 0 {
+				wait = retryDelay + rand.N(backoff)
 			}
 			// Drain (bounded) before closing so the transport sees EOF and can
 			// reuse the connection instead of paying a fresh TLS handshake.
@@ -134,13 +176,6 @@ func (c *Client) do(req *http.Request) (*http.Response, int, error) {
 		case <-req.Context().Done():
 			return nil, attempt, req.Context().Err()
 		case <-time.After(wait):
-		}
-		if req.GetBody != nil {
-			body, err := req.GetBody()
-			if err != nil {
-				return nil, attempt, err
-			}
-			req.Body = body
 		}
 		backoff *= 2
 	}
@@ -182,7 +217,7 @@ func retryAfter(res *http.Response) (wait time.Duration, tooLong bool) {
 	}
 	if deadline, err := http.ParseTime(value); err == nil {
 		wait = max(0, time.Until(deadline))
-		return wait, wait > maxRetryAfter
+		return min(wait, maxRetryAfter), wait > maxRetryAfter
 	}
 	return 0, false
 }

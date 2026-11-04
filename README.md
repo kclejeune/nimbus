@@ -283,10 +283,20 @@ chunks the server has. `push` accepts attic's flags (`--stdin`,
 `--no-closure`, `--jobs`, `--ignore-upstream-cache-filter`), so it can replace
 `attic push` in existing tooling.
 
+`--jobs` bounds concurrent paths. The CLI also caps upload API requests,
+including chunks, at eight per client. A `429` or `503` response halves that
+cap down to one and pauses new uploads together, honoring `Retry-After`
+(up to five minutes). Successful uploads restore one request of concurrency
+at most every five seconds after cooldown. This pacing also reacts to failed
+preflight requests, while control-plane requests remain available. Each CLI
+process adapts independently; this is not a database-wide concurrency limit.
+
 `watch-exec` collects every path the command adds and pushes them as one
 closure-deduplicated batch when it exits, flushing early whenever the store
 is idle for `--batch-idle` (15s; `0` waits for exit). `--batch=false`
 streams paths as they settle instead.
+For a conservative CI setting, use `nimbus watch-exec --jobs 2 CACHE COMMAND ...`;
+the command's own build-job flags do not control upload concurrency.
 
 ## Deploy
 
