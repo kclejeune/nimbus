@@ -7,6 +7,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 // work, but bound the 60–70 s caching-pipeline stalls seen in production.
 // Only one uncached attempt follows, with normal backend admission intact.
 export const STORE_HEADER_TIMEOUT_MS = 10_000;
+export const STORE_BEST_EFFORT_TIMEOUT_MS = 1_000;
 export const STORE_BODY_IDLE_TIMEOUT_MS = 15_000;
 const BODY_READ_BUFFER_BYTES = 128 * 1024;
 interface Recovery {
@@ -234,32 +235,50 @@ export async function readViaStore(
 	return withStoreRecovery(() => readStore(ctx, request, direct));
 }
 
-async function readStore(
+/** Optional bookkeeping must not retry a failed loopback against D1. A local
+ * deployment without the store binding can still execute its single attempt. */
+export function readBestEffortViaStore(
 	ctx: ExecutionContext | undefined,
 	request: Request,
 	direct: () => Promise<Response>
 ): Promise<Response> {
+	return withStoreRecovery(() => readStore(ctx, request, direct, true));
+}
+
+async function readStore(
+	ctx: ExecutionContext | undefined,
+	request: Request,
+	direct: () => Promise<Response>,
+	bestEffort = false
+): Promise<Response> {
 	const store = ctx?.exports?.CachedStore;
 	const state = recovery.getStore()!;
+	if (bestEffort && state.bypass)
+		throw new AdmissionError('Best-effort store work deferred during recovery', 5);
 	if (!store || state.bypass) return direct();
 	const abort = new AbortController();
 	const signal = AbortSignal.any([request.signal, abort.signal]);
 	const pending = store.fetch(new Request(request, { signal }));
 	// Transport exceptions retain the caller's existing recovery policy (the
 	// combined narinfo route retries through separate cached metadata/body reads).
-	const response = await withinMs(pending, STORE_HEADER_TIMEOUT_MS);
-	if (response && response.status !== 502) return guardBody(response, request, abort);
+	const response = await withinMs(
+		pending,
+		bestEffort ? STORE_BEST_EFFORT_TIMEOUT_MS : STORE_HEADER_TIMEOUT_MS
+	);
+	if (response && response.status !== 502)
+		return bestEffort ? response : guardBody(response, request, abort);
 	if (request.signal.aborted) throw request.signal.reason;
 	const reason = response ? '502' : 'header_timeout';
-	state.bypass = true;
-	countLoopbackFallback();
-	diagnostic(request, 'headers', { reason });
+	diagnostic(request, 'headers', { reason, ...(bestEffort ? { recovery: 'skipped' } : {}) });
 	// Abort is best-effort: a transport that ignores the signal may still
 	// produce a response. Dispose that late body without awaiting it or adding
 	// a permanently pending waitUntil task to this request.
 	abort.abort();
 	cancelStoreBody(response);
 	if (!response) void pending.then(cancelStoreBody, () => {});
+	if (bestEffort) throw new AdmissionError('Best-effort store work deferred after failure', 5);
+	state.bypass = true;
+	countLoopbackFallback();
 	return direct();
 }
 

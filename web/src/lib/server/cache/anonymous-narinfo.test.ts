@@ -629,6 +629,82 @@ it('reuses tagged membership on an envelope refill without renewing its original
 	}
 });
 
+it('reuses stale membership during an envelope fill without a duplicate D1 read or a fresh envelope', async () => {
+	const hash = freshHash();
+	hold(hash);
+	const { get, entries } = edge();
+	expect((await get(hash)).status).toBe(200);
+	const stamp = entries.get(`/_meta/path/${hash}`)!.headers.get('X-Nimbus-Filled-At');
+	entries.delete(route(hash));
+	vi.useFakeTimers({ toFake: ['Date'] });
+	try {
+		vi.setSystemTime(Date.now() + 3_601_000);
+		const read = vi.spyOn(db, 'cachesWithStorePathHash');
+		expect((await get(hash)).status).toBe(200);
+		expect(read).not.toHaveBeenCalled();
+		expect(entries.has(route(hash))).toBe(false);
+		expect(entries.get(`/_meta/path/${hash}`)!.headers.get('X-Nimbus-Filled-At')).toBe(stamp);
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+it('still hides a now-private object when an envelope uses stale public membership', async () => {
+	const hash = freshHash();
+	hold(hash);
+	const { get, entries } = edge();
+	expect((await get(hash)).status).toBe(200);
+	entries.delete(route(hash));
+	fixture.sqlite.exec('UPDATE cache SET is_public = 0 WHERE id = 1');
+	vi.useFakeTimers({ toFake: ['Date'] });
+	try {
+		vi.setSystemTime(Date.now() + 3_601_000);
+		expect((await get(hash)).status).toBe(404);
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+it('confirms stale empty membership before an upstream miss can hide a new upload', async () => {
+	const hash = freshHash();
+	hold(hash);
+	const { get, entries } = edge();
+	const storedAt = Date.now() - 301_000;
+	entries.set(`/_meta/path/${hash}`, {
+		text: '[]',
+		storedAt,
+		headers: new Headers({
+			'Cache-Control': 'public, max-age=300, stale-while-revalidate=604800, stale-if-error=0',
+			'X-Nimbus-Filled-At': String(storedAt)
+		})
+	});
+	const response = await get(hash);
+	expect(response.status).toBe(200);
+	expect(await response.text()).toContain(`/nix/store/${hash}-test`);
+	expect(entries.has(route(hash))).toBe(false);
+});
+
+it.each(['missing-stamp', 'future-stamp', 'no-stale-window', 'expired-stale-window'])(
+	'reloads candidate snapshots with %s instead of extending reuse',
+	async (reason) => {
+		const hash = freshHash();
+		const elapsed = reason === 'expired-stale-window' ? 605_101_000 : 301_000;
+		const headers = new Headers({
+			'Cache-Control': `public, max-age=300${reason === 'no-stale-window' ? '' : ', stale-while-revalidate=604800'}`,
+			Age: String(elapsed / 1000),
+			'X-Nimbus-Filled-At': String(Date.now() - elapsed)
+		});
+		if (reason === 'missing-stamp') headers.delete('X-Nimbus-Filled-At');
+		if (reason === 'future-stamp') headers.set('X-Nimbus-Filled-At', String(Date.now() + 1000));
+		const ctx = {
+			exports: { CachedStore: { fetch: async () => Response.json([], { headers }) } }
+		} as unknown as ExecutionContext;
+		const read = vi.spyOn(db, 'cachesWithStorePathHash');
+		expect(await candidateSnapshot(env, hash, ctx)).toMatchObject({ rows: [], fresh: true });
+		expect(read).toHaveBeenCalledOnce();
+	}
+);
+
 it('recovers an inner metadata body failure without caching an error envelope', async () => {
 	const hash = freshHash();
 	hold(hash);

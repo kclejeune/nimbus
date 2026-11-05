@@ -10,7 +10,7 @@ const { outputFiles } = await build({
 	bundle: true,
 	format: 'esm',
 	platform: 'browser',
-	external: ['node:*'],
+	external: ['node:*', 'cloudflare:workers'],
 	write: false
 });
 const mf = new Miniflare(
@@ -44,6 +44,26 @@ try {
 		{ value: 4 }
 	);
 	assert.equal((await stats()).activeTimers, 0);
+	// A real loopback that ignores abort must not follow an abandoned probe
+	// with a primary write. Its explicit deadline also rejects a queued start.
+	const touch = await fetch(new URL('/slow-touch', await mf.ready));
+	assert.equal(touch.status, 503);
+	assert.equal(await touch.text(), 'deferred');
+	await new Promise((resolve) => setTimeout(resolve, 400));
+	assert.deepEqual(await (await mf.dispatchFetch('https://cache.test/touch-stats')).json(), {
+		touchProbes: 1,
+		touchWrites: 0
+	});
+	// The gateway backoff is five seconds; the origin deadline test runs after it.
+	await new Promise((resolve) => setTimeout(resolve, 5_000));
+	const late = await fetch(new URL('/slow-touch?late', await mf.ready));
+	assert.equal(late.status, 503);
+	await late.text();
+	await new Promise((resolve) => setTimeout(resolve, 400));
+	assert.deepEqual(await (await mf.dispatchFetch('https://cache.test/touch-stats')).json(), {
+		touchProbes: 1,
+		touchWrites: 0
+	});
 	// An invocation can end without settling its lease. An uncached recovery
 	// in another real request must not join that abandoned fill.
 	assert.equal(await (await fetch(new URL('/abandon-fill', await mf.ready))).text(), 'registered');

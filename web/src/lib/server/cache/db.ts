@@ -476,8 +476,10 @@ const TOUCH_UPDATE_SQL = `UPDATE object SET last_accessed_at = ?5 WHERE ${TOUCH_
 export async function touchObjectsForNarHash(
 	db: D1Database,
 	cacheId: number,
-	narHashRaw: string
+	narHashRaw: string,
+	checkActive?: () => void
 ): Promise<void> {
+	checkActive?.();
 	const now = Date.now();
 	const args = [
 		cacheId,
@@ -492,6 +494,9 @@ export async function touchObjectsForNarHash(
 			.bind(...args),
 		ONCE
 	);
+	// D1 cannot cancel the probe itself. Recheck the caller's deadline and
+	// pressure policy before following its late result with a primary write.
+	checkActive?.();
 	if (!stale) return;
 	await dbRun(db.prepare(TOUCH_UPDATE_SQL).bind(...args, new Date(now).toISOString()), ONCE);
 }

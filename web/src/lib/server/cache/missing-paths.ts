@@ -997,13 +997,15 @@ export async function cachedUpstreamConfig(
 ): Promise<UpstreamConfig> {
 	if (!ctx?.exports?.CachedStore) return upstreamConfig(env.ATTIC_DB, ctx);
 	const request = internalRequest(env, '/_upstream_config/v1');
-	const { value: wire } = await readStoreMetadata(
-		ctx,
-		request,
-		() => serveUpstreamConfig(env, ctx),
-		(response) =>
-			internalJson<ConfigWire>(response, 'Upstream configuration temporarily unavailable'),
-		(response) => remainingFreshMs(response.headers) <= 0
+	const { value: wire } = await withSpan(ctx, 'upstream configuration loopback', () =>
+		readStoreMetadata(
+			ctx,
+			request,
+			() => serveUpstreamConfig(env, ctx),
+			(response) =>
+				internalJson<ConfigWire>(response, 'Upstream configuration temporarily unavailable'),
+			(response) => remainingFreshMs(response.headers) <= 0
+		)
 	);
 	return { ...wire, overrides: new Map(wire.overrides.map(([id, modes]) => [id, new Map(modes)])) };
 }

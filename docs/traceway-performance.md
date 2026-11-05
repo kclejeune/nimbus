@@ -118,6 +118,19 @@ show little useful sharing.
 The configuration fill also uses one shared key across different path hashes;
 its overlap is not estimated by the historical per-path gateway memo statistic.
 
+Anonymous envelope refills can reuse tagged candidate metadata within its
+existing `stale-while-revalidate` window instead of forcing an additional D1
+read while the edge refreshes it. The original fill timestamp is preserved.
+An envelope built from stale membership is `no-store`, so it cannot renew that
+membership's lifetime. Current visibility is still checked in the gateway;
+stale empty membership is confirmed before an upstream miss or failure becomes
+the answer. Missing/future timestamps and entries outside the permitted reuse
+window still reload. Upstream trust configuration remains strictly fresh.
+Child spans distinguish `candidate snapshot loopback`, `narinfo body loopback`
+and `upstream configuration loopback`. On envelope fills, sampled latency logs
+also separate membership (`candidateLoopback`) from body resolution (`store`).
+Use these to locate remaining waits before changing required-read deadlines.
+
 An explicit D1 overload pauses speculative and overload-driven primary attempts
 for two seconds after the last observed rejection in an isolate. Connection
 failures can still fail over promptly. A settled overload failure waits only
@@ -146,6 +159,20 @@ Uncached loopback recovery still starts an independent logical read.
 SELECT-only scope. Unsafe writes, including hold releases, remain single-attempt.
 Both download-touch statements are also single-attempt: their best-effort work
 must not add a retry burst when reads are already under pressure.
+Retention loopbacks have a separate one-second header deadline and never
+recover a failed loopback with another origin read. A failed touch backs off
+all touch keys in that isolate for five seconds; explicit D1 overload also
+defers touch work in both the gateway and origin. Required reads keep their
+ten-second transport deadline and recovery policy. The internal touch request
+stamps a deadline that is checked before the probe and again before UPDATE,
+together with cancellation and overload: a delayed/abandoned probe must not
+start a late primary write, even if the RPC ignores abort. Already-issued D1
+operations still cannot be cancelled.
+`nimbus.store_transport` labels skipped best-effort recovery with
+`recovery=skipped`; `nimbus.retention_touch` records the start of a shared
+backoff, not every skipped download. The one- and five-second values are
+starting policies, not measured optima. Retention remains best-effort: a
+deferred access may only be recorded by a later successful download.
 `nimbus.d1_retry` records the scheduled next `attempt`, `delayMs`, error and
 shared `readRetries` reservations. `nimbus.d1_hedge.readRetries` reports that
 same budget use. A scheduled retry may be suppressed if another attempt wins;

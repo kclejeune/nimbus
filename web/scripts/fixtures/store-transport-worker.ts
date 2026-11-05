@@ -1,10 +1,46 @@
 // Native stream fixture for scripts/test-store-transport.mjs. No real bindings.
+import { WorkerEntrypoint } from 'cloudflare:workers';
 import { readViaStore } from '../../src/lib/server/cache/store-transport';
 import { readAll, type ExecutionContext } from '../../src/lib/server/cache/platform';
 import { ReadCoalescer } from '../../src/lib/server/cache/read-coalescer';
+import { serveTouch, touchViaStore } from '../../src/lib/server/cache/metadata';
 
 const coalesced = new ReadCoalescer<number>();
 let fills = 0;
+let touchProbes = 0;
+let touchWrites = 0;
+const touchEnv = {
+	CACHE_BASE_URL: 'https://cache.test',
+	ATTIC_DB: {
+		prepare: () => {
+			const statement = {
+				bind: () => statement,
+				all: async () => {
+					touchProbes++;
+					await new Promise((resolve) => timeout(resolve, 1_200));
+					return { results: [{}], meta: {} };
+				},
+				run: async () => {
+					touchWrites++;
+					return { meta: {} };
+				}
+			};
+			return statement;
+		}
+	}
+} as unknown as App.Platform['env'];
+
+export class TouchStore extends WorkerEntrypoint {
+	async fetch(request: Request) {
+		try {
+			if (new URL(request.url).pathname.endsWith('/late-origin'))
+				await new Promise((resolve) => timeout(resolve, 1_200));
+			return await serveTouch(touchEnv, 1, 'hash', request);
+		} catch {
+			return new Response('touch deferred', { status: 503 });
+		}
+	}
+}
 
 let timers = 0;
 let batchReads = 0;
@@ -53,6 +89,35 @@ prototype.readAtLeast = function (min, view) {
 export default {
 	async fetch(request: Request, _env: unknown, ctx: ExecutionContext) {
 		const url = new URL(request.url);
+		if (url.pathname === '/touch-stats') return Response.json({ touchProbes, touchWrites });
+		if (url.pathname === '/slow-touch') {
+			const store = (
+				ctx.exports as unknown as { TouchStore: { fetch(r: Request): Promise<Response> } }
+			).TouchStore;
+			try {
+				await touchViaStore(
+					touchEnv,
+					{
+						exports: {
+							CachedStore: {
+								fetch: (r: Request) => {
+									// Keep the actual loopback alive and deliberately ignore the
+									// gateway abort: only the stamped deadline can stop late work.
+									const pending = store.fetch(new Request(r.url, { headers: r.headers }));
+									ctx.waitUntil(pending.then(() => {}));
+									return pending;
+								}
+							}
+						}
+					} as unknown as ExecutionContext,
+					1,
+					url.searchParams.has('late') ? 'late-origin' : 'slow-probe'
+				);
+				return new Response('touched');
+			} catch {
+				return new Response('deferred', { status: 503 });
+			}
+		}
 		if (url.pathname === '/abandon-fill') {
 			void coalesced.get('abandoned', () => new Promise<number>(() => {}));
 			return new Response('registered');
