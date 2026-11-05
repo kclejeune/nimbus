@@ -10,6 +10,7 @@
 	import PageHeader from '$lib/components/layout/page-header.svelte';
 	import Panel from '$lib/components/layout/panel.svelte';
 	import StorePath from '$lib/components/layout/store-path.svelte';
+	import ClosureMaintenance from '$lib/components/closure-maintenance.svelte';
 
 	let { data, form } = $props();
 	let running = $state(false);
@@ -165,6 +166,13 @@
 				<p class="mt-4 text-sm text-muted-foreground">Nothing to reclaim.</p>
 			{/if}
 
+			<ClosureMaintenance
+				caches={data.closureCaches}
+				preview={form?.closurePreview ?? null}
+				result={form?.closurePurge ?? null}
+				error={form?.maintenanceError ?? null}
+			/>
+
 			{#if lastRun}
 				<div class="mt-5 space-y-3 border-t pt-4 text-sm">
 					<p class="text-muted-foreground">
@@ -211,12 +219,8 @@
 								{/each}
 							</ul>
 							<p class="mt-2 ps-6 text-sm text-foreground">
-								On a machine that built these paths, run <code>nimbus repair SERVER:CACHE</code>
-								to inspect missing dependencies, then add <code>--apply</code> to upload those
-								available locally. For obsolete broken outputs,
-								<code>nimbus purge SERVER:CACHE</code>
-								previews removal of unprotected paths; <code>--apply</code> performs it. This warning
-								refreshes after the next GC run.
+								Use Closure maintenance above to recheck coverage, repair from a build machine, or
+								preview removal of broken paths. This list refreshes after the next GC run.
 							</p>
 						</details>
 					{/if}

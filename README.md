@@ -221,6 +221,16 @@ complete. `--json` writes the report to stdout and progress to stderr;
 
 ### Pushing
 
+Admins can investigate incomplete closures from **Settings → Garbage collection →
+Closure maintenance**. Select a cache to recheck recorded dependencies against
+its upstreams and review removable and protected paths. Removal requires a
+complete preview and confirmation; it rechecks coverage, pins, recent uploads
+and path identities before deleting anything. Previews expire after 15 minutes,
+and larger plans remain available through `nimbus purge`. Checks and removals
+are recorded in the audit log. The browser cannot read a build machine's local
+store, so the panel provides a cache-specific repair command for missing files.
+Paths already covered by an upstream do not require downloading into Nimbus.
+
 If Settings reports incomplete closures, run `nimbus repair mycache`
 on the machines that built those paths, then `nimbus repair mycache --apply`. This
 uses the reference graph from the last GC, rechecks upstream coverage, and
