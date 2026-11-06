@@ -18,7 +18,7 @@ export class PurgeCoordinator extends DurableObject<App.Platform['env']> {
 		(key) =>
 			key.startsWith('path-purge:')
 				? processPathPurge(this.env, key.slice('path-purge:'.length), (tags, receipt) =>
-						this.queue.repairPurge(key, receipt, tags, true)
+						this.queue.repairPurge(key, receipt, tags, !key.startsWith('path-purge:gc:'))
 					)
 				: processChunkRepair(this.env, key, (tags, receipt) =>
 						this.queue.repairPurge(key, receipt, tags)
@@ -31,7 +31,7 @@ export class PurgeCoordinator extends DurableObject<App.Platform['env']> {
 		return this.queue.scheduleRepair(key);
 	}
 	pathPurge(id: string, receipt: string, tags: string[]) {
-		return this.queue.repairPurge('path-purge:' + id, receipt, tags, true);
+		return this.queue.repairPurge('path-purge:' + id, receipt, tags, !id.startsWith('gc:'));
 	}
 	alarm() {
 		return this.queue.alarm();

@@ -20,6 +20,7 @@ const mf = new Miniflare(
 		compatibilityDate: '2026-10-10',
 		compatibilityFlags: ['nodejs_compat'],
 		cf: false,
+		d1Databases: { ATTIC_DB: 'gc-pacing-fixture' },
 		telemetry: { enabled: false }
 	})
 );
@@ -28,6 +29,11 @@ const stream = async (size, mode = '') =>
 	fetch(new URL(`/_nar_v2/fixture.nar?size=${size}&mode=${mode}`, await mf.ready));
 
 try {
+	// Native D1 requires its own statements in batch(), including bound ones.
+	assert.deepEqual(await (await mf.dispatchFetch('https://cache.test/gc-pacing')).json(), {
+		n: 8,
+		statements: 4
+	});
 	// Distinct HTTP requests must await only their own I/O, even when sharing
 	// a completed metadata result. Node tests cannot enforce this Workers rule.
 	const coalescedUrl = new URL('/coalesced-read', await mf.ready);

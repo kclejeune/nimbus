@@ -24,7 +24,7 @@ import { withRequestSpan, withSpan } from './src/lib/server/cache/tracing';
 import { observeRequest, routeTemplate } from './src/lib/server/cache/latency';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import sveltekit from './.svelte-kit/cloudflare/_worker.js';
-import { runGc } from './src/lib/server/cache/gc';
+import { continueScheduledGc } from './src/lib/server/cache/gc';
 import { caughtResponse, handleCacheApi } from './src/lib/server/cache/router';
 import { serveStore } from './src/lib/server/cache/store';
 import { readRpcResult } from './src/lib/server/cache/rpc';
@@ -233,7 +233,7 @@ export default {
 		return sveltekit.fetch(request, env, ctx);
 	},
 
-	async scheduled(_controller: unknown, env: Env, ctx: unknown) {
+	async scheduled(controller: { cron: string }, env: Env, ctx: unknown) {
 		await replayPathPurges(env, ctx as App.Platform['ctx']).catch((e) =>
 			console.warn('path purge replay failed', e)
 		);
@@ -252,19 +252,6 @@ export default {
 		} catch (e) {
 			console.warn('journal replay failed', e);
 		}
-		const stats = await runGc(env, { ctx: ctx as App.Platform['ctx'], automaticBrokenPurge: true });
-		console.log(`gc: ${JSON.stringify(stats)}`);
-		// Refresh D1 query-planner statistics after GC changes row counts. Without
-		// stats SQLite mis-plans the hot lookups — the download-touch and narinfo
-		// serve queries chose idx_nar_state (every valid nar, ~28k rows/call) over
-		// the selective nar_hash index, reading ~825M rows/day and overloading D1
-		// under CI read bursts. The composite idx_nar_hash_state now makes those
-		// plans statistics-independent; ANALYZE stays for every other query.
-		try {
-			await env.ATTIC_DB.exec('ANALYZE');
-			console.log('analyze: refreshed D1 planner statistics');
-		} catch (e) {
-			console.warn(`analyze: failed to refresh statistics: ${e}`);
-		}
+		await continueScheduledGc(env, ctx as App.Platform['ctx'], controller.cron !== '* * * * *');
 	}
 };

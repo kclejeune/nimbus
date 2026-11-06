@@ -4,6 +4,7 @@ import { readViaStore } from '../../src/lib/server/cache/store-transport';
 import { readAll, type ExecutionContext } from '../../src/lib/server/cache/platform';
 import { ReadCoalescer } from '../../src/lib/server/cache/read-coalescer';
 import { serveTouch, touchViaStore } from '../../src/lib/server/cache/metadata';
+import { GcPacer, pacedGcDatabase } from '../../src/lib/server/cache/gc-pacing';
 
 const coalesced = new ReadCoalescer<number>();
 let fills = 0;
@@ -87,8 +88,22 @@ prototype.readAtLeast = function (min, view) {
 };
 
 export default {
-	async fetch(request: Request, _env: unknown, ctx: ExecutionContext) {
+	async fetch(request: Request, env: App.Platform['env'], ctx: ExecutionContext) {
 		const url = new URL(request.url);
+		if (url.pathname === '/gc-pacing') {
+			const pacer = new GcPacer();
+			const db = pacedGcDatabase(env.ATTIC_DB, pacer);
+			await db.exec('CREATE TABLE gc_fixture (id INTEGER PRIMARY KEY, n INTEGER)');
+			await db.batch([
+				db.prepare('INSERT INTO gc_fixture VALUES (?1,?2)').bind(1, 7),
+				db.prepare('UPDATE gc_fixture SET n=n+1 WHERE id=?1').bind(1)
+			]);
+			const n = await db
+				.withSession('first-primary')
+				.prepare('SELECT n FROM gc_fixture')
+				.first('n');
+			return Response.json({ n, statements: pacer.totals.statements });
+		}
 		if (url.pathname === '/touch-stats') return Response.json({ touchProbes, touchWrites });
 		if (url.pathname === '/slow-touch') {
 			const store = (

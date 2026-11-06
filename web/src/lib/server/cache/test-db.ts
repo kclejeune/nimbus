@@ -64,6 +64,10 @@ export function testDatabase({ admin = false }: { admin?: boolean } = {}) {
 	};
 	const binding = {
 		prepare,
+		async exec(sql: string) {
+			sqlite.exec(sql);
+			return { count: 1, duration: 0 };
+		},
 		withSession() {
 			return binding;
 		},

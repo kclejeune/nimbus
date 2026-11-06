@@ -62,7 +62,7 @@
 	"limits": { "cpu_ms": 300000 },
 
 	// Nightly garbage collection (closure-aware retention, orphan reaping).
-	"triggers": { "crons": ["0 3 * * *"] },
+	"triggers": { "crons": ["0 3 * * *", "* * * * *"] },
 
 	// Custom domains: Cloudflare provisions the DNS records and edge
 	// certificates automatically on deploy. app.* serves the admin UI;

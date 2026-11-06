@@ -924,17 +924,21 @@ export async function settleChunks(
  * D row whose R2 delete failed becomes adoptable again an hour later instead
  * of blocking re-pushes until the next successful nightly run. */
 export async function claimOrphanChunks(
-	db: D1Database
+	db: D1Database,
+	afterId = 0,
+	limit = 1_000
 ): Promise<{ id: number; remote_file: string }[]> {
 	return (
 		await dbAll<{ id: number; remote_file: string }>(
 			db
 				.prepare(
-					"UPDATE chunk SET state = 'D', held_at = ?1 WHERE holders_count = 0 " +
+					"UPDATE chunk SET state = 'D', held_at = ?1 WHERE id IN (" +
+						'SELECT id FROM chunk WHERE id > ?2 AND holders_count = 0 ' +
 						'AND NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id) ' +
-						"AND datetime(created_at) < datetime('now', '-1 hours') RETURNING id, remote_file"
+						"AND datetime(created_at) < datetime('now', '-1 hours') ORDER BY id LIMIT ?3) " +
+						'RETURNING id, remote_file'
 				)
-				.bind(nowRfc3339())
+				.bind(nowRfc3339(), afterId, limit)
 		)
 	).results;
 }
