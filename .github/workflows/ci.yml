@@ -7,6 +7,16 @@ on:
     branches:
       - "main"
   pull_request:
+  workflow_dispatch:
+    inputs:
+      github-hosted:
+        description: Use GitHub runners even when NIMBUS_RUNNER is set
+        type: boolean
+        default: false
+
+# NIMBUS_RUNNER selects the Linux runner for owner-triggered branch CI. Boat's
+# public-repository allowlist permits only the owner, so bots and other users,
+# fork PRs, release tags, and manual github-hosted runs use GitHub runners.
 
 # Read-only by default; only the release job needs contents: write. pull-requests
 # is for golangci-lint's only-new-issues, which reads the PR diff.
@@ -22,7 +32,8 @@ jobs:
           - ubuntu-latest
           - macos-latest
     name: lint
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && !inputs.github-hosted && github.ref_type != 'tag' && github.actor == github.repository_owner && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.NIMBUS_RUNNER || matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -42,7 +53,8 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && !inputs.github-hosted && github.ref_type != 'tag' && github.actor == github.repository_owner && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.NIMBUS_RUNNER || matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -54,7 +66,8 @@ jobs:
 
   web:
     name: web
-    runs-on: ubuntu-latest
+    runs-on: &linux-runner ${{ !inputs.github-hosted && github.ref_type != 'tag' && github.actor == github.repository_owner && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.NIMBUS_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: web
@@ -73,7 +86,8 @@ jobs:
     needs:
       - lint
       - test
-    runs-on: ubuntu-latest
+    runs-on: *linux-runner
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:

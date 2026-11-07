@@ -342,6 +342,30 @@ For local development, copy `web/.dev.vars.example` to `web/.dev.vars` and
 fill in the secrets. [`web/README.md`](web/README.md#development) explains
 switching the local Worker between the admin UI and the cache API.
 
+### CI runners
+
+Linux lint, test, web, and snapshot build jobs use the `NIMBUS_RUNNER` Actions
+repository variable when set. The maintainer instance uses `boat-large`
+(8 vCPU, 16 GB RAM) through the [Boat CI GitHub app](https://docs.boat.dev/ci).
+Boat creates a fresh VM for each job and deletes it afterward; no persistent
+runner instances or repository secrets are needed for the integration.
+
+Boat must have access to the repository and an active paid plan. For a public
+repository, enable owner-triggered jobs with
+`boat ci public kclejeune on --users kclejeune`, then select the runner:
+
+```bash
+gh variable set NIMBUS_RUNNER --repo kclejeune/nimbus --body boat-large
+boat ci --repo kclejeune/nimbus
+```
+
+The variable applies only to owner-triggered branch runs and same-repository
+pull requests, matching that Boat allowlist. Other actors (including
+Dependabot), fork pull requests, and release tags use GitHub runners. macOS
+and release/maintenance jobs also use GitHub runners. An unset variable falls
+back to GitHub; delete it to disable Boat, or check **github-hosted** when
+manually starting CI to bypass Boat for one run.
+
 ### Repository layout
 
 ```
