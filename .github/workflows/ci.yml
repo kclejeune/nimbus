@@ -48,20 +48,30 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.10
-          only-new-issues: true
-      # The race run executes the full suite, so a second plain run is redundant.
-      - name: Go tests (race detector)
-        run: go test -race ./...
-      - name: Web formatting, types, tests, build, and preview
-        run: npm run check
-        working-directory: web
+      # These checks share the VM but do not modify one another's inputs.
+      # Leave CPU capacity for the web tools instead of letting each Go tool
+      # use every core while the group runs.
+      - parallel:
+          - name: golangci-lint
+            uses: golangci/golangci-lint-action@v9
+            with:
+              version: v2.10
+              only-new-issues: true
+              args: --concurrency=2
+            env:
+              GOMAXPROCS: "2"
+          # The race run executes the full suite; a plain run is redundant.
+          - name: Go tests (race detector)
+            run: go test -race ./...
+            env:
+              GOMAXPROCS: "2"
+          - name: Web formatting, types, tests, build, and preview
+            run: npm run check
+            working-directory: web
       # Snapshot builds report ./VERSION rather than a version derived from the
       # last tag. GoReleaser cross-compiles the Linux and macOS release targets
       # with CGO_ENABLED=0; native macOS builds are unnecessary.
+      # Keep this after the parallel checks: its hooks run go mod tidy.
       - id: version
         run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
       - uses: goreleaser/goreleaser-action@v7

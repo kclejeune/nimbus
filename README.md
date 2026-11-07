@@ -350,6 +350,9 @@ when set. The maintainer instance uses `boat-large`
 (8 vCPU, 16 GB RAM) through the [Boat CI GitHub app](https://docs.boat.dev/ci).
 Boat creates a fresh VM for each job and deletes it afterward; no persistent
 runner instances or repository secrets are needed for the integration.
+Lint, Go tests, and web checks run in a native GitHub Actions `parallel` group
+on that VM. Cross-compilation follows the group because GoReleaser's hooks
+can update `go.mod` and `go.sum`.
 
 This uses one Boat start instead of four: the plan's 200 daily starts cover
 up to 200 CI runs before other repositories and sandboxes use that allowance.
