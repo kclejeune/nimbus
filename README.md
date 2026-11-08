@@ -346,8 +346,8 @@ switching the local Worker between the admin UI and the cache API.
 
 Linux lint, race tests, web checks, and snapshot builds share one `checks` job
 and one VM per CI run. It uses the `NIMBUS_RUNNER` Actions repository variable
-when set. The maintainer instance uses `boat-large`
-(8 vCPU, 16 GB RAM) through the [Boat CI GitHub app](https://docs.boat.dev/ci).
+when set. The maintainer instance uses `boat`
+(4 vCPU, 8 GB RAM) through the [Boat CI GitHub app](https://docs.boat.dev/ci).
 Boat creates a fresh VM for each job and deletes it afterward; no persistent
 runner instances or repository secrets are needed for the integration.
 Lint, Go tests, and web checks run in a native GitHub Actions `parallel` group
@@ -365,7 +365,7 @@ repository, enable owner-triggered jobs with
 `boat ci public kclejeune on --users kclejeune`, then select the runner:
 
 ```bash
-gh variable set NIMBUS_RUNNER --repo kclejeune/nimbus --body boat-large
+gh variable set NIMBUS_RUNNER --repo kclejeune/nimbus --body boat
 boat ci --repo kclejeune/nimbus
 ```
 
