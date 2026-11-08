@@ -65,6 +65,10 @@ CREATE INDEX IF NOT EXISTS idx_object_ref_ref_hash ON object_ref(ref_hash);
 -- idx_object_ref_unresolved(ref_hash) WHERE child_id IS NULL was never chosen
 -- by the planner and was dropped 2026-07-27.)
 CREATE INDEX IF NOT EXISTS idx_object_ref_child ON object_ref(child_id);
+-- Closure walks need only resolved child IDs. Cover the forward traversal
+-- without fetching table rows or scanning unresolved references.
+CREATE INDEX IF NOT EXISTS idx_object_ref_resolved_parent ON object_ref(object_id, child_id)
+    WHERE child_id IS NOT NULL;
 
 -- Named pins (cachix parity): a pin is a name whose gc_root rows are its
 -- revision history (newest = current). keep_revisions / keep_days prune old
@@ -207,6 +211,10 @@ CREATE INDEX IF NOT EXISTS idx_object_cache_created ON object(cache_id, created_
 CREATE INDEX IF NOT EXISTS idx_object_cache_path ON object(cache_id, store_path);
 -- Root-proxy resolution: lookup by hash without a cache name.
 CREATE INDEX IF NOT EXISTS idx_object_hash ON object(store_path_hash);
+-- GC discovers detached objects without scanning every object in a cache.
+-- Ordinary uploads (detached_at NULL) do not occupy this index.
+CREATE INDEX IF NOT EXISTS idx_object_detached_cache ON object(cache_id, id)
+    WHERE detached_at IS NOT NULL;
 
 -- Chunk table (deduplicated storage units)
 CREATE TABLE IF NOT EXISTS chunk (

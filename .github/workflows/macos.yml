@@ -1,0 +1,28 @@
+name: macOS
+
+on:
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: macOS tests
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Exercise real NAR dumping, including macOS's symlinked temp directory.
+      # Without Nix, that regression test skips itself.
+      - uses: cachix/install-nix-action@v31
+      - run: go test -race ./...

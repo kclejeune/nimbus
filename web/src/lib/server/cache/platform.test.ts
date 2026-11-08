@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mapConcurrent, readAll, Semaphore, withSlot } from './platform';
+import { mapConcurrent, MemoryBudget, readAll, Semaphore, withSlot } from './platform';
 import { BODY_IDLE_TIMEOUT_MS, BODY_MAX_DURATION_MS } from '../request-body';
 
 describe('Semaphore', () => {
@@ -113,6 +113,61 @@ it('releases a body reader after a transfer error', async () => {
 	});
 	await expect(readAll(body, 10, 10)).rejects.toThrow('disconnected');
 	expect(body.locked).toBe(false);
+});
+
+it.each([false, true])(
+	'reports cumulative source bytes for default/BYOB readers, BYOB=%s',
+	async (byob) => {
+		const source = {
+			start(
+				controller: ReadableStreamDefaultController<Uint8Array> | ReadableByteStreamController
+			) {
+				controller.enqueue(new Uint8Array([1, 2]));
+				controller.enqueue(new Uint8Array([3, 4, 5, 6]));
+				controller.close();
+			}
+		};
+		const body = byob
+			? new ReadableStream({ ...source, type: 'bytes' })
+			: new ReadableStream(source);
+		const onProgress = vi.fn();
+		expect(await readAll(body, 10, 6, { onProgress })).toEqual(new Uint8Array([1, 2, 3, 4, 5, 6]));
+		const bytes = onProgress.mock.calls.map(([total]) => total);
+		expect(bytes.at(-1)).toBe(6);
+		expect(bytes.every((total, index) => index === 0 || total > bytes[index - 1])).toBe(true);
+	}
+);
+
+it('observes current reservations and live waiters without changing admission', async () => {
+	vi.useFakeTimers();
+	try {
+		const budget = new MemoryBudget(64, 2);
+		expect(budget.tryAcquire(32)).toBe(true);
+		const waiting = budget.acquireBounded(64, 2, 100);
+		expect(budget.snapshot()).toEqual({
+			totalBytes: 64,
+			usedBytes: 32,
+			active: 1,
+			maxActive: 2,
+			queued: 1
+		});
+		budget.shrink(32, 16);
+		expect(budget.snapshot().usedBytes).toBe(16);
+		budget.release(16);
+		await vi.advanceTimersByTimeAsync(50);
+		expect(await waiting).toBe(true);
+		expect(budget.snapshot()).toEqual({
+			totalBytes: 64,
+			usedBytes: 64,
+			active: 1,
+			maxActive: 2,
+			queued: 0
+		});
+		budget.release(64);
+		expect(budget.snapshot().usedBytes).toBe(0);
+	} finally {
+		vi.useRealTimers();
+	}
 });
 
 it.each([0, 2, 6, 10])('preserves bytes across BYOB transfers with size hint %s', async (size) => {

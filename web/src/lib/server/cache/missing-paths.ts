@@ -16,6 +16,7 @@
 import { measure } from './latency';
 import { withSpan } from './tracing';
 import { AsyncMemo } from './async-memo';
+import { ReadCoalescer } from './read-coalescer';
 import { hedgedReplicaRead } from './read-hedge';
 import { UpstreamCooldown } from './upstream-cooldown';
 import { parseNarInfo, parsedNarInfoSignatureValid, type ParsedNarInfo } from '../attic/narinfo';
@@ -968,11 +969,14 @@ export const UPSTREAM_CONFIG_TAG = 'upstream-config';
 type ConfigWire = Omit<UpstreamConfig, 'overrides'> & {
 	overrides: [number, [number, string][]][];
 };
+const configFills = new ReadCoalescer<UpstreamConfig>();
 /** Fills read D1 rather than an older isolate memo. As with other edge
  * entries, replica lag and in-flight fills can still race a purge.
  * No stale-on-error for trust configuration. */
 export async function serveUpstreamConfig(env: Env, ctx?: ExecutionContext): Promise<Response> {
-	const config = await hedgedReplicaRead(env.ATTIC_DB, ctx, fetchUpstreamConfig);
+	const config = await configFills.get('config', () =>
+		hedgedReplicaRead(env.ATTIC_DB, ctx, fetchUpstreamConfig)
+	);
 	const wire: ConfigWire = {
 		...config,
 		overrides: [...config.overrides].map(([id, modes]) => [id, [...modes]])
@@ -993,18 +997,21 @@ export async function cachedUpstreamConfig(
 ): Promise<UpstreamConfig> {
 	if (!ctx?.exports?.CachedStore) return upstreamConfig(env.ATTIC_DB, ctx);
 	const request = internalRequest(env, '/_upstream_config/v1');
-	const { value: wire } = await readStoreMetadata(
-		ctx,
-		request,
-		() => serveUpstreamConfig(env, ctx),
-		(response) =>
-			internalJson<ConfigWire>(response, 'Upstream configuration temporarily unavailable'),
-		(response) => remainingFreshMs(response.headers) <= 0
+	const { value: wire } = await withSpan(ctx, 'upstream configuration loopback', () =>
+		readStoreMetadata(
+			ctx,
+			request,
+			() => serveUpstreamConfig(env, ctx),
+			(response) =>
+				internalJson<ConfigWire>(response, 'Upstream configuration temporarily unavailable'),
+			(response) => remainingFreshMs(response.headers) <= 0
+		)
 	);
 	return { ...wire, overrides: new Map(wire.overrides.map(([id, modes]) => [id, new Map(modes)])) };
 }
 
 export function clearUpstreamsMemo(): void {
+	configFills.clear();
 	upstreamHealth.clear();
 	narRedirectMemo.clear();
 	configMemo.clear();

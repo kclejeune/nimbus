@@ -1,0 +1,255 @@
+{
+  "description": "Unapplied Traceway API request bodies. Create each objective via POST /api/slos?projectId=PROJECT_ID, resolve sloKey to the returned numeric id, add config.sloId and channelId to each rule body, then POST /api/notification-rules?projectId=PROJECT_ID. See traceway-performance.md.",
+  "objectives": [
+    {
+      "key": "narinfo-headers",
+      "body": {
+        "name": "Nimbus narinfo: 95% of headers within 500 ms",
+        "description": "Measures the gateway child span until Response creation, excluding body transfer and background work. Read traces are sampled.",
+        "sliKind": "span",
+        "sliConfig": {
+          "serviceName": "nimbus",
+          "name": "gateway GET /:hash.narinfo",
+          "good": "latency",
+          "latencyThresholdMs": 500,
+          "attributes": [
+            {
+              "key": "nimbus.layer",
+              "value": "gateway"
+            }
+          ]
+        },
+        "targetPercent": 95,
+        "windowDays": 30,
+        "bucketMinutes": 1,
+        "enabled": true
+      }
+    },
+    {
+      "key": "narinfo-tail",
+      "body": {
+        "name": "Nimbus narinfo: 99% of headers within 1500 ms",
+        "description": "Measures the gateway child span until Response creation, excluding body transfer and background work. Read traces are sampled.",
+        "sliKind": "span",
+        "sliConfig": {
+          "serviceName": "nimbus",
+          "name": "gateway GET /:hash.narinfo",
+          "good": "latency",
+          "latencyThresholdMs": 1500,
+          "attributes": [
+            {
+              "key": "nimbus.layer",
+              "value": "gateway"
+            }
+          ]
+        },
+        "targetPercent": 99,
+        "windowDays": 30,
+        "bucketMinutes": 1,
+        "enabled": true
+      }
+    },
+    {
+      "key": "narinfo-availability",
+      "body": {
+        "name": "Nimbus narinfo: 99.9% availability",
+        "description": "HTTP status below 500. A streamed body can fail after a 200; check body/transport error logs separately.",
+        "sliKind": "endpoint",
+        "sliConfig": {
+          "endpoint": "GET /:hash.narinfo",
+          "good": "availability"
+        },
+        "targetPercent": 99.9,
+        "windowDays": 30,
+        "bucketMinutes": 1,
+        "enabled": true
+      }
+    },
+    {
+      "key": "nar-headers",
+      "body": {
+        "name": "Nimbus nar: 95% of headers within 500 ms",
+        "description": "Measures the gateway child span until Response creation, excluding body transfer and background work. Read traces are sampled.",
+        "sliKind": "span",
+        "sliConfig": {
+          "serviceName": "nimbus",
+          "name": "gateway GET /nar/:file",
+          "good": "latency",
+          "latencyThresholdMs": 500,
+          "attributes": [
+            {
+              "key": "nimbus.layer",
+              "value": "gateway"
+            }
+          ]
+        },
+        "targetPercent": 95,
+        "windowDays": 30,
+        "bucketMinutes": 1,
+        "enabled": true
+      }
+    },
+    {
+      "key": "nar-tail",
+      "body": {
+        "name": "Nimbus nar: 99% of headers within 1500 ms",
+        "description": "Measures the gateway child span until Response creation, excluding body transfer and background work. Read traces are sampled.",
+        "sliKind": "span",
+        "sliConfig": {
+          "serviceName": "nimbus",
+          "name": "gateway GET /nar/:file",
+          "good": "latency",
+          "latencyThresholdMs": 1500,
+          "attributes": [
+            {
+              "key": "nimbus.layer",
+              "value": "gateway"
+            }
+          ]
+        },
+        "targetPercent": 99,
+        "windowDays": 30,
+        "bucketMinutes": 1,
+        "enabled": true
+      }
+    },
+    {
+      "key": "nar-availability",
+      "body": {
+        "name": "Nimbus nar: 99.9% availability",
+        "description": "HTTP status below 500. A streamed body can fail after a 200; check body/transport error logs separately.",
+        "sliKind": "endpoint",
+        "sliConfig": {
+          "endpoint": "GET /nar/:file",
+          "good": "availability"
+        },
+        "targetPercent": 99.9,
+        "windowDays": 30,
+        "bucketMinutes": 1,
+        "enabled": true
+      }
+    }
+  ],
+  "rules": [
+    {
+      "sloKey": "narinfo-headers",
+      "body": {
+        "name": "Nimbus narinfo: headers info",
+        "ruleType": "slo_burn_rate",
+        "severity": "info",
+        "cooldownMinutes": 60,
+        "config": {
+          "longWindowMinutes": 60,
+          "shortWindowMinutes": 15,
+          "burnRateThreshold": 1
+        }
+      }
+    },
+    {
+      "sloKey": "narinfo-tail",
+      "body": {
+        "name": "Nimbus narinfo: tail warning",
+        "ruleType": "slo_burn_rate",
+        "severity": "warning",
+        "cooldownMinutes": 30,
+        "config": {
+          "longWindowMinutes": 30,
+          "shortWindowMinutes": 5,
+          "burnRateThreshold": 1
+        }
+      }
+    },
+    {
+      "sloKey": "narinfo-tail",
+      "body": {
+        "name": "Nimbus narinfo: tail critical",
+        "ruleType": "slo_burn_rate",
+        "severity": "critical",
+        "cooldownMinutes": 15,
+        "config": {
+          "longWindowMinutes": 60,
+          "shortWindowMinutes": 5,
+          "burnRateThreshold": 14.4
+        }
+      }
+    },
+    {
+      "sloKey": "narinfo-availability",
+      "body": {
+        "name": "Nimbus narinfo: availability critical",
+        "ruleType": "slo_burn_rate",
+        "severity": "critical",
+        "cooldownMinutes": 15,
+        "config": {
+          "longWindowMinutes": 60,
+          "shortWindowMinutes": 5,
+          "burnRateThreshold": 14.4
+        }
+      }
+    },
+    {
+      "sloKey": "nar-headers",
+      "body": {
+        "name": "Nimbus nar: headers info",
+        "ruleType": "slo_burn_rate",
+        "severity": "info",
+        "cooldownMinutes": 60,
+        "config": {
+          "longWindowMinutes": 60,
+          "shortWindowMinutes": 15,
+          "burnRateThreshold": 1
+        }
+      }
+    },
+    {
+      "sloKey": "nar-tail",
+      "body": {
+        "name": "Nimbus nar: tail warning",
+        "ruleType": "slo_burn_rate",
+        "severity": "warning",
+        "cooldownMinutes": 30,
+        "config": {
+          "longWindowMinutes": 30,
+          "shortWindowMinutes": 5,
+          "burnRateThreshold": 1
+        }
+      }
+    },
+    {
+      "sloKey": "nar-tail",
+      "body": {
+        "name": "Nimbus nar: tail critical",
+        "ruleType": "slo_burn_rate",
+        "severity": "critical",
+        "cooldownMinutes": 15,
+        "config": {
+          "longWindowMinutes": 60,
+          "shortWindowMinutes": 5,
+          "burnRateThreshold": 14.4
+        }
+      }
+    },
+    {
+      "sloKey": "nar-availability",
+      "body": {
+        "name": "Nimbus nar: availability critical",
+        "ruleType": "slo_burn_rate",
+        "severity": "critical",
+        "cooldownMinutes": 15,
+        "config": {
+          "longWindowMinutes": 60,
+          "shortWindowMinutes": 5,
+          "burnRateThreshold": 14.4
+        }
+      }
+    }
+  ],
+  "channel": {
+    "name": "Nimbus performance email",
+    "channelType": "email",
+    "config": {
+      "recipients": []
+    }
+  },
+  "mailFrom": "noreply+traceway@kclj.io (existing server SMTP_FROM; not a per-channel setting)"
+}

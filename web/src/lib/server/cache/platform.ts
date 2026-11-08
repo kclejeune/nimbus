@@ -147,10 +147,21 @@ export class MemoryBudget {
 	// dead waiter blocks the queue for at most its own timeout.
 	private readonly queue: { deadline: number }[] = [];
 	constructor(
-		totalBytes: number,
+		private readonly totalBytes: number,
 		private readonly maxActive: number
 	) {
 		this.freeBytes = totalBytes;
+	}
+	/** Observations do not expire leases or otherwise change admission. */
+	snapshot() {
+		const now = Date.now();
+		return {
+			totalBytes: this.totalBytes,
+			usedBytes: this.totalBytes - this.freeBytes,
+			active: this.active,
+			maxActive: this.maxActive,
+			queued: this.queue.filter((waiter) => waiter.deadline > now).length
+		};
 	}
 	private fits(weight: number): boolean {
 		return this.active < this.maxActive && weight <= this.freeBytes;
@@ -266,6 +277,8 @@ interface BodyOptions {
 	signal?: AbortSignal;
 	/** Trusted storage reads, not client uploads: batch native fragments. */
 	batch?: boolean;
+	/** Cumulative source bytes, without retaining buffers or issuing reads. */
+	onProgress?: (bytes: number) => void;
 }
 
 /** Minimum bytes per native batched read (workerd's `readAtLeast`). */
@@ -308,6 +321,7 @@ async function readSizedBody(
 			if (!value || value.length === 0) continue;
 			const offset = total;
 			total += value.length;
+			options.onProgress?.(total);
 			if (total > limit) {
 				await reader.cancel().catch(() => {});
 				return null;
@@ -365,6 +379,7 @@ export async function readAll(
 			if (!value || value.length === 0) continue;
 			const offset = total;
 			total += value.length;
+			options.onProgress?.(total);
 			if (total > limit) {
 				await reader.cancel().catch(() => {});
 				return null;

@@ -5,6 +5,7 @@ import { testDatabase } from './test-db';
 import { invalidateCacheRow } from './cache-lookup';
 import {
 	clearCandidateMemos,
+	serveCandidates,
 	candidateSnapshot,
 	chargeBackendRead,
 	internalRequest
@@ -20,6 +21,7 @@ import { mintAtticToken } from '../attic-token';
 import { persistUpstreamPath } from './pullthrough';
 import * as db from './db';
 import type { ExecutionContext } from './platform';
+import { readStoreMetadata, STORE_HEADER_TIMEOUT_MS } from './store-transport';
 
 vi.mock('./compression', async () => (await import('./test-db')).fakeCompression());
 vi.mock('./pullthrough', () => ({ persistUpstreamPath: vi.fn(async () => {}) }));
@@ -627,6 +629,82 @@ it('reuses tagged membership on an envelope refill without renewing its original
 	}
 });
 
+it('reuses stale membership during an envelope fill without a duplicate D1 read or a fresh envelope', async () => {
+	const hash = freshHash();
+	hold(hash);
+	const { get, entries } = edge();
+	expect((await get(hash)).status).toBe(200);
+	const stamp = entries.get(`/_meta/path/${hash}`)!.headers.get('X-Nimbus-Filled-At');
+	entries.delete(route(hash));
+	vi.useFakeTimers({ toFake: ['Date'] });
+	try {
+		vi.setSystemTime(Date.now() + 3_601_000);
+		const read = vi.spyOn(db, 'cachesWithStorePathHash');
+		expect((await get(hash)).status).toBe(200);
+		expect(read).not.toHaveBeenCalled();
+		expect(entries.has(route(hash))).toBe(false);
+		expect(entries.get(`/_meta/path/${hash}`)!.headers.get('X-Nimbus-Filled-At')).toBe(stamp);
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+it('still hides a now-private object when an envelope uses stale public membership', async () => {
+	const hash = freshHash();
+	hold(hash);
+	const { get, entries } = edge();
+	expect((await get(hash)).status).toBe(200);
+	entries.delete(route(hash));
+	fixture.sqlite.exec('UPDATE cache SET is_public = 0 WHERE id = 1');
+	vi.useFakeTimers({ toFake: ['Date'] });
+	try {
+		vi.setSystemTime(Date.now() + 3_601_000);
+		expect((await get(hash)).status).toBe(404);
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+it('confirms stale empty membership before an upstream miss can hide a new upload', async () => {
+	const hash = freshHash();
+	hold(hash);
+	const { get, entries } = edge();
+	const storedAt = Date.now() - 301_000;
+	entries.set(`/_meta/path/${hash}`, {
+		text: '[]',
+		storedAt,
+		headers: new Headers({
+			'Cache-Control': 'public, max-age=300, stale-while-revalidate=604800, stale-if-error=0',
+			'X-Nimbus-Filled-At': String(storedAt)
+		})
+	});
+	const response = await get(hash);
+	expect(response.status).toBe(200);
+	expect(await response.text()).toContain(`/nix/store/${hash}-test`);
+	expect(entries.has(route(hash))).toBe(false);
+});
+
+it.each(['missing-stamp', 'future-stamp', 'no-stale-window', 'expired-stale-window'])(
+	'reloads candidate snapshots with %s instead of extending reuse',
+	async (reason) => {
+		const hash = freshHash();
+		const elapsed = reason === 'expired-stale-window' ? 605_101_000 : 301_000;
+		const headers = new Headers({
+			'Cache-Control': `public, max-age=300${reason === 'no-stale-window' ? '' : ', stale-while-revalidate=604800'}`,
+			Age: String(elapsed / 1000),
+			'X-Nimbus-Filled-At': String(Date.now() - elapsed)
+		});
+		if (reason === 'missing-stamp') headers.delete('X-Nimbus-Filled-At');
+		if (reason === 'future-stamp') headers.set('X-Nimbus-Filled-At', String(Date.now() + 1000));
+		const ctx = {
+			exports: { CachedStore: { fetch: async () => Response.json([], { headers }) } }
+		} as unknown as ExecutionContext;
+		const read = vi.spyOn(db, 'cachesWithStorePathHash');
+		expect(await candidateSnapshot(env, hash, ctx)).toMatchObject({ rows: [], fresh: true });
+		expect(read).toHaveBeenCalledOnce();
+	}
+);
+
 it('recovers an inner metadata body failure without caching an error envelope', async () => {
 	const hash = freshHash();
 	hold(hash);
@@ -688,4 +766,68 @@ it('does not load a proxy signing key for a confirmed upstream miss', async () =
 	const { get } = edge();
 	expect((await get(hash)).status).toBe(404);
 	expect(key).not.toHaveBeenCalled();
+});
+
+it('coalesces overlapping membership fills, preserves their stamp, and reloads after completion', async () => {
+	vi.useFakeTimers();
+	try {
+		let resolve!: (rows: db.LiveCacheRow[]) => void;
+		const pending = new Promise<db.LiveCacheRow[]>((done) => (resolve = done));
+		const read = vi.spyOn(db, 'cachesWithStorePathHash').mockReturnValueOnce(pending);
+		const hash = freshHash();
+		const request = internalRequest(env, `/_meta/path/${hash}`);
+		const first = serveCandidates(request, env, 'path', hash);
+		const second = serveCandidates(request, env, 'path', hash);
+		await vi.advanceTimersByTimeAsync(3_500);
+		expect(read).toHaveBeenCalledOnce();
+		resolve([]);
+		const response = await first;
+		await vi.advanceTimersByTimeAsync(100);
+		const shared = await second;
+		expect(shared.headers.get('X-Nimbus-Filled-At')).toBe(
+			response.headers.get('X-Nimbus-Filled-At')
+		);
+		expect(await shared.json()).toEqual([]);
+		hold(hash);
+		expect(await (await serveCandidates(request, env, 'path', hash)).json()).toMatchObject([
+			{ id: 1 }
+		]);
+		expect(read).toHaveBeenCalledTimes(2);
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+it('recovers membership at the loopback deadline without joining an abandoned candidate fill', async () => {
+	vi.useFakeTimers();
+	try {
+		const hash = freshHash();
+		const request = internalRequest(env, `/_meta/path/${hash}`);
+		const read = vi
+			.spyOn(db, 'cachesWithStorePathHash')
+			.mockReturnValueOnce(new Promise<db.LiveCacheRow[]>(() => {}));
+		// The old invocation never reaches finally and never settles this fill.
+		void serveCandidates(request, env, 'path', hash);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(read).toHaveBeenCalledOnce();
+		hold(hash);
+		const ctx = {
+			exports: { CachedStore: { fetch: () => new Promise<Response>(() => {}) } }
+		} as unknown as ExecutionContext;
+		const received = vi.fn();
+		const result = readStoreMetadata(
+			ctx,
+			request,
+			() => serveCandidates(request, env, 'path', hash),
+			(response) => response.json()
+		).then(received);
+		await vi.advanceTimersByTimeAsync(STORE_HEADER_TIMEOUT_MS);
+		expect(received).toHaveBeenCalledWith(
+			expect.objectContaining({ value: [expect.objectContaining({ id: 1 })] })
+		);
+		expect(read).toHaveBeenCalledTimes(2);
+		await result;
+	} finally {
+		vi.useRealTimers();
+	}
 });

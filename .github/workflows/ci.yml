@@ -7,6 +7,16 @@ on:
     branches:
       - "main"
   pull_request:
+  workflow_dispatch:
+    inputs:
+      github-hosted:
+        description: Use GitHub runners even when NIMBUS_RUNNER is set
+        type: boolean
+        default: false
+
+# NIMBUS_RUNNER selects the Linux runner for owner-triggered branch CI. Boat's
+# public-repository allowlist permits only the owner, so bots and other users,
+# fork PRs, release tags, and manual github-hosted runs use GitHub runners.
 
 # Read-only by default; only the release job needs contents: write. pull-requests
 # is for golangci-lint's only-new-issues, which reads the PR diff.
@@ -14,66 +24,16 @@ permissions:
   contents: read
   pull-requests: read
 
+# Stop superseded branch checks without cancelling a release in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
 jobs:
-  lint:
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-    name: lint
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.10
-          only-new-issues: true
-  test:
-    name: test
-    strategy:
-      matrix:
-        go:
-          - stable
-        os:
-          - ubuntu-latest
-          - macos-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - name: Test
-        uses: robherley/go-test-action@v0
-      - run: go test -race ./...
-
-  web:
-    name: web
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: npm ci
-      - run: npm run check
-
-  build:
-    name: build
-    needs:
-      - lint
-      - test
-    runs-on: ubuntu-latest
+  checks:
+    name: checks
+    runs-on: ${{ !inputs.github-hosted && github.ref_type != 'tag' && github.actor == github.repository_owner && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.NIMBUS_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
@@ -81,9 +41,37 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      # These checks share the VM but do not modify one another's inputs.
+      # Leave CPU capacity for the web tools instead of letting each Go tool
+      # use every core while the group runs.
+      - parallel:
+          - name: golangci-lint
+            uses: golangci/golangci-lint-action@v9
+            with:
+              version: v2.10
+              only-new-issues: true
+              args: --concurrency=2
+            env:
+              GOMAXPROCS: "2"
+          # The race run executes the full suite; a plain run is redundant.
+          - name: Go tests (race detector)
+            run: go test -race ./...
+            env:
+              GOMAXPROCS: "2"
+          - name: Web formatting, types, tests, build, and preview
+            run: npm run check
+            working-directory: web
       # Snapshot builds report ./VERSION rather than a version derived from the
-      # last tag, so this agrees with `nix build`. See snapshot.version_template
-      # in .goreleaser.yaml.
+      # last tag. GoReleaser cross-compiles the Linux and macOS release targets
+      # with CGO_ENABLED=0; native macOS builds are unnecessary.
+      # Keep this after the parallel checks: its hooks run go mod tidy.
       - id: version
         run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
       - uses: goreleaser/goreleaser-action@v7
@@ -95,10 +83,7 @@ jobs:
 
   release:
     name: release
-    needs:
-      - lint
-      - test
-      - build
+    needs: checks
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:

@@ -51,6 +51,7 @@ import { measure, countLoopbackFallback, streamObservation } from './latency';
 import { stripSha256 } from '../attic/nix-base32';
 import { readRpcResult } from './rpc';
 import { readStoreMetadata, withStoreRecovery } from './store-transport';
+import { withSpan } from './tracing';
 
 type Env = App.Platform['env'];
 
@@ -347,7 +348,7 @@ async function serveStoreInner(
 			ctx
 		);
 	if (segments.length === 3 && segments[0] === '_touch' && /^\d+$/.test(segments[1]))
-		return serveTouch(env, Number(segments[1]), decodeURIComponent(segments[2]));
+		return serveTouch(env, Number(segments[1]), decodeURIComponent(segments[2]), request);
 	if (segments.length === 3 && segments[0] === '_manifest' && /^(public|\d+)$/.test(segments[1]))
 		return serveManifest(env, segments[1], decodeURIComponent(segments[2]), ctx);
 	// Charges its own budget, and only when there are upstreams to probe.
@@ -436,7 +437,7 @@ async function serveAnonymousNarInfo(
 	hash: string
 ): Promise<Response> {
 	if (hash.length !== 32) return errorResponse(400, 'Invalid store path hash');
-	const { rows, filledAt } = await candidateSnapshot(env, hash, ctx);
+	const { rows, filledAt, fresh } = await candidateSnapshot(env, hash, ctx);
 	const winner = pickReadableWinner(null, rows);
 	let proxySigningAvailable = !winner;
 	let response: Response;
@@ -465,11 +466,15 @@ async function serveAnonymousNarInfo(
 			url.searchParams.set('policy', STORE_POLICY_VERSION);
 		}
 		const keyed = new Request(url, body);
-		const result = await readStoreMetadata(
-			ctx,
-			keyed,
-			() => serveStore(keyed, env, ctx),
-			(response) => response.text()
+		const result = await measure('store', () =>
+			withSpan(ctx, 'narinfo body loopback', () =>
+				readStoreMetadata(
+					ctx,
+					keyed,
+					() => serveStore(keyed, env, ctx),
+					(response) => response.text()
+				)
+			)
 		);
 		response = result.response;
 		text = result.value;
@@ -507,6 +512,7 @@ async function serveAnonymousNarInfo(
 		)
 	);
 	const cacheable =
+		fresh &&
 		(response.ok || (!winner && response.status === 404)) &&
 		proxySigningAvailable &&
 		!response.headers.get('Cache-Control')?.includes('no-store');

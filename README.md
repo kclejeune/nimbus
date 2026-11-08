@@ -221,6 +221,16 @@ complete. `--json` writes the report to stdout and progress to stderr;
 
 ### Pushing
 
+Admins can investigate incomplete closures from **Settings → Garbage collection →
+Closure maintenance**. Select a cache to recheck recorded dependencies against
+its upstreams and review removable and protected paths. Removal requires a
+complete preview and confirmation; it rechecks coverage, pins, recent uploads
+and path identities before deleting anything. Previews expire after 15 minutes,
+and larger plans remain available through `nimbus purge`. Checks and removals
+are recorded in the audit log. The browser cannot read a build machine's local
+store, so the panel provides a cache-specific repair command for missing files.
+Paths already covered by an upstream do not require downloading into Nimbus.
+
 If Settings reports incomplete closures, run `nimbus repair mycache`
 on the machines that built those paths, then `nimbus repair mycache --apply`. This
 uses the reference graph from the last GC, rechecks upstream coverage, and
@@ -283,10 +293,20 @@ chunks the server has. `push` accepts attic's flags (`--stdin`,
 `--no-closure`, `--jobs`, `--ignore-upstream-cache-filter`), so it can replace
 `attic push` in existing tooling.
 
+`--jobs` bounds concurrent paths. The CLI also caps upload API requests,
+including chunks, at eight per client. A `429` or `503` response halves that
+cap down to one and pauses new uploads together, honoring `Retry-After`
+(up to five minutes). Successful uploads restore one request of concurrency
+at most every five seconds after cooldown. This pacing also reacts to failed
+preflight requests, while control-plane requests remain available. Each CLI
+process adapts independently; this is not a database-wide concurrency limit.
+
 `watch-exec` collects every path the command adds and pushes them as one
 closure-deduplicated batch when it exits, flushing early whenever the store
 is idle for `--batch-idle` (15s; `0` waits for exit). `--batch=false`
 streams paths as they settle instead.
+For a conservative CI setting, use `nimbus watch-exec --jobs 2 CACHE COMMAND ...`;
+the command's own build-job flags do not control upload concurrency.
 
 ## Deploy
 
@@ -321,6 +341,47 @@ npm run dev:worker    # wrangler dev on localhost:8788
 For local development, copy `web/.dev.vars.example` to `web/.dev.vars` and
 fill in the secrets. [`web/README.md`](web/README.md#development) explains
 switching the local Worker between the admin UI and the cache API.
+
+### CI runners
+
+Linux lint, race tests, web checks, and snapshot builds share one `checks` job
+and one VM per CI run. It uses the `NIMBUS_RUNNER` Actions repository variable
+when set. The maintainer instance uses `boat-large`
+(8 vCPU, 16 GB RAM) through the [Boat CI GitHub app](https://docs.boat.dev/ci).
+Boat creates a fresh VM for each job and deletes it afterward; no persistent
+runner instances or repository secrets are needed for the integration.
+Lint, Go tests, and web checks run in a native GitHub Actions `parallel` group
+on that VM. Cross-compilation follows the group because GoReleaser's hooks
+can update `go.mod` and `go.sum`.
+
+This uses one Boat start instead of four: the plan's 200 daily starts cover
+up to 200 CI runs before other repositories and sandboxes use that allowance.
+A PR run and its merge-to-main run each count once. Superseded branch runs
+are cancelled, though a VM that already started still counts toward the cap.
+Branch protection requires the combined `checks` job.
+
+Boat must have access to the repository and an active paid plan. For a public
+repository, enable owner-triggered jobs with
+`boat ci public kclejeune on --users kclejeune`, then select the runner:
+
+```bash
+gh variable set NIMBUS_RUNNER --repo kclejeune/nimbus --body boat-large
+boat ci --repo kclejeune/nimbus
+```
+
+The variable applies only to owner-triggered branch runs and same-repository
+pull requests, matching that Boat allowlist. Other actors (including
+Dependabot), fork pull requests, and release tags use GitHub runners.
+Release/maintenance jobs also use GitHub runners. An unset variable falls
+back to GitHub; delete it to disable Boat, or check **github-hosted** when
+manually starting CI to bypass Boat for one run.
+
+GoReleaser cross-compiles Linux and macOS binaries with `CGO_ENABLED=0` in
+every CI run. Native macOS race tests run on GitHub weekly (Monday, 09:17 UTC)
+and through the **macOS** workflow's manual trigger. That job installs Nix so
+the NAR regression test runs rather than skips. Native tests cover runtime
+behavior that cross-compilation cannot check; macOS lint adds little to the
+Linux lint pass and is omitted.
 
 ### Repository layout
 

@@ -6,8 +6,17 @@ import { stripSha256 } from '../attic/nix-base32';
 import { hedgedReplicaRead } from './read-hedge';
 import { findCacheCached } from './cache-lookup';
 import { AsyncMemo } from './async-memo';
+import { ReadCoalescer } from './read-coalescer';
 import { measure, candidateMetadata } from './latency';
-import { readStoreMetadata, readViaStore } from './store-transport';
+import {
+	cancelStoreBody,
+	readBestEffortViaStore,
+	readStoreMetadata,
+	readViaStore,
+	STORE_BEST_EFFORT_TIMEOUT_MS
+} from './store-transport';
+import { d1OverloadDelay } from './d1-pressure';
+import { withSpan } from './tracing';
 
 export const CANDIDATES_TAG = 'candidates';
 export const candidateTag = (kind: string, hash: string) =>
@@ -153,6 +162,8 @@ export function remainingFreshMs(headers: Headers): number {
 	return Math.max(0, Number(maxAge[1]) - age) * 1000;
 }
 
+const candidateFills = new ReadCoalescer<{ rows: db.LiveCacheRow[]; filledAt: number }>();
+
 /** Never exposed by the gateway: candidate rows contain private cache names.
  * Charges admission itself so the uncached fallback in loadCandidates pays
  * the same as a store miss. */
@@ -164,38 +175,65 @@ export async function serveCandidates(
 	ctx?: ExecutionContext
 ): Promise<Response> {
 	await chargeBackendRead(env, request);
-	const rows = await hedgedReplicaRead(env.ATTIC_DB, ctx, (session) =>
-		readCandidateRows(session, kind, hash)
-	);
+	const { rows, filledAt } = await candidateFills.get(`${kind}:${stripSha256(hash)}`, async () => ({
+		rows: await hedgedReplicaRead(env.ATTIC_DB, ctx, (session) =>
+			readCandidateRows(session, kind, hash)
+		),
+		filledAt: Date.now()
+	}));
 	const response = cachedJson(
 		rows,
 		candidateTag(kind, hash),
 		candidateCacheControl(rows.length > 0)
 	);
-	response.headers.set(FILLED_AT_HEADER, String(Date.now()));
+	response.headers.set(FILLED_AT_HEADER, String(filledAt));
 	return response;
 }
 
-/** Reuse a fresh, tagged membership entry when an anonymous envelope fills.
- * A stale snapshot must not gain a new membership lifetime via the envelope. */
+/** Reuse tagged membership within its stale window, with the original fill
+ * time. A stale snapshot may serve this request but cannot cache a newly fresh
+ * envelope; the gateway still checks visibility and confirms misses. */
 export async function candidateSnapshot(
 	env: App.Platform['env'],
 	hash: string,
 	ctx?: ExecutionContext
-): Promise<{ rows: db.LiveCacheRow[]; filledAt: number }> {
+): Promise<{ rows: db.LiveCacheRow[]; filledAt: number; fresh: boolean }> {
 	// The enclosing envelope fill already charged backend admission.
 	const internal = internalRequest(env, `/_meta/path/${hash}`);
-	const { response, value: rows } = await readStoreMetadata(
-		ctx,
-		internal,
-		() => serveCandidates(internal, env, 'path', hash, ctx),
-		candidateRows,
-		(response) =>
-			response.ok &&
-			(!(Number(response.headers.get(FILLED_AT_HEADER)) > 0) ||
-				remainingFreshMs(response.headers) <= 0)
+	const { response, value: rows } = await measure('candidateLoopback', () =>
+		withSpan(ctx, 'candidate snapshot loopback', () =>
+			readStoreMetadata(
+				ctx,
+				internal,
+				() => serveCandidates(internal, env, 'path', hash, ctx),
+				candidateRows,
+				(response) => response.ok && !candidateSnapshotState(response.headers).reusable
+			)
+		)
 	);
-	return { rows, filledAt: Number(response.headers.get(FILLED_AT_HEADER)) };
+	const snapshot = candidateSnapshotState(response.headers);
+	return {
+		rows,
+		filledAt: snapshot.filledAt,
+		fresh: snapshot.fresh
+	};
+}
+
+function candidateSnapshotState(headers: Headers) {
+	const filledAt = Number(headers.get(FILLED_AT_HEADER));
+	const elapsed = Date.now() - filledAt;
+	const policy = headers.get('Cache-Control') ?? '';
+	const maxAge = /(?:^|[\s,])max-age=(\d+)/.exec(policy);
+	const stale = Number(/(?:^|[\s,])stale-while-revalidate=(\d+)/.exec(policy)?.[1] ?? 0);
+	const age = Math.max(elapsed, (Number(headers.get('Age')) || 0) * 1000);
+	const valid =
+		filledAt > 0 && Number.isFinite(age) && elapsed >= 0 && !!maxAge && !/no-store/.test(policy);
+	const maxAgeMs = Number(maxAge?.[1] ?? 0) * 1000;
+	return {
+		filledAt,
+		fresh: valid && age < maxAgeMs,
+		reusable: valid && age < maxAgeMs + stale * 1000
+	};
 }
 
 const candidateRows = (response: Response) =>
@@ -218,8 +256,12 @@ export interface Candidates {
 // No per-isolate memo in front of the loopback: repeats of one hash arrive
 // minutes apart and from other colos, so a five-second positive memo hit
 // 1 of 942 sampled lookups in prod (2026-09-27); the edge entry is the cache.
+// candidateFills (behind the loopback) only joins fills still in flight.
+// That historical gateway sample does not measure same-key origin overlap;
+// metadataReads counters measure whether coalescing helps the current workload.
 export function invalidateCandidates(kind: 'nar' | 'path', hash: string): void {
 	const key = `${kind}:${stripSha256(hash)}`;
+	candidateFills.clear(key);
 	confirmedCandidates.clear(key);
 	refreshedEmpty.clear(key);
 }
@@ -281,6 +323,7 @@ const CONFIRMED_TTL_MS = 60_000;
 const confirmedCandidates = new AsyncMemo<db.LiveCacheRow[]>(CONFIRMED_TTL_MS, 10_000);
 
 export function clearCandidateMemos(): void {
+	candidateFills.clear();
 	confirmedCandidates.clear();
 	refreshedEmpty.clear();
 }
@@ -400,14 +443,41 @@ async function withCurrentVisibility(
 export async function serveTouch(
 	env: App.Platform['env'],
 	cacheId: number,
-	hash: string
+	hash: string,
+	request?: Request
 ): Promise<Response> {
-	await db.touchObjectsForNarHash(env.ATTIC_DB, cacheId, hash);
+	const suppliedDeadline = Number(request?.headers.get(TOUCH_DEADLINE_HEADER));
+	const deadline = Math.min(
+		Date.now() + STORE_BEST_EFFORT_TIMEOUT_MS,
+		Number.isFinite(suppliedDeadline) && suppliedDeadline > 0 ? suppliedDeadline : Infinity
+	);
+	await db.touchObjectsForNarHash(env.ATTIC_DB, cacheId, hash, () => {
+		request?.signal.throwIfAborted();
+		if (d1OverloadDelay() > 0)
+			throw new AdmissionError('Retention touch deferred during D1 overload', 5);
+		// An RPC abort may not reach the origin; the stamped deadline still
+		// prevents a queued probe from starting an unnecessary late write.
+		if (Date.now() >= deadline) throw new AdmissionError('Retention touch deadline exceeded', 5);
+	});
 	return new Response('ok', {
 		headers: {
 			'Cache-Control': `public, max-age=${db.TOUCH_GRANULARITY_MS / 1000}, must-revalidate`
 		}
 	});
+}
+
+const TOUCH_FAILURE_BACKOFF_MS = 5_000;
+const TOUCH_DEADLINE_HEADER = 'X-Nimbus-Touch-Deadline';
+let touchRetryAt = 0;
+
+function deferTouches(reason: string): void {
+	const now = Date.now();
+	// Concurrent failures share a backoff instead of extending it one by one.
+	if (now < touchRetryAt) return;
+	touchRetryAt = now + TOUCH_FAILURE_BACKOFF_MS;
+	console.log(
+		JSON.stringify({ event: 'nimbus.retention_touch', reason, retryMs: TOUCH_FAILURE_BACKOFF_MS })
+	);
 }
 
 export async function touchViaStore(
@@ -416,10 +486,24 @@ export async function touchViaStore(
 	cacheId: number,
 	hash: string
 ): Promise<void> {
+	if (Date.now() < touchRetryAt)
+		throw new AdmissionError('Retention touch deferred after failure', 5);
+	if (d1OverloadDelay() > 0) {
+		deferTouches('d1_overload');
+		throw new AdmissionError('Retention touch deferred during D1 overload', 5);
+	}
 	const internal = internalRequest(env, `/_touch/${cacheId}/${encodeURIComponent(hash)}`);
-	const response = await viaStore(ctx, internal, () => serveTouch(env, cacheId, hash));
-	await response.body?.cancel();
-	if (!response.ok) throw new Error(`Retention touch failed: ${response.status}`);
+	internal.headers.set(TOUCH_DEADLINE_HEADER, String(Date.now() + STORE_BEST_EFFORT_TIMEOUT_MS));
+	try {
+		const response = await readBestEffortViaStore(ctx, internal, () =>
+			serveTouch(env, cacheId, hash, internal)
+		);
+		cancelStoreBody(response);
+		if (!response.ok) throw new Error(`Retention touch failed: ${response.status}`);
+	} catch (error) {
+		deferTouches('store_failure');
+		throw error;
+	}
 }
 
 export async function serveManifest(
