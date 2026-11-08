@@ -130,7 +130,7 @@
 		}
 	},
 	"devDependencies": {
-		"@cloudflare/workers-types": "^5.20261104.1",
+		"@cloudflare/workers-types": "^5.20261106.1",
 		"@fontsource-variable/instrument-sans": "^5.3.0",
 		"@fontsource-variable/jetbrains-mono": "^5.3.0",
 		"@internationalized/date": "^3.12.4",
