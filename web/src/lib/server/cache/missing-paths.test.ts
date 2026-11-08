@@ -472,7 +472,9 @@ describe('concurrent upstream probing', () => {
 						{ upstream_id: 1, present: VERDICT_ABSENT, checked_at: new Date().toISOString() }
 					]
 				});
-				await vi.advanceTimersByTimeAsync(100);
+				// A successful probe may arm its own 250 ms verdict-write batch.
+				// Drain that window even when no earlier test left a flusher armed.
+				await vi.advanceTimersByTimeAsync(250);
 				await Promise.all(tasks);
 				expect(await response).toBe(result);
 			} finally {
