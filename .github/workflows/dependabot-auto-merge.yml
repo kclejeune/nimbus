@@ -7,10 +7,10 @@ name: Dependabot auto-merge
 # a Go bump invalidates is repaired on main by vendor-hash.yml straight after
 # the merge.
 #
-# This only *queues* the merge: the branch ruleset's required checks job
-# still has to pass before GitHub lands anything. Workflows
-# on Dependabot PRs get a read-only token by default; the permissions block
-# below is what makes `gh pr merge` possible.
+# This only queues the merge: the branch ruleset's required checks job still
+# has to pass before GitHub lands anything. Workflows on Dependabot PRs get
+# a read-only token by default; the permissions block below is what makes
+# `gh pr merge` possible. Release age is handled by dependabot.yml's cooldown.
 
 on: pull_request
 
@@ -35,10 +35,24 @@ jobs:
       - name: Queue auto-merge
         # For a grouped PR, update-type is the largest bump in the group, so a
         # major sneaking into a group still fails this test.
+        # Metadata uses go_modules, while dependabot.yml calls it gomod.
         if: >-
-          contains(fromJSON('["npm_and_yarn", "gomod"]'), steps.meta.outputs.package-ecosystem) &&
+          contains(fromJSON('["npm_and_yarn", "go_modules"]'), steps.meta.outputs.package-ecosystem) &&
           contains(fromJSON('["version-update:semver-patch", "version-update:semver-minor"]'), steps.meta.outputs.update-type)
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Report the auto-merge decision
+        env:
+          ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          ELIGIBLE: ${{ contains(fromJSON('["npm_and_yarn", "go_modules"]'), steps.meta.outputs.package-ecosystem) && contains(fromJSON('["version-update:semver-patch", "version-update:semver-minor"]'), steps.meta.outputs.update-type) }}
+        run: |
+          if [[ "$ELIGIBLE" == true ]]; then
+            decision="Auto-merge enabled; required CI checks must pass."
+          else
+            decision="Manual merge required: this ecosystem or update type is outside the auto-merge policy."
+          fi
+          printf '%s\nEcosystem: %s\nUpdate type: %s\n' "$decision" "$ECOSYSTEM" "$UPDATE_TYPE" | tee -a "$GITHUB_STEP_SUMMARY"
