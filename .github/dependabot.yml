@@ -40,16 +40,10 @@ updates:
       semver-patch-days: 2
       semver-minor-days: 2
       semver-major-days: 30
-    # Grouped by dependency type so each PR carries one update-type verdict for
-    # the auto-merge workflow to gate on. Majors stay ungrouped and manual.
+    # One batch covers production and development dependencies. The metadata
+    # action reports the largest bump; majors stay ungrouped and manual.
     groups:
-      npm-development:
-        dependency-type: "development"
-        update-types:
-          - "minor"
-          - "patch"
-      npm-production:
-        dependency-type: "production"
+      npm:
         update-types:
           - "minor"
           - "patch"
