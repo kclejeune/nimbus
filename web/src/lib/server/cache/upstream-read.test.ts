@@ -226,3 +226,22 @@ it('purges the shared configuration when subscription or cache lifecycle changes
 	expect(purgeTags).toHaveBeenCalledTimes(5);
 	for (const [tags] of purgeTags.mock.calls) expect(tags).toContain(upstreams.UPSTREAM_CONFIG_TAG);
 });
+
+it('coalesces concurrent config fills without keeping a snapshot after they finish', async () => {
+	const { ctx, tasks, finish, batch } = stalledReplica();
+	const env = { ATTIC_DB: fixture.db } as App.Platform['env'];
+	const first = upstreams.serveUpstreamConfig(env, ctx);
+	const second = upstreams.serveUpstreamConfig(env, ctx);
+	await vi.advanceTimersByTimeAsync(500);
+	expect((await first).status).toBe(200);
+	await vi.advanceTimersByTimeAsync(100);
+	expect((await second).status).toBe(200);
+	expect(batch).toHaveBeenCalledOnce();
+	finish();
+	await Promise.all(tasks);
+	fixture.sqlite.exec("UPDATE cache_upstream SET mode = 'off'");
+	// Use the normal replica again for a later, independent fill.
+	vi.restoreAllMocks();
+	const wire = (await (await upstreams.serveUpstreamConfig(env)).json()) as { overrides: unknown };
+	expect(wire.overrides).toEqual([[1, [[1, 'off']]]]);
+});

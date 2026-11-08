@@ -186,12 +186,49 @@ tokens; drizzle-generated in `web/drizzle/`, tracked in `admin_migrations`).
 
 ## Upgrade notes
 
+### Paced garbage collection
+
+Keep both cron entries from the Wrangler configuration: `0 3 * * *` starts
+nightly maintenance and `* * * * *` resumes unfinished work and retries pending
+purges. An idle GC continuation reads one small D1 checkpoint. It does not
+start another sweep. No new Durable Object binding or D1 migration is needed
+for continuations; the GC traversal indexes have their own
+`2026-11-06-gc-traversal-indexes.sql` migration.
+
+GC stores its phase, cache/root cursors and orphan-chunk progress in
+`server_config.gc_job`; reference synchronization retains its atomic watermark.
+Every destructive graph operation refreshes references from intervening
+uploads before selecting victims, including after a continuation. A
+resource-window rejection defers maintenance for 10–15 seconds, with the next
+cron resuming it. Completed
+cache passes are skipped on resume. A canceled invocation can repeat its
+current phase, and counters may undercount work committed before cancellation.
+Deletion receipts in `path_purge` survive independently and are committed in
+the same transaction as metadata removal.
+
+The initial pacing policy allows about one second of reported SQL execution
+per ten-second window. Reference windows start at 50 objects and adapt to
+fanout. This is a soft application budget, not a Cloudflare quota: a single
+query or reachability/deletion unit can exceed it. Background GC yields to
+cron when its budget or 20-second slice is exhausted; it does not accumulate
+pacing sleeps inside a phase. Root refreshes checkpoint each completed
+read/update pair, and orphan cleanup checkpoints preparation and bounded chunk
+batches. Large deletion units finish at least one atomic batch after a slow
+selection, then check the deadline before further batches and select victims
+afresh on resume. Manual GC retains inline pacing. The `nimbus.gc.phase` and
+`nimbus.gc.deferred` events report cumulative SQL time, rows read/written,
+statement counts and pacing waits for that invocation.
+
+The existing purge Durable Object remains optional and recommended for global
+tag batching and prompt repair recovery. Without it, purges use the existing
+journal/retry paths. GC continuations use cron/D1 regardless of that binding.
+
 ### Automatic broken-closure cleanup
 
 Apply `2026-10-21-broken-closure-policy.sql` before deploying the Worker;
 `npm run deploy:worker` already performs migrations before deployment. The
-feature uses the existing nightly GC trigger and needs no new bindings or cron
-entry. It is disabled by default for every cache.
+feature runs as a phase of nightly GC and needs no additional bindings. It is
+disabled by default for every cache.
 
 After deployment, enable it in a cache's settings or with a current CLI:
 

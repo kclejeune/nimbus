@@ -7,14 +7,7 @@
 // Every sweep is idempotent; passes are ordered so each exposes work for the
 // next (retention deletes objects -> orphans NARs -> orphans chunks -> R2).
 
-import {
-	claimOrphanChunks,
-	chunkKey,
-	dbRun,
-	PARAM_BATCH,
-	pruneRevokedTokens,
-	runBatched
-} from './db';
+import { claimOrphanChunks, chunkKey, dbRun, PARAM_BATCH, pruneRevokedTokens, dbBatch } from './db';
 import { allLiveUpstreams, filterUpstreamPaths, VERDICT_ABSENT } from './missing-paths';
 import { type ExecutionContext } from './platform';
 import { AsyncMemo } from './async-memo';
@@ -27,6 +20,17 @@ import { readRpcResult } from './rpc';
 import { retentionCutoff } from './retention-explain';
 import { INTEGRITY_PUSH_GRACE_MS } from './closure-repair';
 import { runBrokenClosureGc } from './broken-closure-gc';
+import { replayPathPurges } from './closure-purge';
+import {
+	GcDeferred,
+	GcPacer,
+	pacedGcDatabase,
+	gcWorkUnit,
+	isGcResourceError,
+	GC_WINDOW_MS,
+	gcCheckpoint,
+	gcCheckDeadline
+} from './gc-pacing';
 
 type Env = App.Platform['env'];
 type D1 = Env['ATTIC_DB'];
@@ -38,7 +42,7 @@ const ABANDONED_CACHE_GRACE_SECS = 7 * 24 * 60 * 60;
  * discard a present verdict before its configured upstream TTL expires. */
 const UPSTREAM_ABSENT_TTL_SECS = 24 * 60 * 60;
 const UPSTREAM_PRESENT_TTL_SECS = 90 * 24 * 60 * 60;
-const REF_SYNC_BATCH = 500;
+const REF_SYNC_BATCH = 50;
 const R2_DELETE_BATCH = 1000;
 /**
  * Doomed objects fetched per evaluation of the reachability CTE in the
@@ -209,60 +213,228 @@ export async function runGc(env: Env, opts: GcOptions = {}): Promise<GcStats> {
 	}
 }
 
-async function runGcLocked(env: Env, opts: GcOptions): Promise<GcStats> {
-	const stats = emptyStats();
-	const dryRun = opts.dryRun ?? false;
-	// Cache-Tags of deleted objects, purged from the edge cache at the end so
-	// long-TTL narinfo entries stop being served once their storage is gone.
-	const purgeTags: string[] = [];
+interface GcProgress {
+	phase: number;
+	cacheAfter: number;
+	rootAfter?: number;
+	orphanPrepared?: boolean;
+	chunkAfter?: number;
+	stats: GcStats;
+	integrity: GcIntegritySummary | null;
+	nextAt: number;
+	startedAt: string;
+}
+const GC_JOB_KEY = 'gc_job';
+const GC_SLICE_MS = 20_000;
 
-	await syncObjectRefs(env.ATTIC_DB, stats);
-
-	if (!dryRun) {
-		await reapAbandonedCaches(env.ATTIC_DB, stats);
-		// Expired pin revisions detach-unpin before retention runs, so this
-		// sweep already treats them as ordinary unpinned paths.
-		await prunePinRevisions(env.ATTIC_DB, stats);
-	}
-	await detachedPass(env.ATTIC_DB, stats, dryRun, purgeTags);
-	await retentionPass(env.ATTIC_DB, stats, dryRun, purgeTags);
-	await globalSizePass(env.ATTIC_DB, stats, dryRun, purgeTags);
-	if (!dryRun && opts.automaticBrokenPurge) {
-		try {
-			Object.assign(stats, await runBrokenClosureGc(env, opts.ctx));
-		} catch (error) {
-			stats.automatic_purge_errors++;
-			console.warn('gc: automatic broken-closure setup failed', error);
+/** Cron continuations read this one small row while idle. A job never resets
+ * at midnight: an unfinished run resumes before another one is started. */
+export async function continueScheduledGc(
+	env: Env,
+	ctx?: ExecutionContext,
+	start = false
+): Promise<void> {
+	const db = env.ATTIC_DB;
+	const load = async (): Promise<GcProgress | null> => {
+		const row = await db
+			.prepare(`SELECT value FROM server_config WHERE key='${GC_JOB_KEY}'`)
+			.first<{ value: string }>();
+		return row ? (JSON.parse(row.value) as GcProgress) : null;
+	};
+	const pending = await load();
+	if ((!pending && !start) || (pending && pending.nextAt > Date.now())) return;
+	const lock = await acquireGcLock(db);
+	if (!lock) return;
+	const pacer = new GcPacer(true, Date.now() + GC_SLICE_MS);
+	let job: GcProgress | null = null;
+	const save = () =>
+		dbRun(
+			db
+				.prepare(
+					`INSERT INTO server_config(key,value) VALUES('${GC_JOB_KEY}',?1) ` +
+						'ON CONFLICT(key) DO UPDATE SET value=excluded.value'
+				)
+				.bind(JSON.stringify(job)),
+			{ attempts: 1 }
+		);
+	try {
+		job = await load();
+		if (!job && !start) return;
+		if (job && job.nextAt > Date.now()) return;
+		job ??= {
+			phase: 0,
+			cacheAfter: 0,
+			stats: emptyStats(),
+			integrity: null,
+			nextAt: Date.now(),
+			startedAt: new Date().toISOString()
+		};
+		await save();
+		const started = Date.now();
+		const paced = { ...env, ATTIC_DB: pacedGcDatabase(db, pacer) };
+		const yieldRefs = () => pacer.resumeAt > Date.now() || Date.now() - started >= GC_SLICE_MS;
+		const checkpoint = async () => {
+			pacer.check();
+			await save();
+			gcCheckpoint(paced.ATTIC_DB);
+		};
+		const cacheDone = async (id: number) => {
+			job!.cacheAfter = id;
+			await checkpoint();
+		};
+		const rootDone = async (id: number) => {
+			job!.rootAfter = id;
+			await checkpoint();
+		};
+		const phases = gcPhases(
+			paced,
+			{ ctx, automaticBrokenPurge: true },
+			job,
+			undefined,
+			yieldRefs,
+			cacheDone,
+			rootDone,
+			checkpoint
+		);
+		while (job.phase < phases.length) {
+			const [name, run] = phases[job.phase];
+			const complete = await run();
+			pacer.check(); // A pass may have caught the deferred D1 error internally.
+			if (complete !== false) {
+				job.phase++;
+				job.cacheAfter = 0;
+				job.rootAfter = 0;
+				job.chunkAfter = 0;
+				job.orphanPrepared = false;
+			}
+			job.nextAt = Math.max(Date.now(), pacer.resumeAt);
+			await save();
+			console.log(
+				JSON.stringify({
+					event: 'nimbus.gc.phase',
+					phase: name,
+					complete: complete !== false,
+					startedAt: job.startedAt,
+					...pacer.totals
+				})
+			);
+			if (complete === false || job.nextAt > Date.now() || Date.now() - started >= GC_SLICE_MS)
+				return;
 		}
-	}
-	// Advisory only, and the heaviest read of the run — size-triggered GC
-	// (upload hot path via waitUntil) opts out; cron and manual runs report.
-	let integrity: GcIntegritySummary | null = null;
-	if (opts.integrityReport ?? true) {
-		integrity = await closureIntegrityReport(env.ATTIC_DB, stats);
-	}
-	if (!dryRun) {
-		await reapOrphans(env, stats);
-		await env.ATTIC_DB.prepare('DELETE FROM device_auth WHERE expires_at < ?1')
-			.bind(Math.floor(Date.now() / 1000))
-			.run()
-			.catch((e) => console.warn(`gc: device_auth cleanup failed: ${e}`));
-		await pruneRevokedTokens(env.ATTIC_DB).catch((e) =>
-			console.warn(`gc: revoked_token cleanup failed: ${e}`)
+		await dbRun(db.prepare(`DELETE FROM server_config WHERE key='${GC_JOB_KEY}'`));
+	} catch (error) {
+		const deferred =
+			error instanceof GcDeferred
+				? error
+				: isGcResourceError(error)
+					? new GcDeferred(Date.now() + GC_WINDOW_MS + Math.random() * 5_000, 'resources')
+					: undefined;
+		if (job) job.nextAt = deferred?.until ?? Date.now() + 60_000;
+		console.warn(
+			JSON.stringify({
+				event: 'nimbus.gc.deferred',
+				phase: job?.phase,
+				resumeAt: job?.nextAt,
+				reason: deferred?.reason ?? 'error',
+				error: String(error),
+				...pacer.totals
+			})
 		);
-		await pruneUpstreamChecks(env.ATTIC_DB);
-		await refreshAllGcRootStats(env.ATTIC_DB);
-		// The Usage history's rollup: one whole-store walk per run instead of
-		// one per page view. A failure leaves the previous rollup in place;
-		// readers then just join a longer live tail.
-		await refreshIngestRollup(env.ATTIC_DB).catch((e) =>
-			console.warn(`gc: ingest rollup failed: ${e}`)
-		);
-		await purgeNarinfoTags(opts.ctx, purgeTags, stats);
-		await persistLastRun(env.ATTIC_DB, stats, integrity);
+		// Let the resource window clear before checkpoint/lock cleanup writes.
+		// If canceled here, the last checkpoint and deletion receipts replay safely.
+		if (deferred?.reason === 'resources')
+			await new Promise((resolve) => setTimeout(resolve, Math.max(0, deferred.until - Date.now())));
+		if (job) await save().catch((e) => console.warn('gc: checkpoint pending', e));
+	} finally {
+		await releaseGcLock(db, lock);
 	}
+}
 
-	return stats;
+type GcPhase = [name: string, run: () => Promise<boolean | void>];
+function gcPhases(
+	env: Env,
+	opts: GcOptions,
+	progress: GcProgress,
+	purgeTags: string[] | undefined,
+	yieldRefs = () => false,
+	cacheDone: (id: number) => Promise<void> = async () => {},
+	rootDone: (id: number) => Promise<void> = async () => {},
+	checkpoint: () => Promise<void> = async () => {}
+): GcPhase[] {
+	const db = env.ATTIC_DB,
+		stats = progress.stats,
+		dry = opts.dryRun ?? false;
+	const write = (name: string, run: () => Promise<unknown>): GcPhase => [
+		name,
+		async () => {
+			if (!dry) await gcWorkUnit(db, run);
+		}
+	];
+	return [
+		['references', () => syncObjectRefs(db, stats, yieldRefs)],
+		write('abandoned', () => reapAbandonedCaches(db, stats)),
+		write('pins', () => prunePinRevisions(db, stats)),
+		['detached', () => detachedPass(db, stats, dry, purgeTags, progress.cacheAfter, cacheDone)],
+		['retention', () => retentionPass(db, stats, dry, purgeTags, progress.cacheAfter, cacheDone)],
+		['global', () => gcWorkUnit(db, () => globalSizePass(db, stats, dry, purgeTags))],
+		write('broken', async () => {
+			if (opts.automaticBrokenPurge) Object.assign(stats, await runBrokenClosureGc(env, opts.ctx));
+		}),
+		[
+			'integrity',
+			async () => {
+				if (opts.integrityReport ?? true)
+					progress.integrity = await gcWorkUnit(db, () => closureIntegrityReport(db, stats));
+			}
+		],
+		[
+			'orphans',
+			async () => {
+				if (!dry) await reapOrphans(env, stats, progress, checkpoint);
+			}
+		],
+		write('tokens', async () => {
+			await db
+				.prepare('DELETE FROM device_auth WHERE expires_at < ?1')
+				.bind(Math.floor(Date.now() / 1000))
+				.run()
+				.catch((e) => console.warn('gc: device_auth cleanup failed', e));
+			await pruneRevokedTokens(db).catch((e) =>
+				console.warn('gc: revoked_token cleanup failed', e)
+			);
+		}),
+		write('upstream-prune', () => pruneUpstreamChecks(db)),
+		[
+			'root-stats',
+			async () => {
+				if (!dry) await refreshAllGcRootStats(db, progress.rootAfter ?? 0, rootDone);
+			}
+		],
+		write('ingest', () =>
+			refreshIngestRollup(db).catch((e) => console.warn('gc: ingest rollup failed', e))
+		),
+		write('purges', async () => {
+			if (purgeTags) await purgeNarinfoTags(opts.ctx, purgeTags, stats);
+			stats.purge_receipts_pending = (await replayPathPurges(env, opts.ctx)).pending;
+		}),
+		write('summary', () => persistLastRun(db, stats, progress.integrity)),
+		write('analyze', () => db.exec('ANALYZE'))
+	];
+}
+
+async function runGcLocked(env: Env, opts: GcOptions): Promise<GcStats> {
+	const pacer = new GcPacer();
+	const progress: GcProgress = {
+		phase: 0,
+		cacheAfter: 0,
+		stats: emptyStats(),
+		integrity: null,
+		nextAt: 0,
+		startedAt: new Date().toISOString()
+	};
+	const paced = { ...env, ATTIC_DB: pacedGcDatabase(env.ATTIC_DB, pacer) };
+	for (const [, run] of gcPhases(paced, opts, progress, [])) await run();
+	return progress.stats;
 }
 
 /** Best-effort record of the run for the dashboard; never fails the sweep. */
@@ -401,7 +573,11 @@ async function eachTagBatch(
  */
 const REF_SYNC_WATERMARK_KEY = 'ref_sync_watermark';
 
-export async function syncObjectRefs(db: D1, stats?: GcStats): Promise<void> {
+export async function syncObjectRefs(
+	db: D1,
+	stats?: GcStats,
+	shouldYield: () => boolean = () => false
+): Promise<boolean> {
 	const bounds = await db
 		.prepare(
 			'SELECT COALESCE(' +
@@ -410,10 +586,11 @@ export async function syncObjectRefs(db: D1, stats?: GcStats): Promise<void> {
 				'COALESCE((SELECT MAX(id) FROM object), 0) AS max_id'
 		)
 		.first<{ watermark: number; max_id: number }>();
-	if (!bounds) return;
+	if (!bounds) return true;
 
-	for (let start = bounds.watermark; start < bounds.max_id; start += REF_SYNC_BATCH) {
-		const end = start + REF_SYNC_BATCH;
+	let batchSize = REF_SYNC_BATCH;
+	for (let start = bounds.watermark; start < bounds.max_id;) {
+		const end = Math.min(start + batchSize, bounds.max_id);
 		const results = await db.batch([
 			db
 				.prepare(
@@ -454,7 +631,15 @@ export async function syncObjectRefs(db: D1, stats?: GcStats): Promise<void> {
 				.bind(String(Math.min(end, bounds.max_id)))
 		]);
 		if (stats) stats.refs_synced += results[0]?.meta.changes ?? 0;
+		// Fanout, not object count, determines cost. Target ~50 ms of SQL;
+		// never grow beyond the initial window, and retain atomic watermarks.
+		const ms = results.reduce((n, r) => n + (r.meta.duration ?? 0), 0);
+		if (ms > 50) batchSize = Math.max(1, Math.floor((batchSize * 50) / ms));
+		else if (ms > 0 && ms < 25) batchSize = Math.min(REF_SYNC_BATCH, batchSize * 2);
+		start = end;
+		if (start < bounds.max_id && shouldYield()) return false;
 	}
+	return true;
 }
 
 // --- Closure queries ---
@@ -660,14 +845,18 @@ async function retentionPass(
 	db: D1,
 	stats: GcStats,
 	dryRun: boolean,
-	purgeTags: string[]
+	purgeTags: string[] | undefined,
+	afterCache = 0,
+	cacheDone: (id: number) => Promise<void> = async () => {}
 ): Promise<void> {
 	const caches = (
 		await db
 			.prepare(
 				'SELECT id, name, retention_period, retention_max_bytes FROM cache ' +
-					'WHERE deleted_at IS NULL AND (retention_period IS NOT NULL OR retention_max_bytes IS NOT NULL)'
+					'WHERE deleted_at IS NULL AND (retention_period IS NOT NULL OR retention_max_bytes IS NOT NULL) ' +
+					'AND id > ?1 ORDER BY id'
 			)
+			.bind(afterCache)
 			.all<{
 				id: number;
 				name: string;
@@ -692,10 +881,26 @@ async function retentionPass(
 			if (cache.retention_max_bytes != null) {
 				stats.size_evicted_objects += await evictCacheToBudget(db, cache, dryRun, purgeTags);
 			}
+			await cacheDone(cache.id);
 		} catch (e) {
+			if (e instanceof GcDeferred) throw e;
 			console.warn(`gc: retention pass failed for cache ${cache.name}: ${e}`);
 		}
 	}
+}
+
+/** Each destructive snapshot must see uploads since the previous slice (or
+ * eviction round). The watermark is atomic, so interrupted refreshes resume
+ * before a victim is selected. No old victim list survives a yield. */
+function gcGraphWork<T>(db: D1, work: () => Promise<T>): Promise<T> {
+	return gcWorkUnit(db, async () => {
+		await syncObjectRefs(db, undefined, () => {
+			gcCheckDeadline(db);
+			return false;
+		});
+		gcCheckDeadline(db);
+		return work();
+	});
 }
 
 /** Delete (or count, when dry) everything unreachable from fresh/root objects. */
@@ -705,23 +910,28 @@ async function reapUnreachable(
 	cacheName: string,
 	cutoff: string,
 	dryRun: boolean,
-	purgeTags: string[]
+	purgeTags: string[] | undefined
 ): Promise<number> {
 	let reaped = 0;
 	let afterId = 0;
 	for (;;) {
-		const sweep = (
-			await db.prepare(UNREACHABLE_SQL).bind(cacheId, cutoff, afterId, GC_SWEEP).all<DoomedRow>()
-		).results;
+		const sweep = await gcGraphWork(db, async () => {
+			const rows = (
+				await db.prepare(UNREACHABLE_SQL).bind(cacheId, cutoff, afterId, GC_SWEEP).all<DoomedRow>()
+			).results;
+			if (!dryRun && rows.length) {
+				await deleteObjects(
+					db,
+					rows.map((o) => o.id),
+					cacheId,
+					cacheName
+				);
+				purgeTags?.push(...rows.flatMap((o) => objectPurgeTags(cacheName, o)));
+			}
+			return rows;
+		});
 		if (sweep.length === 0) return reaped;
 		afterId = sweep[sweep.length - 1].id;
-		if (!dryRun) {
-			await deleteObjects(
-				db,
-				sweep.map((o) => o.id)
-			);
-			purgeTags.push(...sweep.flatMap((o) => objectPurgeTags(cacheName, o)));
-		}
 		reaped += sweep.length;
 		if (sweep.length < GC_SWEEP) return reaped;
 	}
@@ -737,7 +947,7 @@ async function evictCacheToBudget(
 	db: D1,
 	cache: { id: number; name: string; retention_max_bytes: number | null },
 	dryRun: boolean,
-	purgeTags: string[]
+	purgeTags: string[] | undefined
 ): Promise<number> {
 	const budget = sizeBudget(
 		async () => (await db.prepare(CACHE_SIZE_SQL).bind(cache.id).first<{ n: number }>())?.n ?? 0,
@@ -745,27 +955,46 @@ async function evictCacheToBudget(
 	);
 	let evicted = 0;
 	for (let round = 0; round < MAX_EVICTION_ROUNDS; round++) {
-		if (!(await budget.over())) break;
-		const victim = await db.prepare(OLDEST_TOP_LEVEL_SQL).bind(cache.id).first<DoomedRow>();
-		if (!victim) {
-			console.warn(`gc: cache ${cache.name} over size budget with only protected closures left`);
-			break;
-		}
-		const doomed = (
-			await db
-				.prepare(EXCLUSIVE_CLOSURE_SQL)
-				.bind(cache.id, victim.store_path_hash)
-				.all<DoomedRow>()
-		).results;
-		if (doomed.length === 0) break;
-		evicted += doomed.length;
+		const result = await gcWorkUnit(db, async () => {
+			if (!(await budget.over())) return null;
+			const victim = await db.prepare(OLDEST_TOP_LEVEL_SQL).bind(cache.id).first<DoomedRow>();
+			if (!victim) {
+				console.warn(`gc: cache ${cache.name} over size budget with only protected closures left`);
+				return null;
+			}
+			return reapExclusive(db, cache.id, cache.name, victim.store_path_hash, dryRun);
+		});
+		if (!result) break;
+		if (!result.count) break;
+		evicted += result.count;
 		if (dryRun) break;
-		const ids = doomed.map((d) => d.id);
-		budget.freed(await narBytesOf(db, ids));
-		await deleteObjects(db, ids);
-		purgeTags.push(...doomed.flatMap((d) => objectPurgeTags(cache.name, d)));
+		budget.freed(result.bytes);
+		purgeTags?.push(...result.tags);
 	}
 	return evicted;
+}
+
+/** Keep selection and deletion together: pacing must not add a ten-second
+ * sleep after taking a reachability snapshot. Recompute on every new round. */
+async function reapExclusive(
+	db: D1,
+	cacheId: number,
+	cacheName: string,
+	hash: string,
+	dry: boolean
+) {
+	return gcGraphWork(db, async () => {
+		const rows = (await db.prepare(EXCLUSIVE_CLOSURE_SQL).bind(cacheId, hash).all<DoomedRow>())
+			.results;
+		const ids = rows.map((r) => r.id);
+		const bytes = dry || !ids.length ? 0 : await narBytesOf(db, ids);
+		if (!dry && ids.length) await deleteObjects(db, ids, cacheId, cacheName);
+		return {
+			count: rows.length,
+			bytes,
+			tags: dry ? [] : rows.flatMap((r) => objectPurgeTags(cacheName, r))
+		};
+	});
 }
 
 /**
@@ -813,34 +1042,46 @@ async function narBytesOf(db: D1, objectIds: number[]): Promise<number> {
 	return total;
 }
 
-/**
- * Delete object rows plus their outgoing edges, and un-resolve incoming edges
- * from surviving parents (the ref_hash stays; child_id re-resolves if the
- * path is pushed again). All clears run before any delete so a crash between
- * batches can only leave NULL child_ids awaiting re-resolution, never a
- * child_id pointing at a dead row (which would pin the edge dangling forever
- * since AUTOINCREMENT never reuses the id).
- */
-async function deleteObjects(db: D1, ids: number[]): Promise<void> {
-	const stmts = [];
+/** Clear incoming edges, delete metadata and journal invalidations atomically.
+ * Keep receipts small and replay-safe: an ambiguous committed response must
+ * not let a retry delete an object that has since been re-pushed. */
+async function deleteObjects(
+	db: D1,
+	ids: number[],
+	cacheId: number,
+	cacheName: string
+): Promise<void> {
 	for (let i = 0; i < ids.length; i += PARAM_BATCH) {
-		const batch = ids.slice(i, i + PARAM_BATCH);
-		const placeholders = batch.map((_, j) => `?${j + 1}`).join(', ');
-		stmts.push(
+		// Let a slow selection make one atomic batch of progress, then yield.
+		if (i > 0) gcCheckDeadline(db);
+		const id = 'gc:' + crypto.randomUUID();
+		const eligible = `SELECT json_extract(j.value,'$.id') FROM path_purge p,json_each(p.objects) j
+			WHERE p.id=?1 AND p.state='pending'`;
+		await dbBatch(db, [
 			db
-				.prepare(`UPDATE object_ref SET child_id = NULL WHERE child_id IN (${placeholders})`)
-				.bind(...batch)
-		);
+				.prepare(
+					`INSERT OR IGNORE INTO path_purge(id,cache_id,cache_name,objects,created_at)
+				SELECT ?1,?2,?3,json_group_array(json_object('id',o.id,'hash',o.store_path_hash,'nar_hash',n.nar_hash)),?4
+				FROM object o LEFT JOIN nar n ON n.id=o.nar_id
+				WHERE o.cache_id=?2 AND o.id IN (SELECT value FROM json_each(?5))`
+				)
+				.bind(
+					id,
+					cacheId,
+					cacheName,
+					new Date().toISOString(),
+					JSON.stringify(ids.slice(i, i + PARAM_BATCH))
+				),
+			db.prepare(`UPDATE object_ref SET child_id=NULL WHERE child_id IN (${eligible})`).bind(id),
+			db.prepare(`DELETE FROM object_ref WHERE object_id IN (${eligible})`).bind(id),
+			db.prepare(`DELETE FROM object WHERE id IN (${eligible})`).bind(id),
+			db
+				.prepare(
+					`UPDATE path_purge SET removed=changes(),state='deleted' WHERE id=?1 AND state='pending'`
+				)
+				.bind(id)
+		]);
 	}
-	for (let i = 0; i < ids.length; i += PARAM_BATCH) {
-		const batch = ids.slice(i, i + PARAM_BATCH);
-		const placeholders = batch.map((_, j) => `?${j + 1}`).join(', ');
-		stmts.push(
-			db.prepare(`DELETE FROM object_ref WHERE object_id IN (${placeholders})`).bind(...batch),
-			db.prepare(`DELETE FROM object WHERE id IN (${placeholders})`).bind(...batch)
-		);
-	}
-	await runBatched(db, stmts);
 }
 
 /** LRU top-level object across all caches, gc_root closures exempt. */
@@ -890,7 +1131,7 @@ async function globalSizePass(
 	db: D1,
 	stats: GcStats,
 	dryRun: boolean,
-	purgeTags: string[]
+	purgeTags: string[] | undefined
 ): Promise<void> {
 	const limit = await readGlobalMaxBytes(db);
 	if (limit === null) return;
@@ -912,19 +1153,19 @@ async function globalSizePass(
 			.prepare(GLOBAL_OLDEST_TOP_LEVEL_SQL)
 			.first<{ id: number; cache_id: number; store_path_hash: string; cache_name: string }>();
 		if (!victim) break;
-		const doomed = (
-			await db
-				.prepare(EXCLUSIVE_CLOSURE_SQL)
-				.bind(victim.cache_id, victim.store_path_hash)
-				.all<DoomedRow>()
-		).results;
-		if (doomed.length === 0) break;
-		stats.global_evicted_objects += doomed.length;
+		const result = await reapExclusive(
+			db,
+			victim.cache_id,
+			victim.cache_name,
+			victim.store_path_hash,
+			dryRun
+		);
+		if (!result.count) break;
+		stats.global_evicted_objects += result.count;
 		if (dryRun) return;
-		const ids = doomed.map((d) => d.id);
-		budget.freed(await narBytesOf(db, ids));
-		await deleteObjects(db, ids);
-		purgeTags.push(...doomed.flatMap((d) => objectPurgeTags(victim.cache_name, d)));
+		budget.freed(result.bytes);
+		purgeTags?.push(...result.tags);
+		gcCheckpoint(db);
 	}
 	if (over) {
 		console.warn('gc: still over global limit after eviction pass');
@@ -977,21 +1218,34 @@ async function refreshGcRootStats(
 	return stats;
 }
 
-/** Refresh the cached closure stats of every root (a handful of rows). */
-async function refreshAllGcRootStats(db: D1): Promise<void> {
-	const roots = (
-		await db.prepare('SELECT cache_id, store_path_hash FROM gc_root').all<{
-			cache_id: number;
-			store_path_hash: string;
-		}>()
-	).results;
-	await Promise.all(
-		roots.map((root) =>
-			refreshGcRootStats(db, root.cache_id, root.store_path_hash).catch((e) =>
-				console.warn(`gc: root stats refresh failed for ${root.store_path_hash}: ${e}`)
-			)
-		)
-	);
+/** Keyset cursor survives budget/deadline yields. Finish the read/update pair
+ * before checkpointing a root, and never queue work for later roots eagerly. */
+async function refreshAllGcRootStats(
+	db: D1,
+	after = 0,
+	done: (id: number) => Promise<void> = async () => {}
+): Promise<void> {
+	for (;;) {
+		const roots = (
+			await db
+				.prepare(
+					'SELECT id, cache_id, store_path_hash FROM gc_root WHERE id > ?1 ORDER BY id LIMIT 100'
+				)
+				.bind(after)
+				.all<{ id: number; cache_id: number; store_path_hash: string }>()
+		).results;
+		for (const root of roots) {
+			try {
+				await gcWorkUnit(db, () => refreshGcRootStats(db, root.cache_id, root.store_path_hash));
+			} catch (error) {
+				if (error instanceof GcDeferred) throw error;
+				console.warn(`gc: root stats refresh failed for ${root.store_path_hash}: ${error}`);
+			}
+			after = root.id;
+			await done(after);
+		}
+		if (roots.length < 100) return;
+	}
 }
 
 /**
@@ -1126,9 +1380,9 @@ export async function detachClosure(
 		.bind(cacheId, hash, new Date().toISOString())
 		.run();
 
-	const tags = await reapDetachedForCache(db, cacheId, cacheName);
-	await purgeTagsBestEffort(ctx, tags);
-	return { detached: marked.meta.changes ?? 0, reaped: tags.length };
+	const result = await reapDetachedForCache(db, cacheId, cacheName);
+	await purgeTagsBestEffort(ctx, result.tags);
+	return { detached: marked.meta.changes ?? 0, reaped: result.count };
 }
 
 /**
@@ -1136,14 +1390,18 @@ export async function detachClosure(
  * tags of what was deleted — the delete+purge pairing every caller must
  * uphold (detachClosure purges immediately; the GC pass batches).
  */
-async function reapDetachedForCache(db: D1, cacheId: number, cacheName: string): Promise<string[]> {
-	const doomed = (await db.prepare(REAP_DETACHED_SQL).bind(cacheId).all<DoomedRow>()).results;
-	if (doomed.length === 0) return [];
-	await deleteObjects(
-		db,
-		doomed.map((d) => d.id)
-	);
-	return doomed.flatMap((d) => objectPurgeTags(cacheName, d));
+async function reapDetachedForCache(db: D1, cacheId: number, cacheName: string) {
+	return gcGraphWork(db, async () => {
+		const doomed = (await db.prepare(REAP_DETACHED_SQL).bind(cacheId).all<DoomedRow>()).results;
+		if (doomed.length === 0) return { count: 0, tags: [] as string[] };
+		await deleteObjects(
+			db,
+			doomed.map((d) => d.id),
+			cacheId,
+			cacheName
+		);
+		return { count: doomed.length, tags: doomed.flatMap((d) => objectPurgeTags(cacheName, d)) };
+	});
 }
 
 /**
@@ -1154,14 +1412,17 @@ async function detachedPass(
 	db: D1,
 	stats: GcStats,
 	dryRun: boolean,
-	purgeTags: string[]
+	purgeTags: string[] | undefined,
+	afterCache = 0,
+	cacheDone: (id: number) => Promise<void> = async () => {}
 ): Promise<void> {
 	const caches = (
 		await db
 			.prepare(
 				'SELECT DISTINCT c.id, c.name FROM object o JOIN cache c ON c.id = o.cache_id ' +
-					'WHERE o.detached_at IS NOT NULL AND c.deleted_at IS NULL'
+					'WHERE o.detached_at IS NOT NULL AND c.deleted_at IS NULL AND c.id > ?1 ORDER BY c.id'
 			)
+			.bind(afterCache)
 			.all<{ id: number; name: string }>()
 	).results;
 	for (const cache of caches) {
@@ -1172,10 +1433,12 @@ async function detachedPass(
 				stats.detached_objects_reaped += doomed.length;
 				continue;
 			}
-			const tags = await reapDetachedForCache(db, cache.id, cache.name);
-			stats.detached_objects_reaped += tags.length;
-			purgeTags.push(...tags);
+			const result = await reapDetachedForCache(db, cache.id, cache.name);
+			stats.detached_objects_reaped += result.count;
+			purgeTags?.push(...result.tags);
+			await cacheDone(cache.id);
 		} catch (e) {
+			if (e instanceof GcDeferred) throw e;
 			console.warn(`gc: detached pass failed for cache ${cache.name}: ${e}`);
 		}
 	}
@@ -1330,73 +1593,75 @@ async function reapAbandonedCaches(db: D1, stats: GcStats): Promise<void> {
  * has claimed them — and holds older than a day are treated as leaked by a
  * crashed request and recovered first (a real request lives minutes at most).
  */
-async function reapOrphans(env: Env, stats: GcStats): Promise<void> {
+async function reapOrphans(
+	env: Env,
+	stats: GcStats,
+	progress: GcProgress,
+	checkpoint: () => Promise<void>
+): Promise<void> {
 	const db = env.ATTIC_DB;
-	try {
-		const orphanNar =
-			'NOT EXISTS (SELECT 1 FROM object o WHERE o.nar_id = nar.id) ' +
-			"AND datetime(nar.created_at) < datetime('now', '-1 hours')";
-		const results = await db.batch([
-			db.prepare(
-				'UPDATE nar SET holders_count = 0, held_at = NULL WHERE holders_count > 0 ' +
-					"AND (held_at IS NULL OR datetime(held_at) < datetime('now', '-1 day')) " +
-					`AND ${orphanNar}`
-			),
-			db.prepare(
-				'DELETE FROM chunkref WHERE nar_id IN ' +
-					`(SELECT nar.id FROM nar WHERE nar.holders_count = 0 AND ${orphanNar})`
-			),
-			db.prepare(`DELETE FROM nar WHERE holders_count = 0 AND ${orphanNar}`)
-		]);
-		stats.orphan_nars_reaped = results[results.length - 1]?.meta.changes ?? 0;
-	} catch (e) {
-		console.warn(`gc: orphan NAR reap failed: ${e}`);
-	}
-
-	let orphans: { id: number; remote_file: string }[];
-	try {
-		await db
-			.prepare(
-				'UPDATE chunk SET holders_count = 0, held_at = NULL WHERE holders_count > 0 ' +
-					"AND (held_at IS NULL OR datetime(held_at) < datetime('now', '-1 day')) " +
-					'AND NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id)'
-			)
-			.run();
-		orphans = await claimOrphanChunks(db);
-	} catch (e) {
-		console.warn(`gc: find orphan chunks failed: ${e}`);
-		return;
-	}
-
-	// Bulk-delete: R2 accepts up to 1000 keys per call and D1 an IN-list, so
-	// the subrequest count stays flat. The per-chunk loop this replaces spent
-	// two subrequests per chunk and exhausted the invocation's ~1000-call
-	// budget after ~500 orphans, silently stalling on large backlogs.
-	for (let i = 0; i < orphans.length; i += R2_DELETE_BATCH) {
-		const batch = orphans.slice(i, i + R2_DELETE_BATCH);
-		const keys = batch.map(chunkKey).filter((k): k is string => k !== null);
-		try {
-			if (keys.length > 0) await env.CACHE_BUCKET.delete(keys);
-		} catch (e) {
-			// Keep the D1 rows so the next run retries the R2 delete.
-			console.warn(`gc: failed to delete ${keys.length} R2 chunk objects: ${e}`);
-			continue;
-		}
-		for (let j = 0; j < batch.length; j += PARAM_BATCH) {
-			const ids = batch.slice(j, j + PARAM_BATCH).map((c) => c.id);
-			const placeholders = ids.map((_, k) => `?${k + 1}`).join(', ');
+	if (!progress.orphanPrepared) {
+		await gcWorkUnit(db, async () => {
 			try {
-				// state = 'D' guards a row an upload took over after an earlier
-				// claim aged out (stageChunk): it is live again, not ours.
-				await db
-					.prepare(`DELETE FROM chunk WHERE state = 'D' AND id IN (${placeholders})`)
+				const orphanNar =
+					'NOT EXISTS (SELECT 1 FROM object o WHERE o.nar_id = nar.id) ' +
+					"AND datetime(nar.created_at) < datetime('now', '-1 hours')";
+				const results = await db.batch([
+					db.prepare(
+						'UPDATE nar SET holders_count = 0, held_at = NULL WHERE holders_count > 0 ' +
+							"AND (held_at IS NULL OR datetime(held_at) < datetime('now', '-1 day')) " +
+							`AND ${orphanNar}`
+					),
+					db.prepare(
+						'DELETE FROM chunkref WHERE nar_id IN ' +
+							`(SELECT nar.id FROM nar WHERE nar.holders_count = 0 AND ${orphanNar})`
+					),
+					db.prepare(`DELETE FROM nar WHERE holders_count = 0 AND ${orphanNar}`)
+				]);
+				stats.orphan_nars_reaped += results[results.length - 1]?.meta.changes ?? 0;
+			} catch (error) {
+				if (error instanceof GcDeferred) throw error;
+				console.warn(`gc: orphan NAR reap failed: ${error}`);
+			}
+			await db
+				.prepare(
+					'UPDATE chunk SET holders_count = 0, held_at = NULL WHERE holders_count > 0 ' +
+						"AND (held_at IS NULL OR datetime(held_at) < datetime('now', '-1 day')) " +
+						'AND NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id)'
+				)
+				.run();
+		});
+		progress.orphanPrepared = true;
+		await checkpoint();
+	}
+	for (;;) {
+		const batch = await gcWorkUnit(db, async () => {
+			const claimed = await claimOrphanChunks(db, progress.chunkAfter ?? 0, R2_DELETE_BATCH);
+			const keys = claimed.map(chunkKey).filter((k): k is string => k !== null);
+			try {
+				if (keys.length) await env.CACHE_BUCKET.delete(keys);
+			} catch (error) {
+				// Leave failed rows for the next sweep, as before; do not prevent
+				// later batches from finishing in this run.
+				console.warn(`gc: failed to delete ${keys.length} R2 chunk objects: ${error}`);
+				return claimed;
+			}
+			for (let i = 0; i < claimed.length; i += PARAM_BATCH) {
+				if (i > 0) gcCheckDeadline(db);
+				const ids = claimed.slice(i, i + PARAM_BATCH).map((c) => c.id);
+				const placeholders = ids.map((_, j) => `?${j + 1}`).join(', ');
+				const result = await db
+					.prepare(`DELETE FROM chunk WHERE state='D' AND id IN (${placeholders})`)
 					.bind(...ids)
 					.run();
-				stats.orphan_chunks_reaped += ids.length;
-			} catch (e) {
-				console.warn(`gc: failed to delete ${ids.length} chunk rows: ${e}`);
+				stats.orphan_chunks_reaped += result.meta.changes ?? 0;
 			}
-		}
+			return claimed;
+		});
+		if (!batch.length) return;
+		progress.chunkAfter = Math.max(...batch.map((c) => c.id));
+		await checkpoint();
+		if (batch.length < R2_DELETE_BATCH) return;
 	}
 }
 

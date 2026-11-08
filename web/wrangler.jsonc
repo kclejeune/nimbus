@@ -56,7 +56,7 @@
 	"limits": { "cpu_ms": 300000 },
 
 	// Nightly garbage collection (closure-aware retention, orphan reaping).
-	"triggers": { "crons": ["0 3 * * *"] },
+	"triggers": { "crons": ["0 3 * * *", "* * * * *"] },
 
 	// Custom domains: a full deployment needs two hostnames on a zone in your
 	// account — app.* serves the admin UI; the cache hostname is dispatched to

@@ -4,6 +4,14 @@ import { requireAdmin } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
 import { readSession } from '$lib/server/cache/db';
 import { gibFieldToBytes } from '$lib/format';
+import {
+	applyClosurePreview,
+	ClosureMaintenanceError,
+	inspectClosures,
+	readClosurePreview
+} from '$lib/server/cache/closure-maintenance';
+import { AdmissionError } from '$lib/server/cache/admission';
+import { CACHE_NAME_RE } from '$lib/utils';
 import type { PageServerLoad, Actions } from './$types';
 
 type Count = { n: number };
@@ -19,32 +27,93 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 	// stay on the primary because this page's own actions write them (the
 	// reloaded value must reflect a just-saved limit / just-run GC).
 	const read = readSession(db);
-	const [pending, orphanNars, orphanChunks, globalMaxBytes, gcLastRun] = await Promise.all([
-		read.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'P'").first<Count>(),
-		read
-			.prepare(
-				'SELECT COUNT(*) AS n FROM nar n WHERE NOT EXISTS (SELECT 1 FROM object o WHERE o.nar_id = n.id)'
-			)
-			.first<Count>(),
-		read
-			.prepare(
-				'SELECT COUNT(*) AS n FROM chunk WHERE NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id)'
-			)
-			.first<Count>(),
-		readGlobalMaxBytes(db),
-		readGcLastRun(db)
-	]);
+	const [pending, orphanNars, orphanChunks, globalMaxBytes, gcLastRun, closureCaches] =
+		await Promise.all([
+			read.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'P'").first<Count>(),
+			read
+				.prepare(
+					'SELECT COUNT(*) AS n FROM nar n WHERE NOT EXISTS (SELECT 1 FROM object o WHERE o.nar_id = n.id)'
+				)
+				.first<Count>(),
+			read
+				.prepare(
+					'SELECT COUNT(*) AS n FROM chunk WHERE NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id)'
+				)
+				.first<Count>(),
+			readGlobalMaxBytes(db),
+			readGcLastRun(db),
+			read
+				.prepare('SELECT id, name FROM cache WHERE deleted_at IS NULL ORDER BY name')
+				.all<{ id: number; name: string }>()
+		]);
 
 	return {
 		pendingNars: pending?.n ?? 0,
 		orphanNars: orphanNars?.n ?? 0,
 		orphanChunks: orphanChunks?.n ?? 0,
 		globalMaxBytes,
-		gcLastRun
+		gcLastRun,
+		closureCaches: closureCaches.results
 	};
 };
 
 export const actions: Actions = {
+	inspectClosures: async ({ request, locals, platform }) => {
+		requireAdmin(locals);
+		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
+		const fields = await request.formData();
+		const cache = String(fields.get('cache') ?? '');
+		if (!CACHE_NAME_RE.test(cache))
+			return fail(400, { maintenanceError: 'Select a cache to check.' });
+		try {
+			const closurePreview = await inspectClosures(
+				platform.env,
+				locals.user!.id,
+				cache,
+				String(fields.get('after') ?? ''),
+				request.headers.get('CF-Connecting-IP')
+			);
+			await writeAudit(platform.env.ATTIC_DB, {
+				userId: locals.user!.id,
+				action: 'cache.integrity.check',
+				target: cache,
+				detail: `Checked ${closurePreview.inspection.references.length} dependencies`
+			});
+			return { closurePreview };
+		} catch (e) {
+			return fail(maintenanceStatus(e), {
+				maintenanceError: `Dependency check failed: ${maintenanceMessage(e)}`
+			});
+		}
+	},
+	purgeClosures: async ({ request, locals, platform }) => {
+		requireAdmin(locals);
+		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
+		const field = (await request.formData()).get('preview');
+		const token = typeof field === 'string' ? field : '';
+		let inspection;
+		try {
+			inspection = await readClosurePreview(platform.env, locals.user!.id, token);
+			const closurePurge = await applyClosurePreview(
+				platform.env,
+				platform.ctx,
+				inspection,
+				request.headers.get('CF-Connecting-IP')
+			);
+			await writeAudit(platform.env.ATTIC_DB, {
+				userId: locals.user!.id,
+				action: 'cache.integrity.purge',
+				target: inspection.cache.name,
+				detail: `Removed ${closurePurge.removed} reviewed paths; edge invalidation pending: ${closurePurge.pending_purge}`
+			});
+			return { closurePreview: { inspection, token }, closurePurge };
+		} catch (e) {
+			return fail(maintenanceStatus(e), {
+				maintenanceError: `Path removal failed: ${maintenanceMessage(e)}`,
+				...(inspection ? { closurePreview: { inspection, token } } : {})
+			});
+		}
+	},
 	gc: async ({ request, locals, platform }) => {
 		requireAdmin(locals);
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
@@ -84,3 +153,15 @@ export const actions: Actions = {
 		return { limitSaved: true };
 	}
 };
+
+function maintenanceStatus(error: unknown) {
+	return error instanceof ClosureMaintenanceError
+		? error.status
+		: error instanceof AdmissionError
+			? 503
+			: 502;
+}
+
+function maintenanceMessage(error: unknown) {
+	return error instanceof Error ? error.message : String(error);
+}

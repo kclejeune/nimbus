@@ -3,10 +3,12 @@ import { AdmissionError } from './admission';
 import type { ExecutionContext } from './platform';
 import {
 	readViaStore,
+	readBestEffortViaStore,
 	readStoreMetadata,
 	withStoreRecovery,
 	STORE_BODY_IDLE_TIMEOUT_MS,
-	STORE_HEADER_TIMEOUT_MS
+	STORE_HEADER_TIMEOUT_MS,
+	STORE_BEST_EFFORT_TIMEOUT_MS
 } from './store-transport';
 
 const request = () => new Request('https://cache.test/_nar_v2/abc.nar');
@@ -187,6 +189,63 @@ it('recovers from a caching-layer 502 without waiting for broken cleanup', async
 	expect(await (await readViaStore(context(fetch), request(), direct)).text()).toBe('recovered');
 	expect(direct).toHaveBeenCalledOnce();
 	expect(cancel).toHaveBeenCalledOnce();
+});
+
+it('abandons optional headers promptly without origin recovery or poisoning required reads', async () => {
+	vi.useFakeTimers();
+	let resolve!: (response: Response) => void;
+	let signal!: AbortSignal;
+	const fetch = vi
+		.fn<(r: Request) => Promise<Response>>()
+		.mockImplementationOnce(async (r: Request) => {
+			signal = r.signal;
+			return new Promise<Response>((r) => (resolve = r));
+		})
+		.mockResolvedValueOnce(new Response('cached'));
+	const direct = vi.fn();
+	await withStoreRecovery(async () => {
+		const failed = expect(
+			readBestEffortViaStore(context(fetch), request(), direct)
+		).rejects.toBeInstanceOf(AdmissionError);
+		await vi.advanceTimersByTimeAsync(STORE_BEST_EFFORT_TIMEOUT_MS);
+		await failed;
+		expect(signal.aborted).toBe(true);
+		expect(await (await readViaStore(context(fetch), request(), direct)).text()).toBe('cached');
+	});
+	const cancel = vi.fn(() => new Promise<void>(() => {}));
+	resolve(new Response(new ReadableStream({ cancel })));
+	await vi.advanceTimersByTimeAsync(0);
+	expect(cancel).toHaveBeenCalledOnce();
+	expect(direct).not.toHaveBeenCalled();
+	expect(fetch).toHaveBeenCalledTimes(2);
+	expect(vi.getTimerCount()).toBe(0);
+});
+
+it('does not recover an optional caching-layer 502 against the origin', async () => {
+	const cancel = vi.fn(() => new Promise<void>(() => {}));
+	const direct = vi.fn();
+	await expect(
+		readBestEffortViaStore(
+			context(async () => new Response(new ReadableStream({ cancel }), { status: 502 })),
+			request(),
+			direct
+		)
+	).rejects.toBeInstanceOf(AdmissionError);
+	expect(direct).not.toHaveBeenCalled();
+	expect(cancel).toHaveBeenCalledOnce();
+});
+
+it('skips optional work after foreground recovery bypasses the store', async () => {
+	const fetch = vi.fn(async () => new Response(null, { status: 502 }));
+	const direct = vi.fn(async () => new Response('required'));
+	await withStoreRecovery(async () => {
+		await (await readViaStore(context(fetch), request(), direct)).text();
+		await expect(readBestEffortViaStore(context(fetch), request(), direct)).rejects.toBeInstanceOf(
+			AdmissionError
+		);
+	});
+	expect(fetch).toHaveBeenCalledOnce();
+	expect(direct).toHaveBeenCalledOnce();
 });
 
 it('preserves transport errors for the combined narinfo recovery policy', async () => {

@@ -46,6 +46,7 @@ interface Sample {
 	d1PrimarySqlMs: number;
 	d1Attempts: number;
 	candidate?: { source: string; listed: boolean };
+	metadataReads?: { origin: number; coalesced: number };
 	upload?: {
 		chunks: number;
 		rawBytes: number;
@@ -76,6 +77,12 @@ export function countLoopbackFallback(): void {
 export function candidateMetadata(source: string, listed: boolean): void {
 	const s = current.getStore();
 	if (s) s.candidate = { source, listed };
+}
+export function countMetadataRead(coalesced: boolean): void {
+	const s = current.getStore();
+	if (!s) return;
+	s.metadataReads ??= { origin: 0, coalesced: 0 };
+	s.metadataReads[coalesced ? 'coalesced' : 'origin']++;
 }
 export function uploadShape(
 	chunks: number,

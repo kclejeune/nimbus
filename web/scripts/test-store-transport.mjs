@@ -10,7 +10,7 @@ const { outputFiles } = await build({
 	bundle: true,
 	format: 'esm',
 	platform: 'browser',
-	external: ['node:*'],
+	external: ['node:*', 'cloudflare:workers'],
 	write: false
 });
 const mf = new Miniflare(
@@ -20,6 +20,7 @@ const mf = new Miniflare(
 		compatibilityDate: '2026-10-10',
 		compatibilityFlags: ['nodejs_compat'],
 		cf: false,
+		d1Databases: { ATTIC_DB: 'gc-pacing-fixture' },
 		telemetry: { enabled: false }
 	})
 );
@@ -28,6 +29,55 @@ const stream = async (size, mode = '') =>
 	fetch(new URL(`/_nar_v2/fixture.nar?size=${size}&mode=${mode}`, await mf.ready));
 
 try {
+	// Native D1 requires its own statements in batch(), including bound ones.
+	assert.deepEqual(await (await mf.dispatchFetch('https://cache.test/gc-pacing')).json(), {
+		n: 8,
+		statements: 4
+	});
+	// Distinct HTTP requests must await only their own I/O, even when sharing
+	// a completed metadata result. Node tests cannot enforce this Workers rule.
+	const coalescedUrl = new URL('/coalesced-read', await mf.ready);
+	const readers = await Promise.all(Array.from({ length: 6 }, () => fetch(coalescedUrl)));
+	assert.ok(readers.every((r) => r.status === 200));
+	assert.deepEqual(await Promise.all(readers.map((r) => r.json())), Array(6).fill({ value: 1 }));
+	assert.deepEqual(await (await fetch(coalescedUrl)).json(), { value: 2 });
+	const failingUrl = new URL('/coalesced-read?key=failed&fail=1', await mf.ready);
+	const failures = await Promise.all(Array.from({ length: 6 }, () => fetch(failingUrl)));
+	assert.ok(failures.every((r) => r.status === 503));
+	await Promise.all(failures.map((r) => r.text()));
+	assert.deepEqual(
+		await (await fetch(new URL('/coalesced-read?key=failed', await mf.ready))).json(),
+		{ value: 4 }
+	);
+	assert.equal((await stats()).activeTimers, 0);
+	// A real loopback that ignores abort must not follow an abandoned probe
+	// with a primary write. Its explicit deadline also rejects a queued start.
+	const touch = await fetch(new URL('/slow-touch', await mf.ready));
+	assert.equal(touch.status, 503);
+	assert.equal(await touch.text(), 'deferred');
+	await new Promise((resolve) => setTimeout(resolve, 400));
+	assert.deepEqual(await (await mf.dispatchFetch('https://cache.test/touch-stats')).json(), {
+		touchProbes: 1,
+		touchWrites: 0
+	});
+	// The gateway backoff is five seconds; the origin deadline test runs after it.
+	await new Promise((resolve) => setTimeout(resolve, 5_000));
+	const late = await fetch(new URL('/slow-touch?late', await mf.ready));
+	assert.equal(late.status, 503);
+	await late.text();
+	await new Promise((resolve) => setTimeout(resolve, 400));
+	assert.deepEqual(await (await mf.dispatchFetch('https://cache.test/touch-stats')).json(), {
+		touchProbes: 1,
+		touchWrites: 0
+	});
+	// An invocation can end without settling its lease. An uncached recovery
+	// in another real request must not join that abandoned fill.
+	assert.equal(await (await fetch(new URL('/abandon-fill', await mf.ready))).text(), 'registered');
+	const recovered = await fetch(new URL('/recover-fill', await mf.ready), {
+		signal: AbortSignal.timeout(5_000)
+	});
+	assert.equal(recovered.status, 200);
+	assert.deepEqual(await recovered.json(), { value: 42 });
 	// The completion collector uses native batching into its output buffer.
 	// Incorrect size hints must still trim/grow and enforce the byte limit.
 	for (const [size, hint] of [
@@ -43,6 +93,7 @@ try {
 		const result = await stats();
 		assert.equal(result.activeTimers, 0);
 		assert.equal(result.timers, 1);
+		assert.equal(result.collectedBytes, size);
 		if (hint === size) assert.ok(result.batchReads <= Math.ceil(size / 65536) + 1);
 	}
 	assert.equal((await stream(65537, 'collect&hint=65536&limit=65536')).status, 413);

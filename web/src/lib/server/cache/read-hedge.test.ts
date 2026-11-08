@@ -234,3 +234,160 @@ it('keeps the same primary rate cap when a burst of pending reads retries admiss
 	await Promise.all([...reads, ...tasks]);
 	expect(vi.getTimerCount()).toBe(0);
 });
+
+it('defers speculative primary reads after an overload, while still accepting a healthy replica', async () => {
+	const { noteD1Overload } = await import('./d1-pressure');
+	const { db, ctx, primary, tasks } = source();
+	noteD1Overload(new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'));
+	const replica = deferred<string>();
+	const primaryRead = vi.fn(async () => 'primary');
+	const result = hedge(db, ctx, (s) => (s === primary ? primaryRead() : replica.promise));
+	await vi.advanceTimersByTimeAsync(1_000);
+	expect(primaryRead).not.toHaveBeenCalled();
+	replica.resolve('replica');
+	expect(await result).toBe('replica');
+	expect(tasks).toHaveLength(0);
+});
+
+it('resumes bounded speculation after the last overload cooldown expires', async () => {
+	const { noteD1Overload } = await import('./d1-pressure');
+	const { db, ctx, primary, tasks } = source();
+	noteD1Overload(new Error('D1 DB is overloaded'));
+	const replica = deferred<string>();
+	const primaryRead = vi.fn(async () => 'primary');
+	const result = hedge(db, ctx, (s) => (s === primary ? primaryRead() : replica.promise));
+	await vi.advanceTimersByTimeAsync(1_000);
+	// A recovered retry elsewhere can report fresh pressure while this read waits.
+	noteD1Overload(new Error('Requests queued for too long'));
+	await vi.advanceTimersByTimeAsync(1_999);
+	expect(primaryRead).not.toHaveBeenCalled();
+	await vi.advanceTimersByTimeAsync(300);
+	expect(await result).toBe('primary');
+	expect(primaryRead).toHaveBeenCalledOnce();
+	replica.resolve('late replica');
+	await Promise.all(tasks);
+});
+
+it('delays overload-driven primary failover until pressure backoff expires', async () => {
+	const log = vi.spyOn(console, 'log');
+	const { noteD1Overload } = await import('./d1-pressure');
+	noteD1Overload(new Error('D1 DB is overloaded'));
+	const { db, ctx, primary, tasks, withSession } = source();
+	const result = hedge(db, ctx, async (session) => {
+		if (session !== primary) throw new Error('D1 DB is overloaded. Requests queued for too long.');
+		return 'recovered';
+	});
+	await vi.advanceTimersByTimeAsync(1_999);
+	expect(withSession.mock.calls.filter(([c]) => c === 'first-primary')).toHaveLength(0);
+	await vi.advanceTimersByTimeAsync(300);
+	expect(await result).toBe('recovered');
+	await Promise.all(tasks);
+	expect(log.mock.calls.map(([entry]) => JSON.parse(String(entry)))).toContainEqual(
+		expect.objectContaining({
+			event: 'nimbus.d1_hedge',
+			reason: 'error',
+			replicaOverloaded: true,
+			winner: 'primary'
+		})
+	);
+});
+
+it('observes overload on a retry that succeeds before the hedge timer', async () => {
+	vi.spyOn(Math, 'random').mockReturnValue(0);
+	const { withD1Retry } = await import('./db');
+	const { d1OverloadDelay } = await import('./d1-pressure');
+	const run = vi
+		.fn()
+		.mockRejectedValueOnce(new Error('Requests queued for too long'))
+		.mockResolvedValue('recovered');
+	const result = withD1Retry(run);
+	await vi.advanceTimersByTimeAsync(250);
+	expect(await result).toBe('recovered');
+	expect(d1OverloadDelay()).toBe(1_750);
+});
+
+it.each(['Network connection lost.', 'internal error; reference = abc123'])(
+	'still fails over promptly on %s while other reads report overload',
+	async (message) => {
+		const { noteD1Overload } = await import('./d1-pressure');
+		noteD1Overload(new Error('D1 DB is overloaded'));
+		const { db, ctx, primary, tasks } = source();
+		expect(
+			await hedge(db, ctx, async (session) => {
+				if (session !== primary) throw new Error(`D1_ERROR: ${message}`);
+				return 'primary';
+			})
+		).toBe('primary');
+		await Promise.all(tasks);
+	}
+);
+
+it('bounds an overload failure waiting behind continuously renewed pressure', async () => {
+	const { noteD1Overload } = await import('./d1-pressure');
+	const { db, ctx, withSession } = source();
+	const error = new Error('D1 DB is overloaded');
+	noteD1Overload(error);
+	const result = hedge(db, ctx, async () => {
+		throw error;
+	});
+	const failed = expect(result).rejects.toBe(error);
+	for (let i = 0; i < 10; i++) {
+		noteD1Overload(error);
+		await vi.advanceTimersByTimeAsync(500);
+	}
+	await failed;
+	expect(withSession.mock.calls.filter(([c]) => c === 'first-primary')).toHaveLength(0);
+	expect(vi.getTimerCount()).toBe(0);
+});
+
+it('shares two retries across replica and primary instead of retrying both independently', async () => {
+	vi.spyOn(Math, 'random').mockReturnValue(0);
+	const { withD1Retry } = await import('./db');
+	const { db, ctx, primary, tasks } = source();
+	const error = new Error('D1 DB is overloaded. Requests queued for too long.');
+	const attempts: D1Database[] = [];
+	const result = hedge(db, ctx, (session) =>
+		withD1Retry(async () => {
+			attempts.push(session);
+			throw error;
+		})
+	);
+	const failed = expect(result).rejects.toBe(error);
+	await vi.advanceTimersByTimeAsync(5_000);
+	await failed;
+	await Promise.all(tasks);
+	expect(attempts).toHaveLength(4);
+	expect(attempts.filter((s) => s === primary)).toHaveLength(1);
+});
+
+it('does not retry a losing replica after a primary response has succeeded', async () => {
+	const { withD1Retry } = await import('./db');
+	const { db, ctx, primary, tasks } = source();
+	const replica = deferred<string>();
+	const run = vi.fn(() => replica.promise);
+	const result = hedge(db, ctx, (session) =>
+		session === primary ? Promise.resolve('primary') : withD1Retry(run)
+	);
+	await vi.advanceTimersByTimeAsync(500);
+	expect(await result).toBe('primary');
+	replica.reject(new Error('D1_ERROR: Network connection lost.'));
+	await Promise.all(tasks);
+	await vi.advanceTimersByTimeAsync(2_000);
+	expect(run).toHaveBeenCalledOnce();
+});
+
+it.each(['synchronous', 'asynchronous'])(
+	'notes overload on the final %s attempt without retrying it',
+	async (mode) => {
+		const { withD1Retry } = await import('./db');
+		const { d1OverloadDelay } = await import('./d1-pressure');
+		const error = new Error('D1 DB is overloaded. Requests queued for too long.');
+		const run = vi.fn((): Promise<string> => {
+			if (mode === 'synchronous') throw error;
+			return Promise.reject(error);
+		});
+		await expect(withD1Retry(run, 1)).rejects.toBe(error);
+		expect(run).toHaveBeenCalledOnce();
+		expect(d1OverloadDelay()).toBe(2_000);
+	}
+);
