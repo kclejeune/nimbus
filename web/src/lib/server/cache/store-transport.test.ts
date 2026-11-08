@@ -182,14 +182,17 @@ it('abandons stalled cache headers and cleans up a late response without delayin
 	expect(vi.getTimerCount()).toBe(0);
 });
 
-it('recovers from a caching-layer 502 without waiting for broken cleanup', async () => {
-	const cancel = vi.fn(() => new Promise<void>(() => {}));
-	const fetch = async () => new Response(new ReadableStream({ cancel }), { status: 502 });
-	const direct = vi.fn(async () => new Response('recovered'));
-	expect(await (await readViaStore(context(fetch), request(), direct)).text()).toBe('recovered');
-	expect(direct).toHaveBeenCalledOnce();
-	expect(cancel).toHaveBeenCalledOnce();
-});
+it.each([502, 520])(
+	'recovers from a caching-layer %i without waiting for broken cleanup',
+	async (status) => {
+		const cancel = vi.fn(() => new Promise<void>(() => {}));
+		const fetch = async () => new Response(new ReadableStream({ cancel }), { status });
+		const direct = vi.fn(async () => new Response('recovered'));
+		expect(await (await readViaStore(context(fetch), request(), direct)).text()).toBe('recovered');
+		expect(direct).toHaveBeenCalledOnce();
+		expect(cancel).toHaveBeenCalledOnce();
+	}
+);
 
 it('abandons optional headers promptly without origin recovery or poisoning required reads', async () => {
 	vi.useFakeTimers();
@@ -221,19 +224,22 @@ it('abandons optional headers promptly without origin recovery or poisoning requ
 	expect(vi.getTimerCount()).toBe(0);
 });
 
-it('does not recover an optional caching-layer 502 against the origin', async () => {
-	const cancel = vi.fn(() => new Promise<void>(() => {}));
-	const direct = vi.fn();
-	await expect(
-		readBestEffortViaStore(
-			context(async () => new Response(new ReadableStream({ cancel }), { status: 502 })),
-			request(),
-			direct
-		)
-	).rejects.toBeInstanceOf(AdmissionError);
-	expect(direct).not.toHaveBeenCalled();
-	expect(cancel).toHaveBeenCalledOnce();
-});
+it.each([502, 520])(
+	'does not recover an optional caching-layer %i against the origin',
+	async (status) => {
+		const cancel = vi.fn(() => new Promise<void>(() => {}));
+		const direct = vi.fn();
+		await expect(
+			readBestEffortViaStore(
+				context(async () => new Response(new ReadableStream({ cancel }), { status })),
+				request(),
+				direct
+			)
+		).rejects.toBeInstanceOf(AdmissionError);
+		expect(direct).not.toHaveBeenCalled();
+		expect(cancel).toHaveBeenCalledOnce();
+	}
+);
 
 it('skips optional work after foreground recovery bypasses the store', async () => {
 	const fetch = vi.fn(async () => new Response(null, { status: 502 }));
@@ -468,4 +474,47 @@ it('does not retry a backend refusal or a failed uncached metadata retry', async
 		)
 	).rejects.toThrow('origin unavailable');
 	expect(direct).toHaveBeenCalledOnce();
+});
+
+it.each([429, 500, 503])(
+	'preserves an origin %i instead of multiplying backend work',
+	async (status) => {
+		const direct = vi.fn();
+		const response = await readViaStore(
+			context(async () => new Response('busy', { status })),
+			request(),
+			direct
+		);
+		expect(response.status).toBe(status);
+		expect(await response.text()).toBe('busy');
+		expect(direct).not.toHaveBeenCalled();
+	}
+);
+
+it('correlates slow successful headers with the store invocation without changing its URL', async () => {
+	vi.useFakeTimers();
+	let seen: Request | undefined;
+	const result = readViaStore(
+		context(async (r) => {
+			seen = r;
+			await new Promise((resolve) => setTimeout(resolve, 600));
+			return new Response('ok', { headers: { 'CF-Cache-Status': 'MISS' } });
+		}),
+		request(),
+		vi.fn()
+	);
+	await vi.advanceTimersByTimeAsync(600);
+	expect(await (await result).text()).toBe('ok');
+	expect(seen!.url).toBe(request().url);
+	const event = vi
+		.mocked(console.log)
+		.mock.calls.map(([s]) => JSON.parse(s))
+		.find((e) => e.event === 'nimbus.store_headers');
+	expect(event).toMatchObject({
+		requestId: seen!.headers.get('X-Nimbus-Store-Request'),
+		status: 200,
+		edge: 'MISS',
+		headerMs: expect.any(Number)
+	});
+	expect(event.requestId).toMatch(/^[0-9a-f-]{36}$/);
 });

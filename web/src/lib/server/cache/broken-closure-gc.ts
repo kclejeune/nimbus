@@ -4,6 +4,7 @@ import { dbAll, dbBatch, dbFirst, dbRun } from './db';
 import { checkReferences, uncoveredReferences } from './closure-repair';
 import { applyPurge, purgePlan, readPurgeUpstreams } from './closure-purge';
 import type { ExecutionContext } from './platform';
+import { GcDeferred } from './gc-pacing';
 
 type Env = App.Platform['env'];
 type State = {
@@ -21,7 +22,11 @@ const WALL_BUDGET_MS = 60_000;
 /** One enabled cache per invocation, oldest-run first. Bounded discovery and
  * oldest-checked observations share the probe budget, so existing failures
  * cannot permanently starve unseen references. Cursors wrap across nights. */
-export async function runBrokenClosureGc(env: Env, ctx?: ExecutionContext) {
+export async function runBrokenClosureGc(
+	env: Env,
+	ctx?: ExecutionContext,
+	scan?: { cacheId?: number; checkpoint: (cacheId: number) => Promise<void> }
+) {
 	const stats = {
 		automatic_refs_checked: 0,
 		automatic_refs_waiting: 0,
@@ -32,12 +37,15 @@ export async function runBrokenClosureGc(env: Env, ctx?: ExecutionContext) {
 	};
 	const db = env.ATTIC_DB;
 	const cache = await dbFirst<{ id: number; name: string; days: number }>(
-		db.prepare(
-			`SELECT c.id,c.name,c.purge_broken_after_days AS days FROM cache c
+		db
+			.prepare(
+				`SELECT c.id,c.name,c.purge_broken_after_days AS days FROM cache c
      LEFT JOIN broken_purge_state s ON s.cache_id=c.id
      WHERE c.deleted_at IS NULL AND c.purge_broken_after_days IS NOT NULL
+     AND (?1 IS NULL OR c.id=?1)
      ORDER BY COALESCE(s.last_run_at,''),c.id LIMIT 1`
-		)
+			)
+			.bind(scan?.cacheId ?? null)
 	);
 	if (!cache) return stats;
 	const started = Date.now(),
@@ -82,13 +90,30 @@ export async function runBrokenClosureGc(env: Env, ctx?: ExecutionContext) {
 				)
 				.bind(cache.id, Math.floor(limit / 2))
 		);
-		const page = await uncoveredReferences(
-			db,
-			cache.id,
-			upstreams,
-			state.after_hash,
-			Math.ceil(limit / 2)
-		);
+		let page;
+		while (true) {
+			page = await uncoveredReferences(
+				db,
+				cache.id,
+				upstreams,
+				state.after_hash,
+				Math.ceil(limit / 2),
+				!!scan
+			);
+			if (page.references.length || !page.next_cursor) break;
+			// A mostly covered window still made progress. Save before yielding;
+			// resuming this GC job must not restart it or rotate to another cache.
+			await dbRun(
+				db
+					.prepare(
+						`UPDATE broken_purge_state SET after_hash=?2
+			 WHERE cache_id=?1 AND policy_days=?3 AND upstream_config=?4`
+					)
+					.bind(cache.id, page.next_cursor, cache.days, config)
+			);
+			state.after_hash = page.next_cursor;
+			await scan!.checkpoint(cache.id);
+		}
 		const hashes = [
 			...new Set([...tracked.results.map((r) => r.ref_hash), ...page.references.map((r) => r.hash)])
 		];
@@ -212,6 +237,7 @@ export async function runBrokenClosureGc(env: Env, ctx?: ExecutionContext) {
 		}
 		stats.automatic_purge_deferred += queue.length;
 	} catch (error) {
+		if (error instanceof GcDeferred) throw error;
 		stats.automatic_purge_errors++;
 		console.warn('gc: automatic broken-closure pass failed', { cache: cache.name, error });
 	}

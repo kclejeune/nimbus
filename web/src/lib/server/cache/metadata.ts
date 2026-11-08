@@ -129,7 +129,7 @@ export async function disposeLoopback(response: Response | undefined): Promise<v
 
 /**
  * Serve a read through the CachedStore loopback when it is available, else
- * directly. Caching-layer 502s and stalled headers get one uncached
+ * directly. Caching-layer 502/520s and stalled headers get one uncached
  * attempt; source-body stalls abort the transfer so clients can retry.
  */
 export function viaStore(

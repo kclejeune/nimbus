@@ -125,7 +125,8 @@ interface StreamChunk {
 export function streamObservation(
 	chunks: number,
 	bytes: number | null,
-	narHash?: string
+	narHash?: string,
+	request?: Request
 ): StreamObserver {
 	const sample = current.getStore();
 	const started = performance.now();
@@ -149,6 +150,9 @@ export function streamObservation(
 				layer: 'store',
 				status,
 				narHash,
+				range: request?.headers.get('Range'),
+				requestAborted: request?.signal.aborted,
+				abortReason: request?.signal.aborted ? String(request.signal.reason) : undefined,
 				chunk,
 				error:
 					error instanceof Error ? error.message : error === undefined ? undefined : String(error),

@@ -2,6 +2,7 @@ import { AdmissionError } from './admission';
 import { countLoopbackFallback } from './latency';
 import { BODY_READ_BYTES, withinMs, type BatchReader, type ExecutionContext } from './platform';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { withSpan } from './tracing';
 
 // Leave room for upstream probes' five-second timeout and normal backend
 // work, but bound the 60–70 s caching-pipeline stalls seen in production.
@@ -14,6 +15,12 @@ interface Recovery {
 	bypass: boolean;
 }
 const recovery = new AsyncLocalStorage<Recovery>();
+
+/** These statuses are minted by the caching pipeline, never by CachedStore.
+ * Keep origin refusals (especially 429/503 admission) out of recovery. */
+export const isStoreTransportFailure = (status: number): boolean =>
+	status === 502 || status === 520;
+export const STORE_REQUEST_ID_HEADER = 'X-Nimbus-Store-Request';
 
 /** A failed transport bypasses further loopbacks in this recovery path.
  * Successful calls never consume another call's timeout or cache access. */
@@ -86,6 +93,10 @@ function guardBody(response: Response, request: Request, abort: AbortController)
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let controller: ReadableStreamDefaultController<Uint8Array>;
 	const details = () => ({
+		range: request.headers.get('Range'),
+		contentRange: response.headers.get('Content-Range'),
+		requestAborted: request.signal.aborted,
+		abortReason: request.signal.aborted ? String(request.signal.reason) : undefined,
 		bytes,
 		expectedBytes: length,
 		edge: response.headers.get('CF-Cache-Status'),
@@ -128,6 +139,14 @@ function guardBody(response: Response, request: Request, abort: AbortController)
 	const cancel = (reason: unknown) => {
 		if (finished) return;
 		logBody('cancelled');
+		console.log(
+			JSON.stringify({
+				event: 'nimbus.body.cancel',
+				path: new URL(request.url).pathname,
+				...details(),
+				reason: String(reason)
+			})
+		);
 		stop(reason);
 	};
 	const fail = (error: unknown, reason = 'body_error') => {
@@ -258,18 +277,56 @@ async function readStore(
 	if (!store || state.bypass) return direct();
 	const abort = new AbortController();
 	const signal = AbortSignal.any([request.signal, abort.signal]);
-	const pending = store.fetch(new Request(request, { signal }));
+	const internal = new Request(request, { signal });
+	const requestId = crypto.randomUUID();
+	internal.headers.set(STORE_REQUEST_ID_HEADER, requestId);
+	const started = performance.now();
+	const pending = store.fetch(internal);
 	// Transport exceptions retain the caller's existing recovery policy (the
 	// combined narinfo route retries through separate cached metadata/body reads).
-	const response = await withinMs(
-		pending,
-		bestEffort ? STORE_BEST_EFFORT_TIMEOUT_MS : STORE_HEADER_TIMEOUT_MS
-	);
-	if (response && response.status !== 502)
+	const response = await withSpan(ctx, 'store loopback headers', async (span) => {
+		span?.setAttribute('nimbus.store_request_id', requestId);
+		try {
+			const result = await withinMs(
+				pending,
+				bestEffort ? STORE_BEST_EFFORT_TIMEOUT_MS : STORE_HEADER_TIMEOUT_MS
+			);
+			span?.setAttribute('http.response.status_code', result?.status ?? 0);
+			return result;
+		} catch (error) {
+			diagnostic(request, 'headers', {
+				reason: 'transport_error',
+				requestId,
+				headerMs: performance.now() - started,
+				error: String(error)
+			});
+			throw error;
+		}
+	});
+	const headerMs = performance.now() - started;
+	if (response && !isStoreTransportFailure(response.status)) {
+		if (headerMs >= 500)
+			console.log(
+				JSON.stringify({
+					event: 'nimbus.store_headers',
+					path: new URL(request.url).pathname,
+					requestId,
+					status: response.status,
+					headerMs,
+					edge: response.headers.get('CF-Cache-Status'),
+					age: response.headers.get('Age')
+				})
+			);
 		return bestEffort ? response : guardBody(response, request, abort);
+	}
 	if (request.signal.aborted) throw request.signal.reason;
-	const reason = response ? '502' : 'header_timeout';
-	diagnostic(request, 'headers', { reason, ...(bestEffort ? { recovery: 'skipped' } : {}) });
+	const reason = response ? String(response.status) : 'header_timeout';
+	diagnostic(request, 'headers', {
+		reason,
+		requestId,
+		headerMs,
+		...(bestEffort ? { recovery: 'skipped' } : {})
+	});
 	// Abort is best-effort: a transport that ignores the signal may still
 	// produce a response. Dispose that late body without awaiting it or adding
 	// a permanently pending waitUntil task to this request.

@@ -66,3 +66,25 @@ helping these already indexed point lookups.
 Revisit this decision if maintenance becomes frequent or production telemetry
 shows these queries dominating normal traffic. Cloudflare documents how to
 [verify index usage and weigh read savings against write costs](https://developers.cloudflare.com/d1/best-practices/use-indexes/).
+
+## November 8: bound maintenance work before adding indexes
+
+Read-only Insights showed uncovered-reference discovery averaging 2.94 seconds,
+integrity counts averaging 1.91 seconds and about 1.74 million rows per count,
+and abandoned-cache object deletes averaging 1.78 seconds while removing no
+rows. Integrity probing, counting and example selection previously shared one
+pacing unit, allowing several full scans before a yield.
+
+The follow-up uses existing indexes: bounded 512-hash discovery windows for
+background GC, resumable 256-object integrity pages with per-parent EXISTS,
+and a cheap cache-existence check before abandoned-cache deletion. Counts and
+examples share the same bounded read, and completed probes/pages are saved
+before yielding. The report remains advisory across concurrent mutations;
+destructive maintenance retains its fresh graph and atomic policy guards.
+
+Two read-only production samples took 16.7 ms for a 512-hash window and 28.7 ms
+for one 256-object integrity page. Those demonstrate bounded units, not a
+whole-run speedup. After deployment, compare total SQL time, rows read/written,
+resource deferrals, completion through ANALYZE and foreground header tails.
+The single upstream-probe selection and ANALYZE can still exceed the soft SQL
+budget individually. No new index or migration is required for this batch.

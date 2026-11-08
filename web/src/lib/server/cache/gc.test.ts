@@ -461,3 +461,116 @@ it.each(['cache', 'global'])(
 		expect(f.count('object')).toBe(0);
 	}
 );
+
+it('checkpoints integrity probes and bounded report pages without repeating completed scans', async () => {
+	vi.useFakeTimers();
+	vi.setSystemTime(new Date('2026-11-08T12:00:00Z'));
+	const f = fixture(600);
+	f.sqlite.exec('UPDATE cache SET retention_period=NULL');
+	// Real Nix reference hashes are 32 characters; use the same missing edge for every parent.
+	f.sqlite
+		.prepare('UPDATE object SET refs=?')
+		.run(JSON.stringify(['z'.repeat(32) + '-dependency']));
+	const prepare = f.db.prepare.bind(f.db);
+	let probes = 0;
+	const pages: number[] = [];
+	vi.spyOn(f.db, 'prepare').mockImplementation((sql) => {
+		const stmt = prepare(sql);
+		if (sql.includes('SELECT r.ref_hash AS h') || sql.includes('AS incomplete')) {
+			const all = stmt.all.bind(stmt);
+			stmt.all = async <T>() => {
+				const result = await all<T>();
+				if (sql.includes('AS incomplete')) pages.push(result.results.length);
+				else probes++;
+				if (result.results.length) result.meta.duration = 1_100;
+				return result;
+			};
+		}
+		return stmt;
+	});
+	const analyze = vi.spyOn(f.db, 'exec');
+	await continueScheduledGc(f.env, undefined, true);
+	expect(f.job()).toMatchObject({ phase: 7, integrityWork: { probed: true, after: 0 } });
+	expect(pages).toEqual([]);
+	for (let i = 0; f.job() && i < 10; i++) {
+		vi.advanceTimersByTime(60_000);
+		await continueScheduledGc(f.env);
+	}
+	expect(f.job()).toBeNull();
+	expect(probes).toBe(1);
+	expect(pages).toEqual([256, 256, 88, 0]);
+	const summary = JSON.parse(
+		String(f.sqlite.prepare("SELECT value FROM server_config WHERE key='gc_last_run'").get()!.value)
+	);
+	expect(summary.integrity.incompleteObjects).toBe(600);
+	expect(summary.integrity.examples).toHaveLength(20);
+	expect(summary.integrity.examples[0]).toContain('00000000000000000000000000000001');
+	expect(analyze).toHaveBeenCalledWith('ANALYZE');
+});
+
+it('skips abandoned-cache deletion scans when no cache is eligible', async () => {
+	const f = fixture();
+	const prepare = f.db.prepare.bind(f.db);
+	const queries: string[] = [];
+	vi.spyOn(f.db, 'prepare').mockImplementation((sql) => {
+		queries.push(sql);
+		return prepare(sql);
+	});
+	await runGc(f.env, { integrityReport: false });
+	expect(queries.some((q) => q.startsWith('DELETE FROM object WHERE cache_id IN'))).toBe(false);
+});
+
+it('resumes bounded broken-closure discovery past covered windows on the same cache', async () => {
+	vi.useFakeTimers();
+	vi.setSystemTime(new Date('2026-11-08T12:00:00Z'));
+	const f = fixture(1026);
+	f.sqlite.exec('UPDATE cache SET retention_period=NULL,purge_broken_after_days=7');
+	const missing = 'z'.repeat(32) + '-missing';
+	const refs = Array.from({ length: 1025 }, (_, i) => String(i + 2).padStart(32, '0') + '-fixture');
+	f.sqlite.prepare('UPDATE object SET refs=? WHERE id=1').run(JSON.stringify([...refs, missing]));
+	const prepare = f.db.prepare.bind(f.db);
+	const windows: number[] = [];
+	vi.spyOn(f.db, 'prepare').mockImplementation((sql) => {
+		const stmt = prepare(sql);
+		if (sql.includes('SELECT ref_hash FROM object_ref WHERE ref_hash > ?1')) {
+			const all = stmt.all.bind(stmt);
+			stmt.all = async <T>() => {
+				const result = await all<T>();
+				windows.push(result.results.length);
+				result.meta.duration = 1_100;
+				return result;
+			};
+		}
+		return stmt;
+	});
+	await continueScheduledGc(f.env, undefined, true);
+	expect(f.job()).toMatchObject({ phase: 6, brokenCacheId: 1 });
+	const after = f.sqlite
+		.prepare('SELECT after_hash FROM broken_purge_state WHERE cache_id=1')
+		.get()!.after_hash;
+	expect(after).toBe(String(513).padStart(32, '0'));
+	// A second enabled cache must not steal the continuation after last_run_at changed.
+	f.sqlite
+		.prepare(
+			"INSERT INTO cache(id,name,keypair,purge_broken_after_days,created_at) VALUES(2,'second','k',7,?)"
+		)
+		.run(new Date().toISOString());
+	for (let i = 0; f.job() && i < 10; i++) {
+		vi.advanceTimersByTime(60_000);
+		await continueScheduledGc(f.env);
+	}
+	expect(f.job()).toBeNull();
+	expect(windows).toEqual([513, 513, 2]);
+	expect(f.sqlite.prepare('SELECT COUNT(*) AS n FROM broken_purge_state').get()!.n).toBe(1);
+	expect(f.sqlite.prepare('SELECT ref_hash FROM broken_reference').get()!.ref_hash).toBe(
+		'z'.repeat(32)
+	);
+	const summary = JSON.parse(
+		String(f.sqlite.prepare("SELECT value FROM server_config WHERE key='gc_last_run'").get()!.value)
+	);
+	expect(summary.stats).toMatchObject({
+		automatic_refs_checked: 1,
+		automatic_purge_errors: 0,
+		automatic_objects_removed: 0
+	});
+});

@@ -213,8 +213,14 @@ query or reachability/deletion unit can exceed it. Background GC yields to
 cron when its budget or 20-second slice is exhausted; it does not accumulate
 pacing sleeps inside a phase. Root refreshes checkpoint each completed
 read/update pair, and orphan cleanup checkpoints preparation and bounded chunk
-batches. Large deletion units finish at least one atomic batch after a slow
-selection, then check the deadline before further batches and select victims
+batches. Integrity monitoring checkpoints its probe separately, then counts
+and collects examples in pages of 256 objects. Automatic broken-closure
+discovery scans 512 reference hashes at a time and saves covered-window cursors
+before yielding; the same cache resumes on the next cron. Interactive Settings
+and CLI result pagination is unchanged. Normal budget yields are informational;
+resource rejections and unexpected errors remain warnings. Large deletion
+units finish at least one atomic batch after a slow selection, then check the
+deadline before further batches and select victims
 afresh on resume. Manual GC retains inline pacing. The `nimbus.gc.phase` and
 `nimbus.gc.deferred` events report cumulative SQL time, rows read/written,
 statement counts and pacing waits for that invocation.

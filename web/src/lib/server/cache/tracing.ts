@@ -8,7 +8,11 @@ const tracingOf = (ctx: unknown) => (ctx as { tracing?: Tracing } | undefined)?.
 
 /** Custom spans need tracing enabled in the Worker's observability config;
  * a deployment without it (the template allows that) must still serve. */
-export function withSpan<T>(ctx: unknown, name: string, fn: () => Promise<T>): Promise<T> {
+export function withSpan<T>(
+	ctx: unknown,
+	name: string,
+	fn: (span?: Span) => Promise<T>
+): Promise<T> {
 	const tracing = tracingOf(ctx);
 	if (typeof tracing?.enterSpan !== 'function') return fn();
 	return tracing.enterSpan(name, fn);

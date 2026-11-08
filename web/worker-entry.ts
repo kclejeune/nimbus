@@ -22,6 +22,7 @@ import {
 } from './src/lib/server/cache/purge';
 import { withRequestSpan, withSpan } from './src/lib/server/cache/tracing';
 import { observeRequest, routeTemplate } from './src/lib/server/cache/latency';
+import { STORE_REQUEST_ID_HEADER } from './src/lib/server/cache/store-transport';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import sveltekit from './.svelte-kit/cloudflare/_worker.js';
 import { continueScheduledGc } from './src/lib/server/cache/gc';
@@ -54,7 +55,12 @@ export class CachedStore extends WorkerEntrypoint {
 		// nimbus.latency line and traces are sampled, so without this the
 		// stuck route is unknowable after the fact.
 		console.log(
-			JSON.stringify({ event: 'nimbus.store', route, path: new URL(request.url).pathname })
+			JSON.stringify({
+				event: 'nimbus.store',
+				route,
+				path: new URL(request.url).pathname,
+				requestId: request.headers.get(STORE_REQUEST_ID_HEADER)
+			})
 		);
 		return withRequestSpan(this.ctx, route, 'store', () =>
 			observeRequest(

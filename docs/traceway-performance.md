@@ -234,3 +234,28 @@ run order with equivalent fresh state for multiple trials. Record total push
 wall time as well as per-completion headers, compressed bytes/chunks, D1 retry
 and hedge outcomes, R2 time, admission waits and `upload.prefetchedChunks`.
 The default stays at five jobs until those measurements show a useful tradeoff.
+
+## Correlating cold reads and interrupted downloads
+
+A `store loopback headers` span records `nimbus.store_request_id` and the
+returned status. Requests that take at least 500 ms emit `nimbus.store_headers`
+with that `requestId`, header time, edge cache status and age. The matching
+`nimbus.store` entry log carries the same ID when CachedStore executes. This
+connects gateway wait time to origin entry even when an inner trace was not
+retained; an edge hit has no store invocation. IDs travel in an internal header
+and do not change the cache URL or cache policy. Transport failures retain
+`nimbus.store_transport` diagnostics and one uncached recovery attempt for
+pipeline-generated 502/520 responses; origin admission refusals remain intact.
+
+Download body errors include range headers, observed request-abort state and
+its reason alongside byte/read progress. Explicit downstream cancellations emit
+`nimbus.body.cancel`. Store chunk-pump events carry request-abort context and the
+actual chunk source. Workers Caching strips Range before calling CachedStore,
+so the gateway body event is the useful range record. A network disconnect
+without an observed abort remains unexplained; do not infer that storage or
+the client caused it, or restart an already-delivered compressed byte stream.
+
+Traceway's non-stream impact score includes successful requests that exceed
+its Apdex latency bound. Its volume-based explanation must describe these as
+slow or failing requests, rather than HTTP errors. Use request-list HTTP status
+statistics and gateway header timings to distinguish latency from availability.

@@ -131,3 +131,24 @@ it('records the completed prefix and pipe phase when a later chunk fails', async
 		errorCause: 'source reset'
 	});
 });
+
+it('records request abort and range context without classifying every disconnect as cancellation', () => {
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const abort = new AbortController();
+	const request = new Request('https://cache.test/_nar_v2/abc.nar', {
+		signal: abort.signal,
+		headers: { Range: 'bytes=1024-' }
+	});
+	const stream = streamObservation(2, 4096, 'abc', request);
+	stream.finish('error', new Error('Network connection lost'));
+	expect(JSON.parse(log.mock.calls.at(-1)![0])).toMatchObject({
+		requestAborted: false,
+		range: 'bytes=1024-'
+	});
+	abort.abort(new Error('caller stopped'));
+	stream.finish('error', new Error('Network connection lost'));
+	expect(JSON.parse(log.mock.calls.at(-1)![0])).toMatchObject({
+		requestAborted: true,
+		abortReason: 'Error: caller stopped'
+	});
+});

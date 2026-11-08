@@ -226,34 +226,37 @@ describe('store hardening', () => {
 		await Promise.all(tasks);
 	});
 
-	it('reports the failing chunk and actual R2 source after a chunk-cache fallback', async () => {
-		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-		try {
-			const broken = new ReadableStream<Uint8Array>({
-				pull(c) {
-					c.error(new Error('R2 body disconnected'));
-				}
-			});
-			const { response, tasks } = await streamResponse(
-				[null, 8],
-				[new Response('one').body!, broken],
-				502
-			);
-			await expect(response.arrayBuffer()).rejects.toThrow('R2 body disconnected');
-			await Promise.all(tasks);
-			expect(error.mock.calls.map(([entry]) => JSON.parse(entry))).toContainEqual(
-				expect.objectContaining({
-					event: 'nimbus.stream',
-					status: 'error',
-					narHash: 'b'.repeat(64),
-					chunk: { index: 1, key: 'chunk/1', source: 'r2' },
-					phase: 'pipe',
-					error: 'R2 body disconnected',
-					completedChunks: 1
-				})
-			);
-		} finally {
-			error.mockRestore();
+	it.each([502, 520])(
+		'reports the failing chunk and actual R2 source after a chunk-cache %i fallback',
+		async (status) => {
+			const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+			try {
+				const broken = new ReadableStream<Uint8Array>({
+					pull(c) {
+						c.error(new Error('R2 body disconnected'));
+					}
+				});
+				const { response, tasks } = await streamResponse(
+					[null, 8],
+					[new Response('one').body!, broken],
+					status
+				);
+				await expect(response.arrayBuffer()).rejects.toThrow('R2 body disconnected');
+				await Promise.all(tasks);
+				expect(error.mock.calls.map(([entry]) => JSON.parse(entry))).toContainEqual(
+					expect.objectContaining({
+						event: 'nimbus.stream',
+						status: 'error',
+						narHash: 'b'.repeat(64),
+						chunk: { index: 1, key: 'chunk/1', source: 'r2' },
+						phase: 'pipe',
+						error: 'R2 body disconnected',
+						completedChunks: 1
+					})
+				);
+			} finally {
+				error.mockRestore();
+			}
 		}
-	});
+	);
 });

@@ -219,6 +219,14 @@ interface GcProgress {
 	rootAfter?: number;
 	orphanPrepared?: boolean;
 	chunkAfter?: number;
+	brokenCacheId?: number;
+	integrityWork?: {
+		cutoff: string;
+		probed: boolean;
+		after: number;
+		count: number;
+		examples: string[];
+	};
 	stats: GcStats;
 	integrity: GcIntegritySummary | null;
 	nextAt: number;
@@ -330,7 +338,8 @@ export async function continueScheduledGc(
 					? new GcDeferred(Date.now() + GC_WINDOW_MS + Math.random() * 5_000, 'resources')
 					: undefined;
 		if (job) job.nextAt = deferred?.until ?? Date.now() + 60_000;
-		console.warn(
+		const log = deferred?.reason === 'budget' ? console.log : console.warn;
+		log(
 			JSON.stringify({
 				event: 'nimbus.gc.deferred',
 				phase: job?.phase,
@@ -378,13 +387,23 @@ function gcPhases(
 		['retention', () => retentionPass(db, stats, dry, purgeTags, progress.cacheAfter, cacheDone)],
 		['global', () => gcWorkUnit(db, () => globalSizePass(db, stats, dry, purgeTags))],
 		write('broken', async () => {
-			if (opts.automaticBrokenPurge) Object.assign(stats, await runBrokenClosureGc(env, opts.ctx));
+			if (opts.automaticBrokenPurge)
+				Object.assign(
+					stats,
+					await runBrokenClosureGc(env, opts.ctx, {
+						cacheId: progress.brokenCacheId,
+						checkpoint: async (id) => {
+							progress.brokenCacheId = id;
+							await checkpoint();
+						}
+					})
+				);
 		}),
 		[
 			'integrity',
 			async () => {
 				if (opts.integrityReport ?? true)
-					progress.integrity = await gcWorkUnit(db, () => closureIntegrityReport(db, stats));
+					progress.integrity = await closureIntegrityReport(db, stats, progress, checkpoint);
 			}
 		],
 		[
@@ -1529,38 +1548,65 @@ async function probeUncoveredRefs(db: D1, stats: GcStats, cutoff: string): Promi
  * substitute; the count surfaces in GC stats, the log, and the persisted
  * last-run summary — it does not block serving. Returns null on failure.
  */
-async function closureIntegrityReport(db: D1, stats: GcStats): Promise<GcIntegritySummary | null> {
+async function closureIntegrityReport(
+	db: D1,
+	stats: GcStats,
+	progress: GcProgress,
+	checkpoint: () => Promise<void>
+): Promise<GcIntegritySummary | null> {
 	try {
-		const cutoff = new Date(Date.now() - INTEGRITY_PUSH_GRACE_MS).toISOString();
+		const work = (progress.integrityWork ??= {
+			cutoff: new Date(Date.now() - INTEGRITY_PUSH_GRACE_MS).toISOString(),
+			probed: false,
+			after: 0,
+			count: 0,
+			examples: []
+		});
 		// Swallowed separately from the outer catch: a failed probe must not
 		// null the report, which still counts fine from cached verdicts. Runs
 		// on dry runs too — verdict rows are the same probe cache any
 		// read-path request fills, not GC state.
-		await probeUncoveredRefs(db, stats, cutoff).catch((e) =>
-			console.warn(`gc: integrity ref probe failed: ${e}`)
-		);
-		const row = await db
-			.prepare(`SELECT COUNT(DISTINCT r.object_id) AS n ${INCOMPLETE_CLOSURE_WHERE}`)
-			.bind(cutoff)
-			.first<{ n: number }>();
-		stats.incomplete_closure_objects = row?.n ?? 0;
-		let examples: string[] = [];
-		if (stats.incomplete_closure_objects > 0) {
-			console.warn(
-				`gc: ${stats.incomplete_closure_objects} objects have references neither local nor upstream-covered`
-			);
-			examples = (
-				await db
-					.prepare(
-						`SELECT DISTINCT o.store_path AS p ${INCOMPLETE_CLOSURE_WHERE} ` +
-							`ORDER BY o.store_path LIMIT ${INTEGRITY_EXAMPLE_LIMIT}`
-					)
-					.bind(cutoff)
-					.all<{ p: string }>()
-			).results.map((r) => r.p);
+		if (!work.probed) {
+			await gcWorkUnit(db, () => probeUncoveredRefs(db, stats, work.cutoff)).catch((e) => {
+				if (e instanceof GcDeferred) throw e;
+				console.warn(`gc: integrity ref probe failed: ${e}`);
+			});
+			work.probed = true;
+			await checkpoint();
 		}
-		return { incompleteObjects: stats.incomplete_closure_objects, examples };
+		// Drive bounded pages by the object PK. EXISTS counts each parent once
+		// and stops at its first uncovered edge, without DISTINCT over the whole
+		// reference graph or a second graph scan just to collect examples.
+		while (true) {
+			const { results } = await gcWorkUnit(db, () =>
+				db
+					.prepare(
+						`
+				SELECT o.id, o.store_path AS p,
+				 o.detached_at IS NULL AND o.created_at < ?2 AND EXISTS (
+				 SELECT 1 FROM object_ref r WHERE r.object_id=o.id AND r.child_id IS NULL
+				 AND NOT EXISTS (SELECT 1 FROM upstream_check uc
+				 WHERE uc.store_path_hash=r.ref_hash AND uc.present <> ${VERDICT_ABSENT})) AS incomplete
+				 FROM object o WHERE o.id > ?1 ORDER BY o.id LIMIT 256
+			`
+					)
+					.bind(work.after, work.cutoff)
+					.all<{ id: number; p: string; incomplete: number }>()
+			);
+			if (!results.length) break;
+			const missing = results.filter((r) => r.incomplete).map((r) => r.p);
+			work.count += missing.length;
+			work.examples = [...work.examples, ...missing].sort().slice(0, INTEGRITY_EXAMPLE_LIMIT);
+			work.after = results.at(-1)!.id;
+			await checkpoint();
+		}
+		stats.incomplete_closure_objects = work.count;
+		if (work.count > 0) {
+			console.warn(`gc: ${work.count} objects have references neither local nor upstream-covered`);
+		}
+		return { incompleteObjects: work.count, examples: work.examples };
 	} catch (e) {
+		if (e instanceof GcDeferred) throw e;
 		console.warn(`gc: closure integrity report failed: ${e}`);
 		return null;
 	}
@@ -1571,6 +1617,8 @@ async function reapAbandonedCaches(db: D1, stats: GcStats): Promise<void> {
 	const cutoff = new Date(Date.now() - ABANDONED_CACHE_GRACE_SECS * 1000).toISOString();
 	try {
 		const doomed = 'SELECT id FROM cache WHERE deleted_at IS NOT NULL AND deleted_at < ?1';
+		// Avoid scanning object/object_ref through empty DELETE subqueries.
+		if (!(await db.prepare(`${doomed} LIMIT 1`).bind(cutoff).first())) return;
 		const results = await db.batch(
 			[
 				`DELETE FROM object_ref WHERE object_id IN (SELECT id FROM object WHERE cache_id IN (${doomed}))`,

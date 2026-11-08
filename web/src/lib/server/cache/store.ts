@@ -50,7 +50,7 @@ import { withR2Retry, newFixedLengthStream, type ExecutionContext } from './plat
 import { measure, countLoopbackFallback, streamObservation } from './latency';
 import { stripSha256 } from '../attic/nix-base32';
 import { readRpcResult } from './rpc';
-import { readStoreMetadata, withStoreRecovery } from './store-transport';
+import { readStoreMetadata, withStoreRecovery, isStoreTransportFailure } from './store-transport';
 import { withSpan } from './tracing';
 
 type Env = App.Platform['env'];
@@ -405,7 +405,7 @@ async function serveStoreInner(
 	// gateway authorizes against the requested cache and stamps visibility
 	// before forwarding here.
 	if (segments.length === 2 && segments[0] === '_nar_v2') {
-		return serveNar(env, ctx, segments[1]);
+		return serveNar(request, env, ctx, segments[1]);
 	}
 	// Private caches take a cache-scoped route instead (narStoreUrl above).
 	// Digits only: Number() would accept '', ' 3', '1e3' and '0x2', each a
@@ -413,7 +413,7 @@ async function serveStoreInner(
 	// bytes.
 	if (segments.length === 3 && segments[0] === '_nar_scoped_v2') {
 		if (!/^\d+$/.test(segments[1])) return errorResponse(400, 'Invalid cache scope');
-		return serveNar(env, ctx, segments[2], Number(segments[1]));
+		return serveNar(request, env, ctx, segments[2], Number(segments[1]));
 	}
 	return errorResponse(404, 'Not found');
 }
@@ -930,6 +930,7 @@ async function serveNarInfo(
  * gateway passes it for private caches only (see narStoreUrl above). Unscoped
  * lookups resolve only NARs reachable from a live public cache. */
 async function serveNar(
+	request: Request,
 	env: Env,
 	ctx: ExecutionContext | undefined,
 	filename: string,
@@ -1004,7 +1005,7 @@ async function serveNar(
 	if (totalSize === null || totalSize > 512 * 1024 * 1024) {
 		baseHeaders.set('Cache-Control', 'no-store');
 	}
-	const stream = streamObservation(keys.length, totalSize, narHashRaw);
+	const stream = streamObservation(keys.length, totalSize, narHashRaw, request);
 	const pump = async () => {
 		// Queue of gets for chunks not yet piped, in key order; fill() tops it
 		// up to the lookahead window.
@@ -1020,7 +1021,8 @@ async function serveNar(
 				);
 				if (response.ok && response.body) return { body: response.body, source: 'cache' };
 				await response.body?.cancel().catch(() => {});
-				if (response.status !== 502) throw new Error(`Chunk cache returned ${response.status}`);
+				if (!isStoreTransportFailure(response.status))
+					throw new Error(`Chunk cache returned ${response.status}`);
 				countLoopbackFallback();
 			}
 			const object = await withR2Retry(() => env.CACHE_BUCKET.get(key));

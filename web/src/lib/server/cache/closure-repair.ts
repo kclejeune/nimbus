@@ -11,6 +11,7 @@ import {
 
 type D1 = App.Platform['env']['ATTIC_DB'];
 const PAGE_SIZE = 100;
+const REFERENCE_SCAN_HASHES = 512;
 /** Sized to outlast a real push that spans the nightly run. */
 export const INTEGRITY_PUSH_GRACE_MS = 6 * 3600_000;
 
@@ -52,7 +53,8 @@ export async function uncoveredReferences(
 	cacheId: number,
 	upstreams: Upstream[],
 	after = '',
-	pageSize = PAGE_SIZE
+	pageSize = PAGE_SIZE,
+	boundedScan = false
 ) {
 	if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > PAGE_SIZE)
 		throw new Error('Invalid reference page size');
@@ -60,17 +62,31 @@ export async function uncoveredReferences(
 		id: u.id,
 		cutoff: new Date(Date.now() - upstreamTtlSecs(u) * 1000).toISOString()
 	}));
+	// Bound input work as well as output. A LIMIT on uncovered references alone
+	// scans the entire covered graph when fewer than one page are missing.
+	// Background GC follows empty scan windows and checkpoints their cursor.
+	// Interactive callers retain output pagination, without empty UI pages.
+	const window = boundedScan
+		? await dbAll<{ ref_hash: string }>(
+				db
+					.prepare(
+						`SELECT ref_hash FROM object_ref WHERE ref_hash > ?1
+		 GROUP BY ref_hash ORDER BY ref_hash LIMIT ${REFERENCE_SCAN_HASHES + 1}`
+					)
+					.bind(after)
+			)
+		: undefined;
+	const end = window?.results[Math.min(window.results.length, REFERENCE_SCAN_HASHES) - 1]?.ref_hash;
+	if (window && !end) return { references: [], next_cursor: null };
 	const { results } = await dbAll<{ hash: string; name: string; referrers: number }>(
 		db
 			.prepare(
-				// Preserve the ref_hash range scan and grouping order so LIMIT can
-				// stop early. D1 otherwise scans all NULL child_ids and sorts the
-				// whole graph again for each page (1.5M rows on the live instance).
+				// Preserve the bounded ref_hash range scan and grouping order.
 				`WITH uncovered AS (
 			 SELECT r.ref_hash, MIN(r.object_id) AS parent_id, COUNT(*) AS referrers
 			 FROM object_ref r INDEXED BY idx_object_ref_ref_hash CROSS JOIN object o ON o.id = r.object_id
 			 WHERE r.child_id IS NULL AND o.cache_id = ?1 AND o.detached_at IS NULL
-			 AND r.ref_hash > ?2 AND o.created_at < ?3
+			 AND r.ref_hash > ?2 ${window ? 'AND r.ref_hash <= ?5' : ''} AND o.created_at < ?3
 			 AND NOT EXISTS (SELECT 1 FROM object child JOIN nar n ON n.id = child.nar_id
 			   WHERE child.cache_id = ?1 AND child.store_path_hash = r.ref_hash AND n.state = 'V')
 			 AND NOT EXISTS (SELECT 1 FROM upstream_check uc JOIN json_each(?4) u
@@ -88,7 +104,8 @@ export async function uncoveredReferences(
 				cacheId,
 				after,
 				new Date(Date.now() - INTEGRITY_PUSH_GRACE_MS).toISOString(),
-				JSON.stringify(coverage)
+				JSON.stringify(coverage),
+				...(window ? [end!] : [])
 			)
 	);
 	const references = results.slice(0, pageSize).map(({ hash, name, referrers }) => ({
@@ -98,6 +115,11 @@ export async function uncoveredReferences(
 	}));
 	return {
 		references,
-		next_cursor: results.length > pageSize ? references.at(-1)!.hash : null
+		next_cursor:
+			results.length > pageSize
+				? references.at(-1)!.hash
+				: window && window.results.length > REFERENCE_SCAN_HASHES
+					? end!
+					: null
 	};
 }
