@@ -7,8 +7,8 @@
 # cooldown entirely, so a real CVE fix is never delayed by it.
 #
 # Auto-merge (.github/workflows/dependabot-auto-merge.yml) covers npm and gomod
-# at patch/minor, after a two-day release cooldown and passing CI. Daily
-# checks pick up eligible releases promptly. Majors always stay manual.
+# at patch/minor, after a two-day release cooldown and passing CI. Weekly
+# checks and grouped updates limit CI churn. Majors always stay manual.
 
 version: 2
 updates:
@@ -19,7 +19,7 @@ updates:
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     cooldown:
       default-days: 2
       semver-patch-days: 2
@@ -34,7 +34,7 @@ updates:
   - package-ecosystem: "npm"
     directory: "/web"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     cooldown:
       default-days: 2
       semver-patch-days: 2
