@@ -18,8 +18,8 @@ import { candidateTag } from './metadata';
 import { narinfoTag } from './store';
 import { readRpcResult } from './rpc';
 import { retentionCutoff } from './retention-explain';
-import { INTEGRITY_PUSH_GRACE_MS } from './closure-repair';
-import { runBrokenClosureGc } from './broken-closure-gc';
+import { INTEGRITY_PUSH_GRACE_MS, referenceWindow } from './closure-repair';
+import { runBrokenClosureGc, type BrokenGcProgress } from './broken-closure-gc';
 import { replayPathPurges } from './closure-purge';
 import {
 	GcDeferred,
@@ -60,6 +60,7 @@ const MAX_EVICTION_ROUNDS = 50;
 const MAX_GLOBAL_EVICTION_ROUNDS = 100;
 
 export interface GcStats {
+	advisory_phases_deferred: number;
 	abandoned_caches_reaped: number;
 	detached_objects_reaped: number;
 	expired_objects_reaped: number;
@@ -84,6 +85,7 @@ export interface GcStats {
 
 /** Compact form of the closure-integrity report persisted for the dashboard. */
 export interface GcIntegritySummary {
+	deferred?: boolean;
 	/** Live objects with a Reference neither local nor upstream-covered. */
 	incompleteObjects: number;
 	/** Store paths of up to INTEGRITY_EXAMPLE_LIMIT affected objects. */
@@ -108,6 +110,7 @@ const INTEGRITY_EXAMPLE_LIMIT = 20;
 
 function emptyStats(): GcStats {
 	return {
+		advisory_phases_deferred: 0,
 		abandoned_caches_reaped: 0,
 		detached_objects_reaped: 0,
 		expired_objects_reaped: 0,
@@ -214,15 +217,20 @@ export async function runGc(env: Env, opts: GcOptions = {}): Promise<GcStats> {
 }
 
 interface GcProgress {
+	dryRun?: boolean;
+	advisoryFailures?: number;
 	phase: number;
 	cacheAfter: number;
 	rootAfter?: number;
 	orphanPrepared?: boolean;
 	chunkAfter?: number;
 	brokenCacheId?: number;
+	brokenWork?: BrokenGcProgress;
 	integrityWork?: {
 		cutoff: string;
 		probed: boolean;
+		probeAfter?: string;
+		probeCount?: number;
 		after: number;
 		count: number;
 		examples: string[];
@@ -234,6 +242,92 @@ interface GcProgress {
 }
 const GC_JOB_KEY = 'gc_job';
 const GC_SLICE_MS = 20_000;
+const GC_PHASE_LABELS = [
+	'Updating references',
+	'Checking deleted caches',
+	'Checking pins',
+	'Checking detached paths',
+	'Checking cache retention',
+	'Checking global limits',
+	'Checking broken closures',
+	'Checking dependency coverage',
+	'Reclaiming unreferenced storage',
+	'Pruning expired tokens',
+	'Pruning upstream checks',
+	'Refreshing root statistics',
+	'Refreshing usage',
+	'Invalidating cached entries',
+	'Saving results',
+	'Updating query statistics'
+];
+export interface GcOperation {
+	id: string;
+	state: 'pending' | 'complete';
+	dryRun: boolean;
+	phase: string;
+	requestedAt: string;
+	completedAt?: string;
+	nextAt?: number;
+	stats: GcStats;
+}
+function gcOperation(job: GcProgress): GcOperation {
+	return {
+		id: job.startedAt,
+		state: 'pending',
+		dryRun: !!job.dryRun,
+		phase: GC_PHASE_LABELS[job.phase] ?? 'Finishing',
+		requestedAt: job.startedAt,
+		nextAt: job.nextAt,
+		stats: job.stats
+	};
+}
+export async function readGcOperation(db: D1): Promise<GcOperation | null> {
+	const rows = await db
+		.prepare("SELECT key,value FROM server_config WHERE key IN ('gc_job','gc_last_operation')")
+		.all<{ key: string; value: string }>();
+	const active = rows.results.find((r) => r.key === 'gc_job');
+	if (active) return gcOperation(JSON.parse(active.value));
+	const last = rows.results.find((r) => r.key === 'gc_last_operation');
+	return last ? JSON.parse(last.value) : null;
+}
+/** Queue quickly; cron owns continuation and results survive browser reloads. */
+export async function queueGc(env: Env, dryRun = false): Promise<GcOperation> {
+	const db = env.ATTIC_DB;
+	const lock = await acquireGcLock(db);
+	if (!lock) {
+		const current = await readGcOperation(db);
+		if (current?.state === 'pending') return current;
+		throw new Error('Maintenance is busy. Please retry shortly.');
+	}
+	try {
+		const current = await readGcOperation(db);
+		if (current?.state === 'pending') return current;
+		if (!dryRun) {
+			const retry = await claimManualGcSlot(db);
+			if (retry)
+				throw new Error(`Garbage collection was requested recently. Retry in ${retry} seconds.`);
+		}
+		const job: GcProgress = {
+			phase: 0,
+			cacheAfter: 0,
+			stats: emptyStats(),
+			integrity: null,
+			nextAt: Date.now(),
+			startedAt: new Date().toISOString(),
+			dryRun
+		};
+		await dbRun(
+			db
+				.prepare(
+					"INSERT INTO server_config(key,value) VALUES('gc_job',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+				)
+				.bind(JSON.stringify(job))
+		);
+		return gcOperation(job);
+	} finally {
+		await releaseGcLock(db, lock);
+	}
+}
 
 /** Cron continuations read this one small row while idle. A job never resets
  * at midnight: an unfinished run resumes before another one is started. */
@@ -296,7 +390,12 @@ export async function continueScheduledGc(
 		};
 		const phases = gcPhases(
 			paced,
-			{ ctx, automaticBrokenPurge: true },
+			{
+				ctx,
+				dryRun: !!job.dryRun,
+				automaticBrokenPurge: !job.dryRun,
+				integrityReport: !job.dryRun
+			},
 			job,
 			undefined,
 			yieldRefs,
@@ -310,6 +409,7 @@ export async function continueScheduledGc(
 			pacer.check(); // A pass may have caught the deferred D1 error internally.
 			if (complete !== false) {
 				job.phase++;
+				job.advisoryFailures = 0;
 				job.cacheAfter = 0;
 				job.rootAfter = 0;
 				job.chunkAfter = 0;
@@ -329,6 +429,20 @@ export async function continueScheduledGc(
 			if (complete === false || job.nextAt > Date.now() || Date.now() - started >= GC_SLICE_MS)
 				return;
 		}
+		await dbRun(
+			db
+				.prepare(
+					"INSERT INTO server_config(key,value) VALUES('gc_last_operation',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+				)
+				.bind(
+					JSON.stringify({
+						...gcOperation(job),
+						state: 'complete',
+						completedAt: new Date().toISOString(),
+						phase: 'Complete'
+					})
+				)
+		);
 		await dbRun(db.prepare(`DELETE FROM server_config WHERE key='${GC_JOB_KEY}'`));
 	} catch (error) {
 		const deferred =
@@ -353,6 +467,49 @@ export async function continueScheduledGc(
 		// If canceled here, the last checkpoint and deletion receipts replay safely.
 		if (deferred?.reason === 'resources')
 			await new Promise((resolve) => setTimeout(resolve, Math.max(0, deferred.until - Date.now())));
+		if (job && deferred?.reason === 'resources' && (job.phase === 6 || job.phase === 7)) {
+			const failed = job.phase === 6 ? job.brokenWork?.pending : undefined;
+			if (failed?.queue.length && job.brokenCacheId !== undefined) {
+				const [hash] = failed.queue[0];
+				// Fairness cursor only: no mutation is authorized by this failure.
+				// A large reference must not starve every later group each night.
+				await dbRun(
+					db
+						.prepare(
+							'UPDATE broken_purge_state SET purge_after_hash=?2 WHERE cache_id=?1 AND policy_days=?3 AND upstream_config=?4'
+						)
+						.bind(job.brokenCacheId, hash, failed.days, failed.config),
+					{ attempts: 1 }
+				);
+				failed.queue.shift();
+				failed.plans++;
+				failed.stats.automatic_purge_deferred++;
+			}
+
+			job.advisoryFailures = (job.advisoryFailures ?? 0) + 1;
+			if (job.advisoryFailures >= 3) {
+				console.warn(
+					JSON.stringify({
+						event: 'nimbus.gc.advisory_deferred',
+						phase: job.phase,
+						failures: job.advisoryFailures
+					})
+				);
+				if (job.phase === 6 && job.brokenWork?.pending) {
+					Object.assign(job.stats, job.brokenWork.pending.stats);
+					job.stats.automatic_purge_deferred += job.brokenWork.pending.queue.length;
+				}
+				job.stats.advisory_phases_deferred = (job.stats.advisory_phases_deferred ?? 0) + 1;
+				if (job.phase === 7) {
+					const prior = await readGcLastRun(db).catch(() => null);
+					job.integrity = prior?.integrity ? { ...prior.integrity, deferred: true } : null;
+					job.stats.incomplete_closure_objects = job.integrity?.incompleteObjects ?? 0;
+				}
+				job.phase++;
+				job.advisoryFailures = 0;
+				job.cacheAfter = 0;
+			}
+		}
 		if (job) await save().catch((e) => console.warn('gc: checkpoint pending', e));
 	} finally {
 		await releaseGcLock(db, lock);
@@ -386,19 +543,23 @@ function gcPhases(
 		['detached', () => detachedPass(db, stats, dry, purgeTags, progress.cacheAfter, cacheDone)],
 		['retention', () => retentionPass(db, stats, dry, purgeTags, progress.cacheAfter, cacheDone)],
 		['global', () => gcWorkUnit(db, () => globalSizePass(db, stats, dry, purgeTags))],
-		write('broken', async () => {
-			if (opts.automaticBrokenPurge)
-				Object.assign(
-					stats,
-					await runBrokenClosureGc(env, opts.ctx, {
-						cacheId: progress.brokenCacheId,
-						checkpoint: async (id) => {
-							progress.brokenCacheId = id;
-							await checkpoint();
-						}
-					})
-				);
-		}),
+		[
+			'broken',
+			async () => {
+				if (!dry && opts.automaticBrokenPurge)
+					Object.assign(
+						stats,
+						await runBrokenClosureGc(env, opts.ctx, {
+							cacheId: progress.brokenCacheId,
+							progress: (progress.brokenWork ??= {}),
+							checkpoint: async (id) => {
+								progress.brokenCacheId = id;
+								await checkpoint();
+							}
+						})
+					);
+			}
+		],
 		[
 			'integrity',
 			async () => {
@@ -1489,56 +1650,69 @@ async function prunePinRevisions(db: D1, stats: GcStats): Promise<void> {
 	}
 }
 
-/** The incomplete-closure predicate shared by the probe, count, and example
- * queries. ?1 is the freshness cutoff: refs of objects pushed after it are
- * ignored — a push in flight when GC fires uploads parents before their
- * references, and a half-uploaded closure is not a gap. Genuine gaps persist
- * into later runs. */
-const INCOMPLETE_CLOSURE_WHERE =
-	'FROM object_ref r ' +
-	'JOIN object o ON o.id = r.object_id ' +
-	'WHERE r.child_id IS NULL AND o.detached_at IS NULL ' +
-	'AND o.created_at < ?1 ' +
-	'AND NOT EXISTS (SELECT 1 FROM upstream_check uc ' +
-	`WHERE uc.store_path_hash = r.ref_hash AND uc.present <> ${VERDICT_ABSENT})`;
-
-/** Uncovered refs (re)classified per run — sized to one filterUpstreamPaths
- * probe budget, so a large backlog converges over a few runs without eating
- * the invocation's subrequest budget. */
+/** A rotating bounded scan keeps both already-broken and unseen hashes fair.
+ * Probe results are advisory; uncertainty never authorizes deletion. */
 const INTEGRITY_PROBE_LIMIT = 250;
+const INTEGRITY_PROBE_CURSOR = 'gc_integrity_probe_after';
 
-/**
- * Read-repair for the integrity report: run still-uncovered dangling refs
- * through filterUpstreamPaths, which probes each upstream lacking a fresh
- * verdict for a ref and records the results. Without this the report never
- * converges — it only reads cached verdicts, and nothing on the serve or
- * push path asks upstreams about references of already-pushed objects, so
- * upstream-covered refs would be flagged forever (and re-flagged whenever
- * their verdicts are pruned). Selection shares the report's own predicate,
- * least-recently-checked refs first, so never-probed refs lead and a
- * genuinely-broken backlog cannot starve the window; refs whose absent
- * verdicts are still fresh cost only the cached-verdict read.
- */
-async function probeUncoveredRefs(db: D1, stats: GcStats, cutoff: string): Promise<void> {
-	const { results } = await db
-		.prepare(
-			`SELECT r.ref_hash AS h ${INCOMPLETE_CLOSURE_WHERE} ` +
-				'GROUP BY r.ref_hash ' +
-				'ORDER BY (SELECT MAX(uc2.checked_at) FROM upstream_check uc2 ' +
-				'WHERE uc2.store_path_hash = r.ref_hash) ' +
-				`LIMIT ${INTEGRITY_PROBE_LIMIT}`
-		)
-		.bind(cutoff)
-		.all<{ h: string }>();
-	if (results.length === 0) return;
+async function probeUncoveredRefs(
+	db: D1,
+	stats: GcStats,
+	work: NonNullable<GcProgress['integrityWork']>,
+	checkpoint: () => Promise<void>
+): Promise<void> {
 	const upstreams = await allLiveUpstreams(db);
-	if (upstreams.length === 0) return;
-	const { deferred } = await filterUpstreamPaths(
-		db,
-		upstreams,
-		results.map((r) => r.h)
-	);
-	stats.integrity_refs_probed = results.length - deferred.length;
+	if (!upstreams.length) {
+		work.probed = true;
+		await checkpoint();
+		return;
+	}
+	if (work.probeAfter === undefined) {
+		const row = await db
+			.prepare('SELECT value FROM server_config WHERE key=?1')
+			.bind(INTEGRITY_PROBE_CURSOR)
+			.first<{ value: string }>();
+		work.probeAfter = row?.value ?? '';
+	}
+	while (!work.probed) {
+		await gcWorkUnit(db, async () => {
+			const window = await referenceWindow(db, work.probeAfter);
+			const remaining = INTEGRITY_PROBE_LIMIT - (work.probeCount ?? 0);
+			const { results } = window.end
+				? await db
+						.prepare(
+							`
+    SELECT r.ref_hash AS h FROM object_ref r INDEXED BY idx_object_ref_ref_hash
+    CROSS JOIN object o ON o.id=r.object_id
+    WHERE r.ref_hash > ?1 AND r.ref_hash <= ?2 AND r.child_id IS NULL
+    AND o.detached_at IS NULL AND o.created_at < ?3
+    AND NOT EXISTS (SELECT 1 FROM upstream_check uc WHERE uc.store_path_hash=r.ref_hash AND uc.present <> ${VERDICT_ABSENT})
+    GROUP BY r.ref_hash ORDER BY r.ref_hash LIMIT ?4
+   `
+						)
+						.bind(work.probeAfter, window.end, work.cutoff, remaining + 1)
+						.all<{ h: string }>()
+				: { results: [] };
+			const hashes = results.slice(0, remaining).map((r) => r.h);
+			if (hashes.length) {
+				const { deferred } = await filterUpstreamPaths(db, upstreams, hashes);
+				stats.integrity_refs_probed += hashes.length - deferred.length;
+			}
+			work.probeCount = (work.probeCount ?? 0) + hashes.length;
+			work.probeAfter =
+				results.length > remaining ? hashes.at(-1)! : window.more ? window.end! : '';
+			work.probed = work.probeCount >= INTEGRITY_PROBE_LIMIT || !work.probeAfter;
+			if (work.probed)
+				await dbRun(
+					db
+						.prepare(
+							'INSERT INTO server_config(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value'
+						)
+						.bind(INTEGRITY_PROBE_CURSOR, work.probeAfter)
+				);
+		});
+		await checkpoint();
+	}
 }
 
 /**
@@ -1566,14 +1740,12 @@ async function closureIntegrityReport(
 		// null the report, which still counts fine from cached verdicts. Runs
 		// on dry runs too — verdict rows are the same probe cache any
 		// read-path request fills, not GC state.
-		if (!work.probed) {
-			await gcWorkUnit(db, () => probeUncoveredRefs(db, stats, work.cutoff)).catch((e) => {
+		if (!work.probed)
+			await probeUncoveredRefs(db, stats, work, checkpoint).catch((e) => {
 				if (e instanceof GcDeferred) throw e;
 				console.warn(`gc: integrity ref probe failed: ${e}`);
+				work.probed = true;
 			});
-			work.probed = true;
-			await checkpoint();
-		}
 		// Drive bounded pages by the object PK. EXISTS counts each parent once
 		// and stops at its first uncovered edge, without DISTINCT over the whole
 		// reference graph or a second graph scan just to collect examples.

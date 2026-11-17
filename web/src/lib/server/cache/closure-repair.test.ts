@@ -137,3 +137,19 @@ it('GC retains positive verdicts through the upstream TTL and prunes obsolete ro
 	).toEqual([hash(1), hash(2), hash(5), hash(7)]);
 	f.sqlite.close();
 });
+
+it('bounds an empty covered window and preserves a later missing reference cursor', async () => {
+	const f = fixture();
+	const refs = Array.from({ length: 514 }, (_, i) => i + 1);
+	f.object(1000, refs);
+	for (let i = 1; i <= 513; i++) f.object(i, []);
+	await syncObjectRefs(f.db);
+	const first = await uncoveredReferences(f.db, 1, []);
+	expect(first.references).toEqual([]);
+	expect(first.scanned_hashes).toBe(512);
+	expect(first.next_cursor).toBe(hash(512));
+	const next = await uncoveredReferences(f.db, 1, [], first.next_cursor!);
+	expect(next.references.map((r) => r.hash)).toEqual([hash(514)]);
+	expect(next.next_cursor).toBeNull();
+	f.sqlite.close();
+});

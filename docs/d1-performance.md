@@ -88,3 +88,36 @@ whole-run speedup. After deployment, compare total SQL time, rows read/written,
 resource deferrals, completion through ANALYZE and foreground header tails.
 The single upstream-probe selection and ANALYZE can still exceed the soft SQL
 budget individually. No new index or migration is required for this batch.
+
+
+## November 17: finish bounding closure maintenance
+
+The November 10–16 observations found full integrity-probe selection averaging
+7.37 seconds and automatic purge planning averaging 8.76 seconds / 5.02 million
+rows. Nightly GC still reached ANALYZE, but November 16 needed 143 minutes and
+126 resource deferrals in broken-closure maintenance.
+
+Probe discovery now scans 512 hash windows and rotates its 250-reference budget
+across nights. Purge traversal uses existing indexed edges below the atomic
+reference-sync watermark and source JSON above it. References are immutable on
+publication/replacement. This includes intervening uploads in both planning and
+atomic apply. Protection walks only the affected ancestor graph; fresh uploads,
+pins, approval identities, current upstream trust and confirmation clocks remain
+part of the transaction's deletion guard. Without a watermark, source JSON is
+used for every object.
+
+Automatic cleanup checkpoints each completed plan and its counters/remaining
+queue. Resource-limited references advance the fairness cursor after backoff,
+without authorizing deletion. After three resource failures in an advisory phase,
+the run defers that phase and proceeds to later maintenance. An unavailable
+integrity report retains the previous warning, explicitly marked deferred.
+
+A read-only production sample of the optimized planner took 75.1 ms and read
+73,557 rows, with zero writes. It was a different reference from the historical
+aggregate, so this is not a controlled before/after speedup. Validate total SQL,
+resource deferrals, complete nightly runs and foreground tails after deployment.
+No schema change or additional index is required.
+
+Interactive dependency discovery uses the same bounded input windows. An empty
+result with a continuation cursor means more hashes remain to scan. The CLI
+follows it and reports scanned hashes; Settings exposes continuation progress.

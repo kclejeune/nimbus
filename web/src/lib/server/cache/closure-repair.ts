@@ -12,6 +12,23 @@ import {
 type D1 = App.Platform['env']['ATTIC_DB'];
 const PAGE_SIZE = 100;
 const REFERENCE_SCAN_HASHES = 512;
+
+export async function referenceWindow(db: D1, after = '') {
+	const { results } = await dbAll<{ ref_hash: string }>(
+		db
+			.prepare(
+				`SELECT ref_hash FROM object_ref WHERE ref_hash > ?1 GROUP BY ref_hash ORDER BY ref_hash LIMIT ${REFERENCE_SCAN_HASHES + 1}`
+			)
+			.bind(after)
+	);
+	const end = results[Math.min(results.length, REFERENCE_SCAN_HASHES) - 1]?.ref_hash;
+	return {
+		end,
+		more: results.length > REFERENCE_SCAN_HASHES,
+		scanned: Math.min(results.length, REFERENCE_SCAN_HASHES)
+	};
+}
+
 /** Sized to outlast a real push that spans the nightly run. */
 export const INTEGRITY_PUSH_GRACE_MS = 6 * 3600_000;
 
@@ -54,7 +71,7 @@ export async function uncoveredReferences(
 	upstreams: Upstream[],
 	after = '',
 	pageSize = PAGE_SIZE,
-	boundedScan = false
+	boundedScan = true
 ) {
 	if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > PAGE_SIZE)
 		throw new Error('Invalid reference page size');
@@ -65,19 +82,10 @@ export async function uncoveredReferences(
 	// Bound input work as well as output. A LIMIT on uncovered references alone
 	// scans the entire covered graph when fewer than one page are missing.
 	// Background GC follows empty scan windows and checkpoints their cursor.
-	// Interactive callers retain output pagination, without empty UI pages.
-	const window = boundedScan
-		? await dbAll<{ ref_hash: string }>(
-				db
-					.prepare(
-						`SELECT ref_hash FROM object_ref WHERE ref_hash > ?1
-		 GROUP BY ref_hash ORDER BY ref_hash LIMIT ${REFERENCE_SCAN_HASHES + 1}`
-					)
-					.bind(after)
-			)
-		: undefined;
-	const end = window?.results[Math.min(window.results.length, REFERENCE_SCAN_HASHES) - 1]?.ref_hash;
-	if (window && !end) return { references: [], next_cursor: null };
+	// Interactive callers expose scan progress, including empty windows.
+	const window = boundedScan ? await referenceWindow(db, after) : undefined;
+	const end = window?.end;
+	if (window && !end) return { references: [], next_cursor: null, scanned_hashes: 0 };
 	const { results } = await dbAll<{ hash: string; name: string; referrers: number }>(
 		db
 			.prepare(
@@ -115,11 +123,7 @@ export async function uncoveredReferences(
 	}));
 	return {
 		references,
-		next_cursor:
-			results.length > pageSize
-				? references.at(-1)!.hash
-				: window && window.results.length > REFERENCE_SCAN_HASHES
-					? end!
-					: null
+		scanned_hashes: window?.scanned ?? 0,
+		next_cursor: results.length > pageSize ? references.at(-1)!.hash : window?.more ? end! : null
 	};
 }

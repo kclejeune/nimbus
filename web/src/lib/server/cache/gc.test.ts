@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { memoryBucket, testDatabase } from './test-db';
 vi.mock('./compression', async () => (await import('./test-db')).fakeCompression());
-import { continueScheduledGc, runGc } from './gc';
+import { continueScheduledGc, runGc, queueGc, readGcOperation } from './gc';
 import { clearUpstreamsMemo } from './missing-paths';
 
 const fixtures: ReturnType<typeof testDatabase>[] = [];
@@ -490,14 +490,14 @@ it('checkpoints integrity probes and bounded report pages without repeating comp
 	});
 	const analyze = vi.spyOn(f.db, 'exec');
 	await continueScheduledGc(f.env, undefined, true);
-	expect(f.job()).toMatchObject({ phase: 7, integrityWork: { probed: true, after: 0 } });
-	expect(pages).toEqual([]);
+	expect(f.job()).toMatchObject({ phase: 7, integrityWork: { probed: true, after: 256 } });
+	expect(pages).toEqual([256]);
 	for (let i = 0; f.job() && i < 10; i++) {
 		vi.advanceTimersByTime(60_000);
 		await continueScheduledGc(f.env);
 	}
 	expect(f.job()).toBeNull();
-	expect(probes).toBe(1);
+	expect(probes).toBe(0);
 	expect(pages).toEqual([256, 256, 88, 0]);
 	const summary = JSON.parse(
 		String(f.sqlite.prepare("SELECT value FROM server_config WHERE key='gc_last_run'").get()!.value)
@@ -573,4 +573,204 @@ it('resumes bounded broken-closure discovery past covered windows on the same ca
 		automatic_purge_errors: 0,
 		automatic_objects_removed: 0
 	});
+});
+
+it('rotates bounded integrity probes across nights without starving later hashes', async () => {
+	vi.useFakeTimers();
+	vi.setSystemTime(new Date('2026-11-17T12:00:00Z'));
+	const f = fixture();
+	f.sqlite.exec('UPDATE cache SET retention_period=NULL');
+	const hashes = Array.from({ length: 600 }, (_, i) => String(i + 10).padStart(32, '0'));
+	f.sqlite.prepare('UPDATE object SET refs=?').run(JSON.stringify(hashes.map((h) => h + '-dep')));
+	f.sqlite
+		.prepare(
+			"INSERT INTO upstream(id,url,public_key,ttl,created_at) VALUES(1,'https://up.test','k',86400,?)"
+		)
+		.run(new Date().toISOString());
+	for (const h of hashes)
+		f.sqlite.prepare('INSERT INTO upstream_check VALUES(1,?,0,?)').run(h, new Date().toISOString());
+	const prepare = f.db.prepare.bind(f.db);
+	let queries = 0;
+	vi.spyOn(f.db, 'prepare').mockImplementation((sql) => {
+		const stmt = prepare(sql);
+		if (sql.includes('SELECT r.ref_hash AS h')) {
+			expect(sql).toContain('r.ref_hash <= ?2');
+			const all = stmt.all.bind(stmt);
+			stmt.all = async <T>() => {
+				queries++;
+				const r = await all<T>();
+				r.meta.duration = 1100;
+				return r;
+			};
+		}
+		return stmt;
+	});
+	const totals: number[] = [];
+	for (let night = 0; night < 3; night++) {
+		await continueScheduledGc(f.env, undefined, true);
+		for (let i = 0; f.job() && i < 20; i++) {
+			vi.advanceTimersByTime(60_000);
+			await continueScheduledGc(f.env);
+		}
+		expect(f.job()).toBeNull();
+		const summary = JSON.parse(
+			String(
+				f.sqlite.prepare("SELECT value FROM server_config WHERE key='gc_last_run'").get()!.value
+			)
+		);
+		totals.push(summary.stats.integrity_refs_probed);
+	}
+	expect(totals).toEqual([250, 250, 100]);
+	expect(queries).toBe(3);
+	expect(
+		f.sqlite.prepare("SELECT value FROM server_config WHERE key='gc_integrity_probe_after'").get()!
+			.value
+	).toBe('');
+});
+
+it('defers a repeatedly resource-limited integrity phase and still reaches ANALYZE', async () => {
+	vi.useFakeTimers();
+	vi.setSystemTime(new Date('2026-11-17T12:00:00Z'));
+	const f = fixture();
+	f.sqlite.exec('UPDATE cache SET retention_period=NULL');
+	f.sqlite.prepare("INSERT INTO server_config VALUES('gc_last_run',?)").run(
+		JSON.stringify({
+			at: '2026-11-16',
+			stats: {},
+			integrity: { incompleteObjects: 9, examples: ['previous-warning'] }
+		})
+	);
+	const prepare = f.db.prepare.bind(f.db);
+	let failures = 0;
+	vi.spyOn(f.db, 'prepare').mockImplementation((sql) => {
+		const stmt = prepare(sql);
+		if (sql.includes('AS incomplete'))
+			stmt.all = vi.fn(async () => {
+				failures++;
+				throw new Error(
+					'D1 DB is overloaded. Too many resources consumed within a 10 second window'
+				);
+			});
+		return stmt;
+	});
+	const analyze = vi.spyOn(f.db, 'exec');
+	for (let i = 0; i < 3; i++) {
+		const running = continueScheduledGc(f.env, undefined, i === 0);
+		await vi.advanceTimersByTimeAsync(15_000);
+		await running;
+		if (i < 2) expect(f.job().phase).toBe(7);
+		vi.advanceTimersByTime(60_000);
+	}
+	expect(f.job().phase).toBe(8);
+	await continueScheduledGc(f.env);
+	expect(f.job()).toBeNull();
+	expect(failures).toBe(3);
+	expect(analyze).toHaveBeenCalledWith('ANALYZE');
+	const summary = JSON.parse(
+		String(f.sqlite.prepare("SELECT value FROM server_config WHERE key='gc_last_run'").get()!.value)
+	);
+	expect(summary.stats.advisory_phases_deferred).toBe(1);
+	expect(summary.integrity).toMatchObject({
+		incompleteObjects: 9,
+		deferred: true,
+		examples: ['previous-warning']
+	});
+});
+
+it('keeps committed purge progress and stops retrying a later resource-limited plan', async () => {
+	vi.useFakeTimers();
+	vi.setSystemTime(new Date('2026-11-17T12:00:00Z'));
+	const f = fixture(4);
+	f.sqlite.exec('UPDATE cache SET retention_period=NULL,purge_broken_after_days=7');
+	for (let id = 1; id <= 4; id++)
+		f.sqlite
+			.prepare('UPDATE object SET refs=? WHERE id=?')
+			.run(JSON.stringify([String(100 + id).padStart(32, '0') + '-missing']), id);
+	await continueScheduledGc(f.env, undefined, true);
+	expect(f.job()).toBeNull();
+	f.sqlite
+		.prepare('UPDATE broken_reference SET first_missing_at=?')
+		.run(new Date(Date.now() - 8 * 86400_000).toISOString());
+	const prepare = f.db.prepare.bind(f.db);
+	let plans = 0;
+	vi.spyOn(f.db, 'prepare').mockImplementation((sql) => {
+		const stmt = prepare(sql);
+		if (sql.includes('AS blocked')) {
+			const all = stmt.all.bind(stmt);
+			stmt.all = async <T>() => {
+				plans++;
+				if (plans > 1)
+					throw new Error(
+						'D1 DB is overloaded. Too many resources consumed within a 10 second window'
+					);
+				const result = await all<T>();
+				result.meta.duration = 1100;
+				return result;
+			};
+		}
+		return stmt;
+	});
+	const analyze = vi.spyOn(f.db, 'exec');
+	for (let i = 0; i < 4; i++) {
+		const running = continueScheduledGc(f.env, undefined, i === 0);
+		await vi.advanceTimersByTimeAsync(15_000);
+		await running;
+		if (i === 0) {
+			expect(f.job().brokenWork.pending).toMatchObject({
+				plans: 1,
+				stats: { automatic_objects_removed: 1 }
+			});
+			expect(f.count('object')).toBe(3);
+		}
+		if (i > 0)
+			expect(
+				f.sqlite.prepare('SELECT purge_after_hash FROM broken_purge_state WHERE cache_id=1').get()!
+					.purge_after_hash
+			).toBe(String(101 + i).padStart(32, '0'));
+		vi.advanceTimersByTime(60_000);
+	}
+	expect(f.job().phase).toBe(7);
+	await continueScheduledGc(f.env);
+	expect(f.job()).toBeNull();
+	expect(plans).toBe(4);
+	expect(f.count('object')).toBe(3);
+	const summary = JSON.parse(
+		String(f.sqlite.prepare("SELECT value FROM server_config WHERE key='gc_last_run'").get()!.value)
+	);
+	expect(summary.stats).toMatchObject({
+		automatic_objects_removed: 1,
+		advisory_phases_deferred: 1,
+		automatic_purge_deferred: 3
+	});
+	expect(analyze).toHaveBeenCalledWith('ANALYZE');
+});
+
+it('queues one resumable instance-wide operation and persists its completion', async () => {
+	const f = fixture();
+	const queued = await queueGc(f.env);
+	expect(queued).toMatchObject({ state: 'pending', dryRun: false });
+	expect(f.count('object')).toBe(1);
+	expect((await queueGc(f.env, true)).id).toBe(queued.id);
+	await continueScheduledGc(f.env);
+	expect(await readGcOperation(f.db)).toMatchObject({
+		id: queued.id,
+		state: 'complete',
+		dryRun: false
+	});
+	expect(f.count('object')).toBe(0);
+});
+it('a queued preview survives refresh and completes without deleting paths or replacing GC history', async () => {
+	const f = fixture();
+	const queued = await queueGc(f.env, true);
+	expect(await readGcOperation(f.db)).toEqual(queued);
+	await continueScheduledGc(f.env);
+	expect(await readGcOperation(f.db)).toMatchObject({
+		state: 'complete',
+		dryRun: true,
+		stats: { expired_objects_reaped: 1 }
+	});
+	expect(f.count('object')).toBe(1);
+	expect(
+		f.sqlite.prepare("SELECT value FROM server_config WHERE key='gc_last_run'").get()
+	).toBeUndefined();
 });

@@ -185,9 +185,9 @@ func scanReferences(
 	p *maintenanceProgress,
 ) (missingPaths, unverifiedPaths []string, err error) {
 	after := ""
-	pages, examined := 0, 0
+	pages, examined, scanned := 0, 0, 0
 	for {
-		p.update("Reading reference page %d (%d dependencies examined)", pages+1, examined)
+		p.update("Scanning reference page %d (%d reference hashes scanned; %d dependencies examined)", pages+1, scanned, examined)
 		page, err := client.UncoveredReferences(ctx, cache, after)
 		if err != nil {
 			return nil, nil, fmt.Errorf(
@@ -206,7 +206,12 @@ func scanReferences(
 			byHash[ref.Hash] = ref.StorePath
 		}
 		p.update("Verifying upstream coverage: page %d, %d dependencies", pages+1, len(hashes))
-		status, err := client.CheckReferences(ctx, cache, hashes)
+		var status *api.ReferenceStatus
+		if len(hashes) > 0 {
+			status, err = client.CheckReferences(ctx, cache, hashes)
+		} else {
+			status = &api.ReferenceStatus{}
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf(
 				"verifying reference coverage (requires a Worker with maintenance support): %w",
@@ -224,6 +229,7 @@ func scanReferences(
 			}
 		}
 		pages++
+		scanned += page.ScannedHashes
 		examined += len(hashes)
 		if page.NextCursor == "" {
 			break

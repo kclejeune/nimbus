@@ -25,6 +25,7 @@ export interface ClosureInspection {
 	checkedAt: string;
 	operationId: string;
 	after: string;
+	scannedHashes?: number;
 	references: {
 		hash: string;
 		store_path: string;
@@ -65,7 +66,8 @@ export async function inspectClosures(
 	userId: string,
 	cacheName: string,
 	after = '',
-	ip: string | null = null
+	ip: string | null = null,
+	options: { plan?: boolean; pageLimit?: number } = {}
 ): Promise<ClosurePreview> {
 	if (after && !STORE_PATH_HASH_RE.test(after))
 		throw new ClosureMaintenanceError('Invalid dependency cursor.');
@@ -78,7 +80,7 @@ export async function inspectClosures(
 			409
 		);
 	const pageSize = Math.min(
-		MAX_REFERENCES,
+		Math.min(MAX_REFERENCES, options.pageLimit ?? MAX_REFERENCES),
 		Math.max(1, Math.floor(MAX_PROBES / Math.max(1, upstreams.length)))
 	);
 	const page = await uncoveredReferences(env.ATTIC_DB, cache.id, upstreams, after, pageSize);
@@ -93,12 +95,16 @@ export async function inspectClosures(
 	);
 	const missing = new Set(checked.missing),
 		unverified = new Set(checked.unverified);
-	const plan = await purgePlan(env.ATTIC_DB, cache.id, checked.missing);
+	const plan =
+		options.plan === false
+			? { objects: [] as PurgeTarget[], next_cursor: null }
+			: await purgePlan(env.ATTIC_DB, cache.id, checked.missing);
 	const inspection: ClosureInspection = {
 		cache: { id: cache.id, name: cache.name },
 		checkedAt: new Date().toISOString(),
 		operationId: crypto.randomUUID(),
 		after,
+		scannedHashes: page.scanned_hashes,
 		references: page.references.map((r) => ({
 			...r,
 			status: missing.has(r.hash) ? 'missing' : unverified.has(r.hash) ? 'unverified' : 'covered'

@@ -884,8 +884,9 @@ type UncoveredReference struct {
 }
 
 type IntegrityPage struct {
-	References []UncoveredReference `json:"references"`
-	NextCursor string               `json:"next_cursor"`
+	ScannedHashes int                  `json:"scanned_hashes"`
+	References    []UncoveredReference `json:"references"`
+	NextCursor    string               `json:"next_cursor"`
 }
 
 // ReferenceStatus keeps uncertain upstream checks separate from proven misses.

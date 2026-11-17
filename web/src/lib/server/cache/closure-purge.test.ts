@@ -217,9 +217,14 @@ describe('purge plans and application', () => {
 		);
 	});
 
-	it.each([false, true])(
-		'plans and applies a 10,000-object chain with indexed traversals (ANALYZE=%s)',
-		async (analyzed) => {
+	it.each([
+		[false, false],
+		[true, false],
+		[false, true],
+		[true, true]
+	])(
+		'plans and applies a 10,000-object chain with indexed traversals (ANALYZE=%s, synced=%s)',
+		async (analyzed, synced) => {
 			const f = fixture();
 			f.sqlite.exec(
 				'DELETE FROM object_ref; DELETE FROM object; DELETE FROM nar; DELETE FROM upstream_check; BEGIN'
@@ -232,6 +237,10 @@ describe('purge plans and application', () => {
 				.prepare('INSERT INTO upstream_check VALUES(1,?,0,?)')
 				.run(hash(size + 1), new Date().toISOString());
 			f.sqlite.exec('COMMIT');
+			if (synced)
+				f.sqlite
+					.prepare("INSERT INTO server_config VALUES('ref_sync_watermark',?)")
+					.run(String(size));
 			if (analyzed) f.sqlite.exec('ANALYZE');
 			const targets = f.sqlite
 				.prepare(
@@ -260,9 +269,13 @@ describe('purge plans and application', () => {
 			expect(
 				queryPlan.filter((line) => /SEARCH e USING AUTOMATIC.*INDEX \(child=\?\)/.test(line))
 			).toHaveLength(2);
-			expect(queryPlan).toContain(
-				'SEARCH child USING COVERING INDEX sqlite_autoindex_object_1 (cache_id=? AND store_path_hash=?)'
-			);
+			expect(
+				queryPlan.some((line) =>
+					/^SEARCH child USING (?:COVERING INDEX sqlite_autoindex_object_1|INTEGER PRIMARY KEY)/.test(
+						line
+					)
+				)
+			).toBe(true);
 			const scanApproval = queryPlan.indexOf('SCAN p VIRTUAL TABLE INDEX 1:');
 			expect(scanApproval).toBeGreaterThan(-1);
 			expect(queryPlan[scanApproval + 1]).toBe('SEARCH o USING INTEGER PRIMARY KEY (rowid=?)');
@@ -436,4 +449,15 @@ it('requires pull and delete for purge, validates inputs, and permits a delete-o
 			})
 		).status
 	).toBe(400);
+});
+
+it('merges indexed edges and later source JSON while protecting a new unsynced upload at apply', async () => {
+	const f = fixture();
+	f.sqlite.prepare("INSERT INTO server_config VALUES('ref_sync_watermark','3')").run();
+	const plan = await purgePlan(f.db, 1, [hash(99)]);
+	expect(plan.objects.map((o) => o.id)).toEqual([1, 2, 3, 4]);
+	f.object(8, [4], 1, new Date().toISOString());
+	const result = await applyPurge(f.env, f.ctx, 1, 'one', [hash(99)], plan.objects, 'mixed-edges');
+	expect(result.removed).toBe(0);
+	expect(f.ids()).toContain(8);
 });

@@ -210,3 +210,34 @@ func TestRepairLargeBacklogBatchesUploads(t *testing.T) {
 		})
 	}
 }
+
+func TestRepairFollowsEmptyScanWindows(t *testing.T) {
+	pages, checks := 0, 0
+	cursor := strings.Repeat("1", 32)
+	path := "/nix/store/" + strings.Repeat("2", 32) + "-dep"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/check") {
+			checks++
+			_ = json.NewEncoder(w).Encode(api.ReferenceStatus{Missing: []string{strings.Repeat("2", 32)}})
+			return
+		}
+		pages++
+		if pages == 1 {
+			_ = json.NewEncoder(w).Encode(api.IntegrityPage{ScannedHashes: 512, NextCursor: cursor})
+		} else {
+			if r.URL.Query().Get("after") != cursor {
+				t.Error("scan cursor lost")
+			}
+			_ = json.NewEncoder(w).Encode(api.IntegrityPage{ScannedHashes: 1, References: []api.UncoveredReference{{Hash: strings.Repeat("2", 32), StorePath: path}}})
+		}
+	}))
+	defer server.Close()
+	var out bytes.Buffer
+	repair := closureRepair{client: api.New(server.URL, "secret"), cache: "test", out: &out, local: func(_ context.Context, paths []string) ([]string, []string, error) { return paths, nil, nil }}
+	if err := repair.run(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	if pages != 2 || checks != 1 || !strings.Contains(out.String(), path) {
+		t.Fatalf("pages=%d checks=%d output=%s", pages, checks, out.String())
+	}
+}

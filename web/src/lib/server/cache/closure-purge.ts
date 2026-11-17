@@ -62,13 +62,18 @@ export async function readPurgeUpstreams(db: D1, cacheId: number, cacheName: str
 	return { config, upstreams };
 }
 
-// Read references from their source JSON, including uploads after GC's graph
-// watermark. Apply evaluates these CTEs once inside its atomic deletion batch,
+// References are immutable for a store path (insertObjectStmt preserves them on
+// replacement). Use indexed, synced edges and source JSON above the atomic GC
+// watermark, including uploads between planning and apply. Only ancestors of a
+// missing path can protect other affected paths, so keep walks that subgraph.
+// Apply evaluates these CTEs once inside its atomic deletion batch,
 // recording the eligible IDs and their invalidation tags before deleting.
 // Give the materialized child hashes TEXT affinity so SQLite can index them.
 // CROSS JOIN fixes traversal order even without ANALYZE statistics: a frontier
 // row probes the graph/index, and a reviewed JSON row probes the object's PK.
-// The forward walk can read refs directly with indexed child lookups.
+// NOT INDEXED keeps the unsynced tail on the object PK, rather than scanning
+// the cache index. Unary + keeps the affected-set membership test from
+// turning each forward lookup into an IN-list rowid loop.
 const PURGE_CTES = `WITH RECURSIVE
  enabled AS MATERIALIZED (
    ${ENABLED_UPSTREAMS}
@@ -87,11 +92,23 @@ const PURGE_CTES = `WITH RECURSIVE
      WHERE b.cache_id=?1 AND b.ref_hash=seed.value AND b.upstream_config=${UPSTREAM_CONFIG}
      AND julianday(b.first_missing_at)<=julianday('now')-a.days
      AND julianday(b.last_checked_at)>=julianday('now','-1 hour')))
- ), edges(parent,child) AS MATERIALIZED (
-   SELECT o.id,CAST(substr(j.value,1,32) AS TEXT) FROM object o,json_each(o.refs) j WHERE o.cache_id=?1
+ ), synced AS MATERIALIZED (
+   SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM server_config WHERE key='ref_sync_watermark'),0) AS id
+ ), pending(parent,child) AS MATERIALIZED (
+   SELECT o.id,CAST(substr(j.value,1,32) AS TEXT)
+   FROM synced s CROSS JOIN object o NOT INDEXED CROSS JOIN json_each(o.refs) j
+   WHERE o.id>s.id AND o.cache_id=?1
  ), affected(id) AS (
-   SELECT e.parent FROM missing m CROSS JOIN edges e ON e.child=m.hash
-   UNION SELECT e.parent FROM affected a CROSS JOIN object o ON o.id=a.id CROSS JOIN edges e ON e.child=o.store_path_hash
+   SELECT r.object_id FROM missing m CROSS JOIN object_ref r INDEXED BY idx_object_ref_ref_hash
+     ON r.ref_hash=m.hash CROSS JOIN object o ON o.id=r.object_id
+     WHERE o.cache_id=?1 AND o.id<=(SELECT id FROM synced)
+   UNION SELECT e.parent FROM missing m CROSS JOIN pending e ON e.child=m.hash
+   UNION SELECT r.object_id FROM affected a CROSS JOIN object child ON child.id=a.id
+     CROSS JOIN object_ref r INDEXED BY idx_object_ref_ref_hash ON r.ref_hash=child.store_path_hash
+     CROSS JOIN object parent ON parent.id=r.object_id
+     WHERE parent.cache_id=?1 AND parent.id<=(SELECT id FROM synced)
+   UNION SELECT e.parent FROM affected a CROSS JOIN object o ON o.id=a.id
+     CROSS JOIN pending e ON e.child=o.store_path_hash
  ), approved(id) AS (
    SELECT o.id FROM json_each(?3) p CROSS JOIN object o ON o.id=json_extract(p.value,'$.id')
    WHERE o.cache_id=?1 AND o.nar_id=json_extract(p.value,'$.nar_id')
@@ -99,13 +116,14 @@ const PURGE_CTES = `WITH RECURSIVE
    AND o.created_at=json_extract(p.value,'$.created_at')
    AND o.detached_at IS json_extract(p.value,'$.detached_at')
  ), keep(id) AS (
-   SELECT o.id FROM object o WHERE o.cache_id=?1 AND (
+   SELECT o.id FROM affected a CROSS JOIN object o ON o.id=a.id WHERE o.cache_id=?1 AND (
      (?3 IS NOT NULL AND o.id NOT IN (SELECT id FROM approved))
      OR julianday(o.created_at)>=julianday(?4)
      OR o.store_path_hash IN (SELECT store_path_hash FROM gc_root WHERE cache_id=?1))
    UNION SELECT child.id FROM keep k CROSS JOIN object parent ON parent.id=k.id
      CROSS JOIN json_each(parent.refs) j
-     CROSS JOIN object child ON child.cache_id=?1 AND child.store_path_hash=substr(j.value,1,32)
+     CROSS JOIN object child INDEXED BY sqlite_autoindex_object_1 ON child.cache_id=?1 AND child.store_path_hash=substr(j.value,1,32)
+     WHERE +child.id IN (SELECT id FROM affected)
  ), eligible(id) AS (SELECT id FROM affected EXCEPT SELECT id FROM keep)
 `;
 
