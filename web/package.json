@@ -173,6 +173,9 @@
 		},
 		"miniflare": {
 			"undici": "^7.30.1"
+		},
+		"svelte-toolbelt@^0.10.6": {
+			"runed": "^0.38.0"
 		}
 	},
 	"allowScripts": {
