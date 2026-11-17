@@ -22,6 +22,7 @@ on:
     branches:
       - main
     paths:
+      - ".github/workflows/vendor-hash.yml"
       - "go.mod"
       - "go.sum"
       - "flake.nix"
@@ -49,7 +50,10 @@ jobs:
       - name: Refresh vendorHash
         id: refresh
         run: |
-          nix run nixpkgs#nix-update -- --flake --version=skip nimbus
+          # nix-update evaluates the flake by its metadata store path, which
+          # must exist even on a fresh runner. Use the locked tool inputs too.
+          nix flake archive --no-update-lock-file --json > /dev/null
+          nix run --inputs-from . nixpkgs#nix-update -- --flake --version=skip nimbus
           # nix-update exits 0 whether or not it rewrote anything, so the diff
           # is the only signal that the hash was stale.
           if git diff --quiet -- pkgs/nimbus; then
