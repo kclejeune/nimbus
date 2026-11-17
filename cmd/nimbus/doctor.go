@@ -285,11 +285,31 @@ func (d cacheDoctor) check(ctx context.Context, p *maintenanceProgress) doctorRe
 		)
 		return r
 	}
-	p.update("Reading GC-recorded closure warnings (one page)")
-	page, err := d.client.UncoveredReferences(ctx, d.ref.Cache, "")
-	if err != nil {
-		d.apiFailure(&r, "closures", err, login)
-		return r
+	var page *api.IntegrityPage
+	after := ""
+	for window := 1; ; window++ {
+		p.update("Reading GC-recorded closure warnings (scan window %d)", window)
+		page, err = d.client.UncoveredReferences(ctx, d.ref.Cache, after)
+		if err != nil {
+			d.apiFailure(&r, "closures", err, login)
+			return r
+		}
+		// Covered hash windows can be empty even when more of the graph
+		// remains. Stop at the first actual warning page, or scan to the end
+		// under the command's existing context deadline.
+		if len(page.References) > 0 || page.NextCursor == "" {
+			break
+		}
+		if len(page.NextCursor) != 32 || page.NextCursor <= after {
+			r.add(
+				"closures",
+				"error",
+				"Server returned an invalid or non-advancing reference cursor.",
+				"Check the Worker version and server logs.",
+			)
+			return r
+		}
+		after = page.NextCursor
 	}
 	r.add("authentication", "ok", "The maintenance endpoint accepted the configured token.")
 	if len(page.References) == 0 && page.NextCursor == "" {

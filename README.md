@@ -209,8 +209,10 @@ server-reported permissions, effective Nix substituters and signing keys, privat
 cache netrc configuration, and one page of GC-recorded closure warnings. It uses
 GET requests and local inspection only; it suggests fixes rather than applying
 them. It does not run GC, upload paths, purge anything, or refresh upstream
-verdicts. Warnings describe the GC snapshot; use the suggested `repair` command
-to verify current coverage. Local availability checks are bounded to that page.
+verdicts. Empty scan windows are followed until a warning page or the end of the
+graph, within the command's timeout. Warnings describe the GC snapshot; use the
+suggested `repair` command to verify current coverage. Local availability checks
+are bounded to that page.
 The root proxy has a separate signing key, so doctor reports that it cannot
 verify that key through per-cache discovery. Daemon trust policy and netrc
 credential authorization also require separate verification.

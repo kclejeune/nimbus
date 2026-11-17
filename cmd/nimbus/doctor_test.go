@@ -22,8 +22,10 @@ func doctorFixture(
 	closureStatus int,
 	closureHTML bool,
 	page api.IntegrityPage,
+	following ...api.IntegrityPage,
 ) cacheDoctor {
 	t.Helper()
+	pages := append([]api.IntegrityPage{page}, following...)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet {
 			t.Errorf("doctor made a mutating request: %s %s", req.Method, req.URL.Path)
@@ -54,7 +56,16 @@ func doctorFixture(
 				}
 				return
 			}
-			_ = json.NewEncoder(w).Encode(page)
+			cursor := ""
+			for _, candidate := range pages {
+				if req.URL.Query().Get("after") == cursor {
+					_ = json.NewEncoder(w).Encode(candidate)
+					return
+				}
+				cursor = candidate.NextCursor
+			}
+			t.Errorf("unexpected reference cursor %q", req.URL.Query().Get("after"))
+			w.WriteHeader(http.StatusBadRequest)
 		default:
 			t.Errorf("unexpected request %s", req.URL)
 			w.WriteHeader(http.StatusNotFound)
@@ -122,6 +133,50 @@ func TestDoctorHealthyCacheOnlyReads(t *testing.T) {
 	r, out := checkDoctor(t, doctorFixture(t, 200, false, api.IntegrityPage{}))
 	if r.Warnings != 0 || r.Errors != 0 || !strings.Contains(out, "maintenance endpoint accepted") {
 		t.Fatalf("unexpected findings: %s", out)
+	}
+}
+
+func TestDoctorFollowsCoveredWindowsWithoutFalseWarnings(t *testing.T) {
+	d := doctorFixture(t, 200, false,
+		api.IntegrityPage{ScannedHashes: 512, NextCursor: strings.Repeat("1", 32)},
+		api.IntegrityPage{ScannedHashes: 512, NextCursor: strings.Repeat("2", 32)},
+		api.IntegrityPage{ScannedHashes: 10},
+	)
+	r, out := checkDoctor(t, d)
+	if r.Warnings != 0 || r.Errors != 0 || !strings.Contains(out, "No unresolved dependencies") {
+		t.Fatalf("covered windows reported as broken: %s", out)
+	}
+}
+
+func TestDoctorFindsWarningsAfterCoveredWindow(t *testing.T) {
+	hash := strings.Repeat("3", 32)
+	d := doctorFixture(t, 200, false,
+		api.IntegrityPage{ScannedHashes: 512, NextCursor: strings.Repeat("1", 32)},
+		api.IntegrityPage{References: []api.UncoveredReference{
+			{Hash: hash, StorePath: "/nix/store/" + hash + "-path"},
+		}},
+	)
+	d.local = func(_ context.Context, paths []string) ([]string, []string, error) {
+		return paths, nil, nil
+	}
+	r, out := checkDoctor(t, d)
+	if r.Warnings != 1 || r.Errors != 0 || !strings.Contains(out, "1 GC-recorded dependencies") {
+		t.Fatalf("missed later warning: %s", out)
+	}
+}
+
+func TestDoctorRejectsInvalidOrNonAdvancingEmptyWindowCursor(t *testing.T) {
+	for _, cursor := range []string{"invalid", strings.Repeat("1", 32), strings.Repeat("0", 32)} {
+		t.Run(cursor, func(t *testing.T) {
+			d := doctorFixture(t, 200, false,
+				api.IntegrityPage{NextCursor: strings.Repeat("1", 32)},
+				api.IntegrityPage{NextCursor: cursor},
+			)
+			r, out := checkDoctor(t, d)
+			if r.Errors != 1 || !strings.Contains(out, "reference cursor") {
+				t.Fatalf("invalid continuation accepted: %s", out)
+			}
+		})
 	}
 }
 
