@@ -3,6 +3,8 @@
 // is standard Web APIs plus the D1/R2 bindings typed via App.Platform; the
 // remaining CF-specific piece is compression/zstd-setup.ts, whose .wasm
 // import only wrangler's bundler understands.
+export const CACHEABLE_NAR_BYTES = 512 * 1024 * 1024;
+
 import type { PurgeResult } from './purge-queue';
 import { countR2, countRetry, measure } from './latency';
 import { bodyDeadline, bodyWatchdog } from '../request-body';

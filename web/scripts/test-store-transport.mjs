@@ -29,6 +29,17 @@ const stream = async (size, mode = '') =>
 	fetch(new URL(`/_nar_v2/fixture.nar?size=${size}&mode=${mode}`, await mf.ready));
 
 try {
+	const boundary = 200 * 1024 * 1024;
+	const resumed = await fetch(new URL('/large-range', await mf.ready), {
+		headers: { Range: `bytes=${boundary - 2}-${boundary + 2}` }
+	});
+	assert.equal(resumed.status, 206);
+	assert.equal(resumed.headers.get('Content-Length'), '5');
+	assert.equal(
+		resumed.headers.get('Content-Range'),
+		`bytes ${boundary - 2}-${boundary + 2}/${boundary * 3}`
+	);
+	assert.deepEqual(Buffer.from(await resumed.arrayBuffer()), Buffer.from([1, 1, 2, 2, 2]));
 	// Native D1 requires its own statements in batch(), including bound ones.
 	assert.deepEqual(await (await mf.dispatchFetch('https://cache.test/gc-pacing')).json(), {
 		n: 8,

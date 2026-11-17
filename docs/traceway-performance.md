@@ -259,3 +259,38 @@ Traceway's non-stream impact score includes successful requests that exceed
 its Apdex latency bound. Its volume-based explanation must describe these as
 slow or failing requests, rather than HTTP errors. Use request-list HTTP status
 statistics and gateway header timings to distinguish latency from availability.
+
+
+## Large-NAR resumes and refusal diagnostics
+
+The gateway handles single byte ranges for known-length NARs larger than the
+assembled cacheable-object limit. It authorizes the cache/holder first, reads
+only the intersecting compressed R2 chunks, and returns a no-store 206 with the
+exact Content-Range and Content-Length. CachedStore keeps its full-200 contract;
+cacheable responses continue through Workers Caching. Unsupported/multipart,
+If-Range and unknown-length requests retain the full-response path. See
+[Cloudflare's range behavior](https://developers.cloudflare.com/cache/reference/range-requests/)
+and the [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/).
+
+Ranged streams reuse the existing batched body watchdog. `nimbus.range` records
+completion/error, requested start/end, total size, completed compressed bytes
+and request-abort state. These observations diagnose resumptions; they do not
+explain the original November 16 disconnect.
+
+`nimbus.upstream_refusal` distinguishes probe-budget refusal, unexpected upstream
+status, invalid narinfo, signature rejection, network/timeout, circuit cooldown,
+signing and lookup errors. Upstream IDs and status codes are fields; URLs,
+credentials and personal identifiers are omitted. Refusal and cache policy are
+unchanged.
+
+## Completion-prefetch experiment
+
+A candidate that admitted the leading chunk before starting speculative work
+was compared with the existing completion pipeline in four alternating Node
+runs. The fixture used 24 x 64 KiB identity-compressed chunks, immediate R2
+headers and an 8 ms body delay; it exercised chunk verification and publication.
+Median completion times were 217.7 ms existing and 228.6 ms candidate
+(5.0% slower). This small simulated fixture cannot predict the 776 MB production
+case, but it did not justify added coordination. The existing upload pipeline,
+memory budget and verification requirements are retained. Further upload
+optimization needs a native/staging comparison with representative payloads.

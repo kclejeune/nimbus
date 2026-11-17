@@ -1,3 +1,4 @@
+import { serveLargeNarRange } from '../../src/lib/server/cache/nar-range';
 // Native stream fixture for scripts/test-store-transport.mjs. No real bindings.
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { readViaStore } from '../../src/lib/server/cache/store-transport';
@@ -90,6 +91,37 @@ prototype.readAtLeast = function (min, view) {
 export default {
 	async fetch(request: Request, env: App.Platform['env'], ctx: ExecutionContext) {
 		const url = new URL(request.url);
+		if (url.pathname === '/large-range') {
+			const chunkSize = 200 * 1024 * 1024;
+			const fakeEnv = {
+				CACHE_BASE_URL: 'https://cache.test',
+				CACHE_BUCKET: {
+					get: async (key: string, options: { range: { offset: number; length: number } }) => ({
+						size: chunkSize,
+						body: new Response(new Uint8Array(options.range.length).fill(Number(key))).body
+					})
+				}
+			} as unknown as App.Platform['env'];
+			const fakeCtx = {
+				waitUntil: (p: Promise<unknown>) => ctx.waitUntil(p),
+				exports: {
+					CachedStore: {
+						fetch: async () =>
+							Response.json({
+								nar: { num_chunks: 3 },
+								chunks: [1, 2, 3].map((id) => ({
+									file_size: chunkSize,
+									remote_file: JSON.stringify({ key: String(id) })
+								}))
+							})
+					}
+				}
+			} as unknown as ExecutionContext;
+			return (
+				(await serveLargeNarRange(request, fakeEnv, fakeCtx, 'fixture')) ??
+				new Response('not a range', { status: 500 })
+			);
+		}
 		if (url.pathname === '/gc-pacing') {
 			const pacer = new GcPacer();
 			const db = pacedGcDatabase(env.ATTIC_DB, pacer);

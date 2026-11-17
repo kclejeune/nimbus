@@ -1,3 +1,4 @@
+import { upstreamRefusal } from './upstream-refusal';
 // POST /_api/v1/get-missing-paths, ported from the Rust worker and extended
 // with upstream filtering: paths already fetchable from an enabled upstream
 // binary cache are not reported as missing, so clients never push them here.
@@ -697,10 +698,15 @@ export async function fetchUpstreamNarInfo(
 		upstream: Upstream
 	): Promise<{ text: string; upstream: Upstream } | null | UpstreamUncertain> => {
 		try {
-			if (!(await takeProbeBudget(guard))) return PROBE_REFUSED;
-			return await upstreamHealth.run(
+			if (!(await takeProbeBudget(guard))) {
+				upstreamRefusal('probe_budget', { upstreamId: upstream.id });
+				return PROBE_REFUSED;
+			}
+			let probed = false;
+			const result = await upstreamHealth.run(
 				healthKey(upstream),
 				async (): Promise<{ text: string; upstream: Upstream } | null | UpstreamUncertain> => {
+					probed = true;
 					const res = await probeFetch(`${upstream.url}/${storePathHash}.narinfo`);
 					// Error bodies still occupy a connection until consumed or cancelled.
 					if (res.status !== 200) await res.body?.cancel();
@@ -713,28 +719,37 @@ export async function fetchUpstreamNarInfo(
 						// own. The ABSENT case always differs from the cached verdict —
 						// known-absent upstreams were filtered out of the candidates.
 						const parsed = parseNarInfo(text);
-						if ((parsed?.storePath.split('/').pop() ?? '').slice(0, 32) !== storePathHash)
+						if ((parsed?.storePath.split('/').pop() ?? '').slice(0, 32) !== storePathHash) {
+							upstreamRefusal('invalid_narinfo', { upstreamId: upstream.id });
 							return UPSTREAM_UNAVAILABLE;
+						}
 						const fresh = await classifyNarinfo(upstream, text);
 						if (cached.get(upstream.id) !== fresh) {
 							recordVerdictDeferred(db, ctx, upstream.id, storePathHash, fresh, guard?.env);
 						}
 						if (fresh !== VERDICT_ABSENT) return { text, upstream };
+						upstreamRefusal('signature', { upstreamId: upstream.id });
 					} else if (res.status === 404) {
 						recordVerdictDeferred(db, ctx, upstream.id, storePathHash, VERDICT_ABSENT, guard?.env);
 					} else {
 						// Unexpected status (rate limit, block, outage): worth surfacing,
 						// since the caller silently treats it as a miss.
-						console.warn(`upstream ${upstream.url} returned ${res.status} for ${storePathHash}`);
+						upstreamRefusal('http_status', { upstreamId: upstream.id, status: res.status });
 						return UPSTREAM_UNAVAILABLE;
 					}
 					return null;
 				},
 				UPSTREAM_UNAVAILABLE
 			);
+			if (!probed && result === UPSTREAM_UNAVAILABLE)
+				upstreamRefusal('circuit_open', { upstreamId: upstream.id });
+			return result;
 		} catch (e) {
 			// transient upstream trouble: fall through to the next upstream
-			console.warn(`upstream ${upstream.url} fetch failed for ${storePathHash}: ${e}`);
+			upstreamRefusal('network_or_timeout', {
+				upstreamId: upstream.id,
+				errorType: e instanceof Error ? e.name : 'unknown'
+			});
 			return UPSTREAM_UNAVAILABLE;
 		}
 	};

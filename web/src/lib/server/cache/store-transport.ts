@@ -62,7 +62,7 @@ function diagnostic(request: Request, phase: string, details: Record<string, unk
  * This cannot detect a stall between Cloudflare's edge and the client after
  * the Worker has already handed over all bytes.
  */
-function guardBody(response: Response, request: Request, abort: AbortController): Response {
+export function guardBody(response: Response, request: Request, abort: AbortController): Response {
 	if (!response.body) return response;
 	const length = response.headers.get('Content-Length');
 	const expected =

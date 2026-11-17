@@ -1,3 +1,4 @@
+import { serveLargeNarRange } from './nar-range';
 // Request router for the attic-compatible binary-cache API, dispatched from
 // worker-entry.ts when a request arrives on the cache hostname. Fully native
 // TypeScript — the legacy Rust worker is no longer involved.
@@ -507,6 +508,24 @@ function scheduleTouch(
 	);
 }
 
+async function forwardNar(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext | undefined,
+	holder: { id: number; is_public: number },
+	filename: string
+): Promise<Response> {
+	return (
+		(await serveLargeNarRange(
+			request,
+			env,
+			ctx,
+			filename.split('.')[0],
+			holder.is_public === 1 ? undefined : holder.id
+		)) ?? forwardToStore(new Request(narStoreUrl(request, holder, filename), request), env, ctx)
+	);
+}
+
 async function handleNar(
 	request: Request,
 	env: Env,
@@ -551,8 +570,7 @@ async function handleNar(
 	// cache-scoped for private). The cache-specific concerns stay here: the
 	// visibility header is stamped per request, and a store miss falls back to
 	// the cache's upstreams (passthrough narinfo NAR URLs resolve that way).
-	const keyed = narStoreUrl(request, auth.cache, filename);
-	const response = await forwardToStore(new Request(keyed, request), env, ctx);
+	const response = await forwardNar(request, env, ctx, auth.cache, filename);
 
 	if (response.status === 404)
 		return narMiss(
@@ -855,11 +873,7 @@ async function handleProxyNar(
 	// Same edge entry as the per-cache route. pickReadableWinner already proved
 	// the winner holds this NAR, but the scoped path is what keeps the resulting
 	// edge entry out of reach of a request authorized against another cache.
-	let response = await forwardToStore(
-		new Request(narStoreUrl(request, winner, filename), request),
-		env,
-		ctx
-	);
+	let response = await forwardNar(request, env, ctx, winner, filename);
 	// The winner no longer holds the NAR (GC reaped it, or the candidate
 	// entry was a stale positive): confirm and retry once against whoever
 	// holds it now before falling back to the upstreams.
@@ -873,11 +887,7 @@ async function handleProxyNar(
 		if (next && next.id !== winner.id) {
 			await disposeLoopback(response);
 			winner = next;
-			response = await forwardToStore(
-				new Request(narStoreUrl(request, winner, filename), request),
-				env,
-				ctx
-			);
+			response = await forwardNar(request, env, ctx, winner, filename);
 		}
 	}
 	if (!head && response.ok) scheduleTouch(env, ctx, winner.id, narHashRaw);

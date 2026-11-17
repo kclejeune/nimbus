@@ -283,6 +283,21 @@ describe('concurrent upstream probing', () => {
 				);
 			}
 			expect(spy).toHaveBeenCalledTimes(3);
+			expect(warn.mock.calls.map(([line]) => JSON.parse(line))).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						event: 'nimbus.upstream_refusal',
+						reason: 'http_status',
+						status: 503,
+						upstreamId: 1
+					}),
+					expect.objectContaining({
+						event: 'nimbus.upstream_refusal',
+						reason: 'circuit_open',
+						upstreamId: 1
+					})
+				])
+			);
 			spy.mockImplementation(() => new Response(null, { status: 200 }));
 			const path = `nar/${freshHash()}.nar.xz`;
 			expect(await findUpstreamNar(dbWithVerdicts(), ups, path, undefined)).toBe(

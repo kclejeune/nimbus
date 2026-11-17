@@ -1,3 +1,4 @@
+import { upstreamRefusal } from './upstream-refusal';
 // Cached read path of the binary-cache API, served behind the CachedStore
 // entrypoint (worker-entry.ts) with Workers Caching enabled — on an edge cache
 // hit none of this code runs, and neither D1 nor R2 is touched. Requests only
@@ -46,7 +47,12 @@ import { clearAbsent, getProxyKeypair, pickReadableWinner } from './proxy';
 import { purgeCoalesced } from './purge';
 import { RateBudget } from './rate-budget';
 import { TtlMemo } from './ttl-memo';
-import { withR2Retry, newFixedLengthStream, type ExecutionContext } from './platform';
+import {
+	withR2Retry,
+	newFixedLengthStream,
+	CACHEABLE_NAR_BYTES,
+	type ExecutionContext
+} from './platform';
 import { measure, countLoopbackFallback, streamObservation } from './latency';
 import { stripSha256 } from '../attic/nix-base32';
 import { readRpcResult } from './rpc';
@@ -585,52 +591,63 @@ async function serveRootUpstreamNarInfo(
 ): Promise<Response> {
 	if (storePathHash.length !== 32) return errorResponse(400, 'Invalid store path hash');
 
-	const session = db.readSession(env.ATTIC_DB);
-	const upstreams = await allLiveUpstreams(env.ATTIC_DB, ctx, await cachedUpstreamConfig(env, ctx));
-	// The cache-wide ~upstream tag lets registry changes purge every root
-	// passthrough in one call, like cacheTag() does for a real cache.
-	const tag = `${narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash)},${ROOT_UPSTREAM_TAG}`;
-
-	const hit =
-		upstreams.length > 0
-			? await fetchUpstreamNarInfo(session, upstreams, storePathHash, ctx, {
-					env,
-					ip: clientIp
-				})
-			: null;
-	// A refused probe budget must not become an edge-cached 404 shared by
-	// every client: errorResponse is no-store, so the refusal dies with this
-	// response.
-	if (isUncertain(hit))
-		return errorResponse(
-			503,
-			hit === PROBE_REFUSED
-				? 'Upstream probe budget exhausted'
-				: 'Upstream temporarily unavailable',
-			undefined,
-			{
-				'Retry-After': '60'
-			}
+	try {
+		const session = db.readSession(env.ATTIC_DB);
+		const upstreams = await allLiveUpstreams(
+			env.ATTIC_DB,
+			ctx,
+			await cachedUpstreamConfig(env, ctx)
 		);
-	if (hit) {
-		try {
-			// Unknown-path 404s need no signing key or cold-isolate D1 read.
-			const keypair = await getProxyKeypair(env);
-			const text = await addNarInfoSignature(hit.text, keypair);
-			return withVisibility(upstreamNarinfoResponse({ ...hit, text }, tag), true);
-		} catch (error) {
-			// A foreign-signature fallback would still fail for proxy-only clients.
-			// Do not cache it: key access/signing must retry on the next request.
-			console.warn(`upstream proxy signing failed: ${error}`);
-			return errorResponse(503, 'Narinfo signing temporarily unavailable', undefined, {
-				'Retry-After': '60'
-			});
+		// The cache-wide ~upstream tag lets registry changes purge every root
+		// passthrough in one call, like cacheTag() does for a real cache.
+		const tag = `${narinfoTag(ROOT_UPSTREAM_TAG_NS, storePathHash)},${ROOT_UPSTREAM_TAG}`;
+
+		const hit =
+			upstreams.length > 0
+				? await fetchUpstreamNarInfo(session, upstreams, storePathHash, ctx, {
+						env,
+						ip: clientIp
+					})
+				: null;
+		// A refused probe budget must not become an edge-cached 404 shared by
+		// every client: errorResponse is no-store, so the refusal dies with this
+		// response.
+		if (isUncertain(hit)) {
+			upstreamRefusal(hit === PROBE_REFUSED ? 'probe_budget' : 'upstream_unavailable');
+			return errorResponse(
+				503,
+				hit === PROBE_REFUSED
+					? 'Upstream probe budget exhausted'
+					: 'Upstream temporarily unavailable',
+				undefined,
+				{
+					'Retry-After': '60'
+				}
+			);
 		}
+		if (hit) {
+			try {
+				// Unknown-path 404s need no signing key or cold-isolate D1 read.
+				const keypair = await getProxyKeypair(env);
+				const text = await addNarInfoSignature(hit.text, keypair);
+				return withVisibility(upstreamNarinfoResponse({ ...hit, text }, tag), true);
+			} catch (error) {
+				// A foreign-signature fallback would still fail for proxy-only clients.
+				// Do not cache it: key access/signing must retry on the next request.
+				upstreamRefusal('signing', { errorType: error instanceof Error ? error.name : 'unknown' });
+				return errorResponse(503, 'Narinfo signing temporarily unavailable', undefined, {
+					'Retry-After': '60'
+				});
+			}
+		}
+		const absent = errorResponse(404, 'Not found', 'NoSuchObject');
+		absent.headers.set('Cache-Control', NARINFO_404_CACHE_CONTROL);
+		absent.headers.set('Cache-Tag', tag);
+		return withVisibility(absent, true);
+	} catch (error) {
+		upstreamRefusal('lookup_error', { errorType: error instanceof Error ? error.name : 'unknown' });
+		throw error;
 	}
-	const absent = errorResponse(404, 'Not found', 'NoSuchObject');
-	absent.headers.set('Cache-Control', NARINFO_404_CACHE_CONTROL);
-	absent.headers.set('Cache-Tag', tag);
-	return withVisibility(absent, true);
 }
 
 // Upstream NAR redirects, resolved behind the edge so repeat requests for
@@ -996,13 +1013,13 @@ async function serveNar(
 	// Workers Paid does not raise the zone's 512 MB cacheable-object cap.
 	// Cache individual chunks when the assembled response cannot be cached.
 	const chunkStore =
-		totalSize === null || totalSize > 512 * 1024 * 1024 ? ctx?.exports?.CachedStore : undefined;
+		totalSize === null || totalSize > CACHEABLE_NAR_BYTES ? ctx?.exports?.CachedStore : undefined;
 	// A known wire length lets the runtime reject incomplete responses.
 	const { readable, writable } =
 		totalSize === null
 			? new TransformStream<Uint8Array, Uint8Array>()
 			: newFixedLengthStream(totalSize);
-	if (totalSize === null || totalSize > 512 * 1024 * 1024) {
+	if (totalSize === null || totalSize > CACHEABLE_NAR_BYTES) {
 		baseHeaders.set('Cache-Control', 'no-store');
 	}
 	const stream = streamObservation(keys.length, totalSize, narHashRaw, request);
