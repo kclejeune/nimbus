@@ -1,6 +1,8 @@
+import { isTransientD1Error } from '$lib/server/cache/db';
+import { invalidateUiReads } from '$lib/server/ui-read-cache';
 import { building, dev } from '$app/env';
 import { svelteKitHandler } from 'better-auth/svelte-kit';
-import { redirect } from '@sveltejs/kit';
+import { error as httpError, redirect } from '@sveltejs/kit';
 import type { Handle } from '@sveltejs/kit/hooks';
 import { createAuth, type Auth } from '$lib/server/auth/auth';
 import { resolveCfAccessUser } from '$lib/server/auth/cf-access';
@@ -66,18 +68,27 @@ export const handle: Handle = async ({ event, resolve }) => {
 	const auth = getAuth(env);
 
 	// Prefer an established better-auth (OIDC) session.
-	const session = await auth.api.getSession({ headers: event.request.headers });
-	if (session?.user) {
-		event.locals.user = await refreshCachedUser(env.ATTIC_DB, event.request.method, {
-			id: session.user.id,
-			sub: session.user.id,
-			provider: 'oidc',
-			email: session.user.email ?? null,
-			name: session.user.name ?? null
-		});
-	} else {
-		// Otherwise a per-request Cloudflare Access assertion.
-		event.locals.user = await resolveCfAccessUser(event, env);
+	try {
+		const session = await auth.api.getSession({ headers: event.request.headers });
+		if (session?.user) {
+			event.locals.user = await refreshCachedUser(env.ATTIC_DB, event.request.method, {
+				id: session.user.id,
+				sub: session.user.id,
+				provider: 'oidc',
+				email: session.user.email ?? null,
+				name: session.user.name ?? null
+			});
+		} else {
+			// Otherwise a per-request Cloudflare Access assertion.
+			event.locals.user = await resolveCfAccessUser(event, env);
+		}
+	} catch (error) {
+		if (isTransientD1Error(error, true))
+			throw httpError(
+				503,
+				'The service is temporarily busy and could not verify your access. Please retry shortly.'
+			);
+		throw error;
 	}
 
 	// Activation wall, enforced centrally so it covers form actions and
@@ -102,5 +113,17 @@ export const handle: Handle = async ({ event, resolve }) => {
 		return new Response('Account pending approval', { status: 403 });
 	}
 
-	return svelteKitHandler({ event, resolve, auth, building });
+	const response = await svelteKitHandler({ event, resolve, auth, building });
+	if (
+		!['GET', 'HEAD', 'OPTIONS'].includes(event.request.method) &&
+		response.status < 400 &&
+		!(
+			event.route.id === '/(app)/settings' &&
+			['startClosureCheck', 'continueClosureCheck', 'pauseClosureCheck', 'inspectClosures'].some(
+				(name) => event.url.searchParams.has('/' + name)
+			)
+		)
+	)
+		invalidateUiReads(env.ATTIC_DB);
+	return response;
 };

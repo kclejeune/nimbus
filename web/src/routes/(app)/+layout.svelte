@@ -18,6 +18,9 @@
 		     would let wide tables force page-level horizontal scroll instead of
 		     scrolling inside their own overflow-x-auto containers. -->
 		<div class="min-w-0 flex-1">
+			{#if data.badgeUnavailable}<p role="status" class="mx-6 mt-3 text-xs text-warning">
+					The pending-user count could not be refreshed.
+				</p>{/if}
 			{@render children()}
 		</div>
 	</Sidebar.Inset>

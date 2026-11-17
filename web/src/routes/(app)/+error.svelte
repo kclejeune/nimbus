@@ -17,6 +17,8 @@
 						: message
 			};
 		}
+		if (status === 503)
+			return { icon: TriangleAlert, title: 'Temporarily unavailable', text: message, code: status };
 		if (status === 404) return { icon: SearchX, title: 'Page not found', text: message };
 		return { icon: TriangleAlert, title: 'Something went wrong', text: message, code: status };
 	});
@@ -35,8 +37,11 @@
 		{/if}
 		<p class="max-w-md text-sm text-muted-foreground">{view.text}</p>
 	</div>
-	<Button variant="outline" href="/">
-		<ArrowLeft />
-		Back to overview
-	</Button>
+	<div class="flex gap-2">
+		{#if status === 503}<Button href={page.url.pathname + page.url.search}>Try again</Button>{/if}
+		<Button variant="outline" href="/">
+			<ArrowLeft />
+			Back to overview
+		</Button>
+	</div>
 </div>

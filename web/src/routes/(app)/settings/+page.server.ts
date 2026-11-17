@@ -1,5 +1,20 @@
-import { error, fail, redirect } from '@sveltejs/kit';
-import { runGc, readGcLastRun, readGlobalMaxBytes } from '$lib/server/cache/gc';
+import { uiRead } from '$lib/server/ui-read-cache';
+import {
+	startClosureCheck,
+	stepClosureCheck,
+	pauseClosureCheck,
+	readClosureCheck,
+	readMaintenanceResult,
+	saveMaintenanceResult
+} from '$lib/server/maintenance-ui';
+import { error, fail, redirect, isRedirect } from '@sveltejs/kit';
+import {
+	queueGc,
+	readGcOperation,
+	continueScheduledGc,
+	readGcLastRun,
+	readGlobalMaxBytes
+} from '$lib/server/cache/gc';
 import { requireAdmin } from '$lib/server/auth/guard';
 import { writeAudit } from '$lib/server/audit';
 import { readSession } from '$lib/server/cache/db';
@@ -14,8 +29,6 @@ import { AdmissionError } from '$lib/server/cache/admission';
 import { CACHE_NAME_RE } from '$lib/utils';
 import type { PageServerLoad, Actions } from './$types';
 
-type Count = { n: number };
-
 export const load: PageServerLoad = async ({ platform, locals }) => {
 	if (!locals.user) throw error(401, 'Not signed in');
 	// Members land here from stale links; their settings live at /account.
@@ -23,41 +36,98 @@ export const load: PageServerLoad = async ({ platform, locals }) => {
 	const db = platform?.env.ATTIC_DB;
 	if (!db) throw error(500, 'Database binding unavailable');
 
-	// The GC-candidate counts tolerate replica lag; the two server_config keys
-	// stay on the primary because this page's own actions write them (the
-	// reloaded value must reflect a just-saved limit / just-run GC).
-	const read = readSession(db);
-	const [pending, orphanNars, orphanChunks, globalMaxBytes, gcLastRun, closureCaches] =
-		await Promise.all([
-			read.prepare("SELECT COUNT(*) AS n FROM nar WHERE state = 'P'").first<Count>(),
-			read
-				.prepare(
-					'SELECT COUNT(*) AS n FROM nar n WHERE NOT EXISTS (SELECT 1 FROM object o WHERE o.nar_id = n.id)'
-				)
-				.first<Count>(),
-			read
-				.prepare(
-					'SELECT COUNT(*) AS n FROM chunk WHERE NOT EXISTS (SELECT 1 FROM chunkref cr WHERE cr.chunk_id = chunk.id)'
-				)
-				.first<Count>(),
-			readGlobalMaxBytes(db),
-			readGcLastRun(db),
-			read
-				.prepare('SELECT id, name FROM cache WHERE deleted_at IS NULL ORDER BY name')
-				.all<{ id: number; name: string }>()
-		]);
-
+	// Fresh loads read only small status/config rows. Full graph/orphan
+	// scans belong to paced maintenance, never to refreshing this page.
+	const userId = locals.user.id;
+	const [limit, last, caches, operation, check, maintenance] = await Promise.all([
+		uiRead(db, 'editable-storage-limit', () => readGlobalMaxBytes(db), null, 0),
+		uiRead(db, 'gc-summary', () => readGcLastRun(db), null, 0),
+		uiRead(
+			db,
+			'cache-list',
+			async () =>
+				(
+					await readSession(db)
+						.prepare('SELECT id,name FROM cache WHERE deleted_at IS NULL ORDER BY name')
+						.all<{ id: number; name: string }>()
+				).results,
+			[] as { id: number; name: string }[]
+		),
+		uiRead(db, 'gc-operation', () => readGcOperation(db), null, 0),
+		uiRead(db, 'closure-check:' + userId, () => readClosureCheck(db, userId), null, 0),
+		uiRead(
+			db,
+			'closure-result:' + userId,
+			() => readMaintenanceResult(platform!.env, userId),
+			null,
+			0
+		)
+	]);
 	return {
-		pendingNars: pending?.n ?? 0,
-		orphanNars: orphanNars?.n ?? 0,
-		orphanChunks: orphanChunks?.n ?? 0,
-		globalMaxBytes,
-		gcLastRun,
-		closureCaches: closureCaches.results
+		isAdmin: true,
+		globalMaxBytes: limit.value,
+		gcLastRun: last.value,
+		closureCaches: caches.value,
+		gcOperation: operation.value,
+		closureCheck: check.value,
+		maintenance: maintenance.value,
+		dataUnavailable: [limit, last, caches, operation, check, maintenance].some(
+			(r) => r.stale || r.unavailable
+		),
+		limitUnavailable: limit.stale || limit.unavailable
 	};
 };
 
 export const actions: Actions = {
+	startClosureCheck: async ({ request, locals, platform }) => {
+		requireAdmin(locals);
+		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
+		const scope = String((await request.formData()).get('cache') ?? '');
+		if (scope !== '*' && !CACHE_NAME_RE.test(scope))
+			return fail(400, { maintenanceError: 'Select one cache or all caches.' });
+		try {
+			return actionResult(request, {
+				closureCheck: await startClosureCheck(platform.env, locals.user!.id, scope)
+			});
+		} catch (e) {
+			if (isRedirect(e)) throw e;
+			return fail(maintenanceStatus(e), { maintenanceError: maintenanceMessage(e) });
+		}
+	},
+	continueClosureCheck: async ({ request, locals, platform }) => {
+		requireAdmin(locals);
+		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
+		const id = String((await request.formData()).get('id') ?? '');
+		try {
+			return actionResult(request, {
+				closureCheck: await stepClosureCheck(
+					platform.env,
+					locals.user!.id,
+					id,
+					request.headers.get('CF-Connecting-IP')
+				)
+			});
+		} catch (e) {
+			if (isRedirect(e)) throw e;
+			return fail(maintenanceStatus(e), {
+				maintenanceError: 'Progress is saved. The service is busy; resume shortly.'
+			});
+		}
+	},
+	pauseClosureCheck: async ({ request, locals, platform }) => {
+		requireAdmin(locals);
+		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
+		const id = String((await request.formData()).get('id') ?? '');
+		try {
+			return actionResult(request, {
+				closureCheck: await pauseClosureCheck(platform.env.ATTIC_DB, locals.user!.id, id)
+			});
+		} catch (e) {
+			if (isRedirect(e)) throw e;
+			return fail(maintenanceStatus(e), { maintenanceError: maintenanceMessage(e) });
+		}
+	},
+
 	inspectClosures: async ({ request, locals, platform }) => {
 		requireAdmin(locals);
 		if (!platform?.env) throw error(500, 'Platform bindings unavailable');
@@ -73,14 +143,18 @@ export const actions: Actions = {
 				String(fields.get('after') ?? ''),
 				request.headers.get('CF-Connecting-IP')
 			);
+			await saveMaintenanceResult(platform.env.ATTIC_DB, locals.user!.id, {
+				preview: closurePreview
+			});
 			await writeAudit(platform.env.ATTIC_DB, {
 				userId: locals.user!.id,
 				action: 'cache.integrity.check',
 				target: cache,
 				detail: `Checked ${closurePreview.inspection.references.length} dependencies`
 			});
-			return { closurePreview };
+			return actionResult(request, { closurePreview });
 		} catch (e) {
+			if (isRedirect(e)) throw e;
 			return fail(maintenanceStatus(e), {
 				maintenanceError: `Dependency check failed: ${maintenanceMessage(e)}`
 			});
@@ -94,6 +168,10 @@ export const actions: Actions = {
 		let inspection;
 		try {
 			inspection = await readClosurePreview(platform.env, locals.user!.id, token);
+			await saveMaintenanceResult(platform.env.ATTIC_DB, locals.user!.id, {
+				preview: { inspection, token },
+				removing: true
+			});
 			const closurePurge = await applyClosurePreview(
 				platform.env,
 				platform.ctx,
@@ -106,8 +184,13 @@ export const actions: Actions = {
 				target: inspection.cache.name,
 				detail: `Removed ${closurePurge.removed} reviewed paths; edge invalidation pending: ${closurePurge.pending_purge}`
 			});
-			return { closurePreview: { inspection, token }, closurePurge };
+			await saveMaintenanceResult(platform.env.ATTIC_DB, locals.user!.id, {
+				preview: { inspection, token },
+				purge: closurePurge
+			});
+			return actionResult(request, { closurePreview: { inspection, token }, closurePurge });
 		} catch (e) {
+			if (isRedirect(e)) throw e;
 			return fail(maintenanceStatus(e), {
 				maintenanceError: `Path removal failed: ${maintenanceMessage(e)}`,
 				...(inspection ? { closurePreview: { inspection, token } } : {})
@@ -120,13 +203,17 @@ export const actions: Actions = {
 
 		const dryRun = (await request.formData()).get('dry_run') === '1';
 		try {
-			const gcStats = (await runGc(platform.env, { dryRun })) as Record<string, number>;
-			if (!dryRun) {
+			const gcOperation = await queueGc(platform.env, dryRun);
+			platform.ctx.waitUntil(continueScheduledGc(platform.env, platform.ctx));
+			if (!dryRun)
 				await writeAudit(platform.env.ATTIC_DB, { userId: locals.user!.id, action: 'gc.trigger' });
-			}
-			return { gcStats, dryRun };
+			return actionResult(request, { gcOperation });
 		} catch (e) {
-			return fail(502, { gcError: `Garbage collection failed: ${e}` });
+			if (isRedirect(e)) throw e;
+			return fail(502, {
+				gcError:
+					'Maintenance could not be queued. Retry shortly or refresh to check whether it was accepted.'
+			});
 		}
 	},
 
@@ -163,5 +250,12 @@ function maintenanceStatus(error: unknown) {
 }
 
 function maintenanceMessage(error: unknown) {
-	return error instanceof Error ? error.message : String(error);
+	return error instanceof ClosureMaintenanceError
+		? error.message
+		: 'The service is temporarily busy. Progress is saved; retry shortly.';
+}
+
+function actionResult<T>(request: Request, result: T): T {
+	if (!request.headers.get('accept')?.includes('application/json')) redirect(303, '/settings');
+	return result;
 }

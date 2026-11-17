@@ -23,7 +23,10 @@ vi.mock('better-auth/svelte-kit', () => ({
 vi.mock('$lib/server/auth/auth', () => ({
 	createAuth: () => ({ api: { getSession: mocks.getSession } })
 }));
-vi.mock('$lib/server/cache/db', () => ({ readSession: mocks.readSession }));
+vi.mock('$lib/server/cache/db', async (original) => ({
+	...(await original<typeof import('$lib/server/cache/db')>()),
+	readSession: mocks.readSession
+}));
 vi.mock('$lib/server/rate-limit', () => ({ checkRateLimit: vi.fn() }));
 vi.mock('jose', () => ({
 	createRemoteJWKSet: () => ({}),
@@ -176,4 +179,22 @@ it('trusts the primary row on a first visit instead of re-reading a lagging repl
 	expect(mocks.replica).not.toHaveBeenCalled();
 	expect(mocks.primary).not.toHaveBeenCalled();
 	expect(mocks.setCookie).toHaveBeenCalledOnce();
+});
+
+it('retries a transient access check and still reads current roles on the next fresh load', async () => {
+	mocks.replica
+		.mockRejectedValueOnce(new Error('Network connection lost'))
+		.mockResolvedValueOnce({ role: 'admin', status: 'active' });
+	const first = await request('GET');
+	expect((await first.result).status).toBe(200);
+	mocks.replica.mockResolvedValue({ role: 'member', status: 'pending' });
+	const second = await request('GET');
+	await expect(second.result).rejects.toMatchObject({ status: 302, location: '/pending' });
+	expect(second.resolve).not.toHaveBeenCalled();
+});
+it('returns a retryable 503 when access cannot be checked, without rendering protected data', async () => {
+	mocks.replica.mockRejectedValue(new Error('Network connection lost'));
+	const failed = await request('GET');
+	await expect(failed.result).rejects.toMatchObject({ status: 503 });
+	expect(failed.resolve).not.toHaveBeenCalled();
 });

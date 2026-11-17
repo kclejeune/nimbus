@@ -1,3 +1,4 @@
+import { uiRead } from '$lib/server/ui-read-cache';
 import { error } from '@sveltejs/kit';
 import { cacheSizes, readGcLastRun, readGlobalMaxBytes } from '$lib/server/cache/gc';
 import { allLiveUpstreams } from '$lib/server/cache/missing-paths';
@@ -40,16 +41,16 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 	const read = readSession(db);
 
 	const [
-		globalMaxBytes,
-		gcLastRun,
+		limitSnapshot,
+		gcSnapshot,
 		proxyPublicKey,
 		proxyUpstreams,
 		{ caches: inScope, access },
 		tokens,
 		{ pendingUsers }
 	] = await Promise.all([
-		readGlobalMaxBytes(read),
-		readGcLastRun(read),
+		uiRead(db, 'storage-limit', () => readGlobalMaxBytes(read), null),
+		uiRead(db, 'gc-summary', () => readGcLastRun(read), null),
 		platform?.env
 			? getProxyKeypair(platform.env)
 					.then(extractPublicKey)
@@ -61,7 +62,19 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 		parent()
 	]);
 
-	const { stats, statsAt } = await instanceStatsSnapshot(read, gcLastRun);
+	const globalMaxBytes = limitSnapshot.value,
+		gcLastRun = gcSnapshot.value;
+	const statsSnapshot = await uiRead(
+		db,
+		'instance-stats',
+		() => instanceStatsSnapshot(read, gcLastRun),
+		{
+			stats: { caches: 0, objects: 0, nars: 0, storageBytes: 0, logicalBytes: 0 },
+			statsAt: null as string | null
+		},
+		60_000
+	);
+	const { stats, statsAt } = statsSnapshot.value;
 
 	const ids = inScope.map((c) => c.id);
 	// Budget warnings only for caches whose retention this viewer can change —
@@ -71,10 +84,21 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 	// new member on a busy instance still needs to sign in and push themselves.
 	const writable = inScope.filter((c) => canOnCache(access, 'w', c.name));
 
-	const [recent, budgetBytes, pushed] = await Promise.all([
-		newestAcrossCaches(read, ids, 6),
+	const [recentSnapshot, budgetSnapshot, pushed] = await Promise.all([
+		uiRead(
+			db,
+			'recent:' +
+				ids
+					.slice()
+					.sort((a, b) => a - b)
+					.join(','),
+			() => newestAcrossCaches(read, ids, 6),
+			[]
+		),
 		// Same accounting (and memo) as /caches; skipped with no budget to check.
-		budgeted.length === 0 ? new Map<number, number>() : cacheSizes(read),
+		budgeted.length
+			? uiRead(db, 'cache-sizes', () => cacheSizes(read), new Map<number, number>())
+			: { value: new Map<number, number>(), at: null, stale: false, unavailable: false },
 		// created_by (the pushing token's user id) is unindexed, so a viewer who
 		// never pushed scans every object in their writable caches. Skipped
 		// without a token (the push step can't be next) and memoized: a yes for
@@ -96,6 +120,9 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 					(pushed) => (pushed ? 86_400_000 : 60_000)
 				)
 	]);
+
+	const recent = recentSnapshot.value,
+		budgetBytes = budgetSnapshot.value;
 
 	// --- Needs attention: each item names the fix and links straight to it. ---
 	const attention: AttentionItem[] = [];
@@ -180,6 +207,13 @@ export const load: PageServerLoad = async ({ platform, locals, parent }) => {
 	return {
 		stats,
 		statsAt,
+		dataUnavailable: [
+			limitSnapshot,
+			gcSnapshot,
+			statsSnapshot,
+			recentSnapshot,
+			budgetSnapshot
+		].some((r) => r.stale || r.unavailable),
 		globalMaxBytes,
 		gcLastRun,
 		attention,

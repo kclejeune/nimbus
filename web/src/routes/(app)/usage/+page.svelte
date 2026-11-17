@@ -41,6 +41,13 @@
 	</PageHeader>
 
 	<TabNav label="Usage views" {tabs} />
+	{#if data.view === 'storage' && data.storage?.dataUnavailable}<p
+			role="status"
+			class="my-4 rounded-lg border border-warning/30 p-3 text-sm text-warning"
+		>
+			Some display data could not be refreshed. Recent values are shown where available; other
+			details are unavailable. Retry shortly.
+		</p>{/if}
 
 	{#if data.view === 'performance'}
 		<PerformanceView result={data.observability} />

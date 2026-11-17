@@ -96,6 +96,13 @@
 </script>
 
 <Page>
+	{#if data.dataUnavailable}<p
+			role="status"
+			class="my-4 rounded-lg border border-warning/30 p-3 text-sm text-warning"
+		>
+			Some display data could not be refreshed. Recent values are shown where available; other
+			details are unavailable. Retry shortly.
+		</p>{/if}
 	<PageHeader title="Overview">
 		{#snippet description()}
 			{#if data.statsAt}

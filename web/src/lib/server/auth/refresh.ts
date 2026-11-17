@@ -1,5 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import { readSession } from '$lib/server/cache/db';
+import { readSession, withD1Retry } from '$lib/server/cache/db';
 import type { SessionUser, UserRole, UserStatus } from './types';
 
 /**
@@ -23,10 +23,15 @@ export async function refreshCachedUser(
 	// Mutations consult the primary; reads tolerate bounded replica lag (the
 	// cookie TTL was the previous bound).
 	const source = method === 'GET' || method === 'HEAD' ? readSession(db) : db;
-	const current = await source
-		.prepare('SELECT role, status FROM user WHERE id = ?1')
-		.bind(user.id)
-		.first<{ role: UserRole; status: UserStatus }>();
+	const current = await withD1Retry(
+		() =>
+			source
+				.prepare('SELECT role, status FROM user WHERE id = ?1')
+				.bind(user.id)
+				.first<{ role: UserRole; status: UserStatus }>(),
+		3
+	);
+
 	if (!current) return null;
 	return { ...user, role: current.role, status: current.status };
 }

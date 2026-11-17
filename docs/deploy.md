@@ -91,12 +91,12 @@ hostnames (and therefore through Access and the WAF, if configured).
 
 Configure at least one sign-in method that can **create** accounts:
 
-| Method                                       | Creates users | Vars                                        | Secrets                | Callback URL                                    |
-| -------------------------------------------- | ------------- | ------------------------------------------- | ---------------------- | ----------------------------------------------- |
+| Method                                       | Creates users | Vars                                        | Secrets                | Callback URL                             |
+| -------------------------------------------- | ------------- | ------------------------------------------- | ---------------------- | ---------------------------------------- |
 | Generic OIDC (Authentik, Keycloak, Auth0, …) | yes           | `OIDC_ISSUER`, `OIDC_CLIENT_ID`             | `OIDC_CLIENT_SECRET`   | `<APP_URL>/api/auth/callback/oidc`       |
-| Cloudflare Access (header assertion)         | yes           | `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`    | —                      | —                                               |
-| GitHub OAuth app                             | link only     | `GITHUB_CLIENT_ID`                          | `GITHUB_CLIENT_SECRET` | `<APP_URL>/api/auth/callback/github`            |
-| Google OAuth client                          | link only     | `GOOGLE_CLIENT_ID`                          | `GOOGLE_CLIENT_SECRET` | `<APP_URL>/api/auth/callback/google`            |
+| Cloudflare Access (header assertion)         | yes           | `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`    | —                      | —                                        |
+| GitHub OAuth app                             | link only     | `GITHUB_CLIENT_ID`                          | `GITHUB_CLIENT_SECRET` | `<APP_URL>/api/auth/callback/github`     |
+| Google OAuth client                          | link only     | `GOOGLE_CLIENT_ID`                          | `GOOGLE_CLIENT_SECRET` | `<APP_URL>/api/auth/callback/google`     |
 | Cloudflare SSO (Access for SaaS, OIDC)       | link only     | `CF_SSO_CLIENT_ID`, `CF_ACCESS_TEAM_DOMAIN` | `CF_SSO_CLIENT_SECRET` | `<APP_URL>/api/auth/callback/cloudflare` |
 
 Link-only providers sign in accounts that already exist and have linked
@@ -217,17 +217,39 @@ batches. Integrity monitoring checkpoints its probe separately, then counts
 and collects examples in pages of 256 objects. Automatic broken-closure
 discovery scans 512 reference hashes at a time and saves covered-window cursors
 before yielding; the same cache resumes on the next cron. Interactive Settings
-and CLI result pagination is unchanged. Normal budget yields are informational;
+and CLI scans expose continuation progress, including covered windows with no
+unresolved dependencies. Automatic cleanup saves every completed plan; after
+three resource failures in an advisory phase, it defers that phase and finishes
+later maintenance. Deferred integrity checks retain the previous warning. Normal budget yields are informational;
 resource rejections and unexpected errors remain warnings. Large deletion
 units finish at least one atomic batch after a slow selection, then check the
 deadline before further batches and select victims
-afresh on resume. Manual GC retains inline pacing. The `nimbus.gc.phase` and
+afresh on resume. The admin Settings page queues manual collection and preview
+through the same resumable cron job; direct API/CLI GC retains inline pacing.
+The `nimbus.gc.phase` and
 `nimbus.gc.deferred` events report cumulative SQL time, rows read/written,
 statement counts and pacing waits for that invocation.
 
 The existing purge Durable Object remains optional and recommended for global
 tag batching and prompt repair recovery. Without it, purges use the existing
 journal/retry paths. GC continuations use cron/D1 regardless of that binding.
+
+Settings dependency checks can cover one cache or all live caches (admins).
+Each browser-driven batch saves per-cache progress in D1; refreshing resumes
+it, while closing the page pauses advancement until it is opened again.
+Checks never remove paths. Removal requires a fresh, signed preview for the
+named cache, and its durable receipt distinguishes metadata removal from
+pending edge invalidation. GC remains instance-wide regardless of that selector.
+
+Fresh Settings loads read small configuration/progress rows instead of live
+orphan counts. Overview and storage-usage display reads share bounded,
+per-binding caches (30–60 seconds); transient D1 failures can retain successful
+values for up to five minutes, with an explicit stale/unavailable notice.
+Successful UI mutations clear these display caches in the current isolate;
+other isolates expire them normally. Roles, account status, grants, tokens,
+mutation checks and authenticated HTML are not cached by this mechanism.
+Access checks retry transient failures and fail closed with a retryable 503.
+No new schema migration, Durable Object or binding is needed for this UI state.
 
 ### Automatic broken-closure cleanup
 

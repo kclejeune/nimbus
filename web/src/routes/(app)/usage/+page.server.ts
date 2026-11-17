@@ -11,7 +11,7 @@ import {
 	type Granularity,
 	type IngestRow
 } from '$lib/server/cache/ingest';
-import { AsyncMemo } from '$lib/server/cache/async-memo';
+import { uiRead } from '$lib/server/ui-read-cache';
 import type { PageServerLoad } from './$types';
 
 export type { Granularity };
@@ -102,18 +102,37 @@ async function loadStorage({ platform, url }: Parameters<PageServerLoad>[0]) {
 	// series is the one heavy read and instance-wide, so it's shared across
 	// admins for a minute (the rollup behind it only moves nightly); the
 	// settings reads stay fresh, like the overview's.
-	const [{ rows, baseline }, gcLastRun, globalMaxBytes] = await Promise.all([
-		seriesMemo.get(`${granularity}:${startDate}`, async () => {
-			const [rows, baseline] = await Promise.all([
-				ingestSeries(read, granularity, startDate),
-				startDate ? ingestBaseline(read, startDate) : null
-			]);
-			return { rows, baseline };
-		}),
-		readGcLastRun(read),
-		readGlobalMaxBytes(read)
+	const [series, gcSnapshot, limitSnapshot] = await Promise.all([
+		uiRead(
+			db,
+			`ingest:${granularity}:${startDate}`,
+			async () => {
+				const [rows, baseline] = await Promise.all([
+					ingestSeries(read, granularity, startDate),
+					startDate ? ingestBaseline(read, startDate) : null
+				]);
+				return { rows, baseline };
+			},
+			{ rows: [] as IngestRow[], baseline: null as { paths: number; bytes: number } | null },
+			60_000
+		),
+		uiRead(db, 'gc-summary', () => readGcLastRun(read), null),
+		uiRead(db, 'storage-limit', () => readGlobalMaxBytes(read), null)
 	]);
-	const { stats, statsAt } = await instanceStatsSnapshot(read, gcLastRun);
+	const gcLastRun = gcSnapshot.value,
+		globalMaxBytes = limitSnapshot.value,
+		{ rows, baseline } = series.value;
+	const totals = await uiRead(
+		db,
+		'instance-stats',
+		() => instanceStatsSnapshot(read, gcLastRun),
+		{
+			stats: { caches: 0, objects: 0, nars: 0, storageBytes: 0, logicalBytes: 0 },
+			statsAt: null as string | null
+		},
+		60_000
+	);
+	const { stats, statsAt } = totals.value;
 
 	// Every bucket in the window, zero-filled. Nothing ever pushed and no
 	// window to draw leaves none (the empty state).
@@ -134,6 +153,9 @@ async function loadStorage({ platform, url }: Parameters<PageServerLoad>[0]) {
 
 	return {
 		buckets,
+		dataUnavailable: [series, gcSnapshot, limitSnapshot, totals].some(
+			(r) => r.stale || r.unavailable
+		),
 		granularity,
 		range,
 		stats,
@@ -143,12 +165,6 @@ async function loadStorage({ platform, url }: Parameters<PageServerLoad>[0]) {
 }
 
 export type View = 'performance' | 'storage';
-
-/** The storage series per (granularity, range start); lease past a slow miss. */
-const seriesMemo = new AsyncMemo<{
-	rows: IngestRow[];
-	baseline: { paths: number; bytes: number } | null;
-}>(60_000, 32, 10_000);
 
 // Two views with different time horizons, so each keeps its own controls:
 // performance windows are hours to a month of Analytics Engine data; storage

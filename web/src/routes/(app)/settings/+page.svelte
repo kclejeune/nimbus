@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount, untrack } from 'svelte';
+	import type { GcOperation } from '$lib/server/cache/gc';
 	import { enhance } from '$app/forms';
 	import { toastErrors } from '$lib/enhance';
 	import { formatCount, formatRelativeTime, gibInputValue } from '$lib/format';
@@ -16,9 +18,71 @@
 	let running = $state(false);
 	let savingLimit = $state(false);
 
-	const reclaimable = $derived(data.pendingNars + data.orphanNars + data.orphanChunks);
+	let operation = $state<GcOperation | null>(untrack(() => data.gcOperation));
+	let latestRun = $state<typeof data.gcLastRun>(null);
+	let purge = $state<{ id: string; removed: number; pending_purge: boolean } | null>(null);
+	let progressError = $state('');
+	const preview = $derived(form?.closurePreview ?? data.maintenance?.preview ?? null);
+	const result = $derived(
+		purge && purge.id === preview?.inspection.operationId
+			? purge
+			: (form?.closurePurge ??
+					(data.maintenance?.preview.inspection.operationId === preview?.inspection.operationId
+						? data.maintenance?.purge
+						: null) ??
+					null)
+	);
+	$effect(() => {
+		const incoming = form?.gcOperation ?? data.gcOperation;
+		untrack(() => {
+			if (
+				incoming &&
+				(!operation ||
+					incoming.id > operation.id ||
+					(incoming.id === operation.id && operation.state !== 'complete'))
+			)
+				operation = incoming;
+		});
+	});
+	$effect(() => {
+		const run = data.gcLastRun;
+		untrack(() => {
+			if (run && (!latestRun || run.at > latestRun.at)) latestRun = run;
+		});
+	});
+	onMount(() => {
+		let stopped = false;
+		async function poll() {
+			while (!stopped) {
+				await new Promise((r) => setTimeout(r, 5000));
+				if (stopped) break;
+				if (operation?.state !== 'pending' && !result?.pending_purge) continue;
+				try {
+					const id = preview?.inspection.operationId;
+					const response = await fetch(
+						'/settings/status' +
+							(result?.pending_purge && id ? '?operation=' + encodeURIComponent(id) : '')
+					);
+					if (!response.ok) throw new Error();
+					const status = await response.json();
+					if (stopped) break;
+					if (status.gcOperation) operation = status.gcOperation;
+					if (status.gcLastRun) latestRun = status.gcLastRun;
+					if (status.closurePurge) purge = status.closurePurge;
+					progressError = '';
+				} catch {
+					progressError =
+						'Status is temporarily unavailable. Work and progress are saved; retrying automatically.';
+				}
+			}
+		}
+		void poll();
+		return () => {
+			stopped = true;
+		};
+	});
 	const globalMaxGib = $derived(gibInputValue(data.globalMaxBytes));
-	const lastRun = $derived(data.gcLastRun);
+	const lastRun = $derived(latestRun ?? data.gcLastRun);
 	const lastRunReclaimed = $derived(
 		lastRun
 			? (lastRun.stats.abandoned_caches_reaped ?? 0) +
@@ -29,21 +93,18 @@
 					(lastRun.stats.automatic_objects_removed ?? 0)
 			: 0
 	);
-	const gcReclaimed = $derived(
-		form?.gcStats
-			? (form.gcStats.abandoned_caches_reaped ?? 0) +
-					(form.gcStats.expired_objects_reaped ?? 0) +
-					(form.gcStats.size_evicted_objects ?? 0) +
-					(form.gcStats.global_evicted_objects ?? 0) +
-					(form.gcStats.orphan_nars_reaped ?? 0) +
-					(form.gcStats.orphan_chunks_reaped ?? 0)
-			: 0
-	);
 </script>
 
 <Page>
 	<PageHeader title="Settings" description="Instance-wide storage policy and maintenance." />
 
+	{#if data.dataUnavailable}<p
+			role="status"
+			class="mb-4 rounded-lg border border-warning/30 p-3 text-sm text-warning"
+		>
+			Some details could not be refreshed. Recent values are shown where available; other details
+			are unavailable. Retry this page shortly. Maintenance progress is saved.
+		</p>{/if}
 	<div class="grid grid-cols-1 gap-6">
 		<form
 			method="POST"
@@ -70,6 +131,7 @@
 						min="0"
 						placeholder="No limit"
 						value={globalMaxGib}
+						disabled={data.limitUnavailable}
 						class="w-48"
 					/>
 				</div>
@@ -85,7 +147,7 @@
 							Leave blank for no limit.
 						{/if}
 					</span>
-					<Button type="submit" size="sm" disabled={savingLimit}>
+					<Button type="submit" size="sm" disabled={savingLimit || data.limitUnavailable}>
 						{savingLimit ? 'Saving…' : 'Save limit'}
 					</Button>
 				{/snippet}
@@ -94,7 +156,7 @@
 
 		<Panel
 			title="Garbage collection"
-			description="Runs nightly. Removes abandoned uploads, deleted caches, expired paths and unreferenced NARs and chunks."
+			description="Applies to all caches, independently of the dependency-check selection below. Runs nightly in paced batches and continues automatically after this page closes."
 		>
 			{#snippet actions()}
 				<form
@@ -104,7 +166,7 @@
 					use:enhance={toastErrors(() => {
 						running = true;
 						return async ({ update }) => {
-							await update();
+							await update({ invalidateAll: false });
 							running = false;
 						};
 					})}
@@ -115,68 +177,65 @@
 						value="1"
 						variant="ghost"
 						size="sm"
-						disabled={running}
+						disabled={running || operation?.state === 'pending'}
 					>
-						Preview
+						Preview all caches
 					</Button>
-					<Button type="submit" variant="outline" size="sm" disabled={running}>
+					<Button
+						type="submit"
+						variant="outline"
+						size="sm"
+						disabled={running || operation?.state === 'pending'}
+					>
 						<Trash2 />
-						{running ? 'Running…' : 'Run now'}
+						{running ? 'Queuing…' : 'Collect all caches'}
 					</Button>
 				</form>
 			{/snippet}
 
-			<dl class="grid grid-cols-3 gap-px overflow-hidden rounded-lg border bg-border text-sm">
-				<div class="bg-subtle px-4 py-3">
-					<dt class="text-xs text-muted-foreground">Pending uploads</dt>
-					<dd class="mt-1 text-lg font-semibold tabular-nums">{formatCount(data.pendingNars)}</dd>
+			{#if form?.gcError}<p role="alert" class="mt-4 text-sm text-destructive">
+					{form.gcError}
+				</p>{/if}
+			{#if progressError}<p role="status" class="mt-4 text-sm text-warning">{progressError}</p>{/if}
+			{#if operation}
+				<div class="mt-4 space-y-2 rounded-lg border p-4 text-sm" aria-live="polite">
+					<p class="font-medium">
+						{operation.dryRun ? 'GC preview' : 'Garbage collection'} · All caches · {operation.state ===
+						'complete'
+							? 'Complete'
+							: 'In progress'}
+					</p>
+					<p class="text-muted-foreground">
+						Requested {formatRelativeTime(operation.requestedAt)}. {#if operation.state === 'pending'}{operation.phase}.
+							Work resumes automatically between paced batches; refreshing does not restart it.{:else if operation.dryRun}Preview
+							complete: {formatCount(
+								(operation.stats.expired_objects_reaped ?? 0) +
+									(operation.stats.size_evicted_objects ?? 0) +
+									(operation.stats.global_evicted_objects ?? 0)
+							)} paths would be removed by retention. Nothing was deleted. Broken-closure discovery is
+							checked separately below.{:else}Finished {formatRelativeTime(operation.completedAt!)}.
+							Results are saved below.{/if}
+					</p>
 				</div>
-				<div class="bg-subtle px-4 py-3">
-					<dt class="text-xs text-muted-foreground">Orphan NARs</dt>
-					<dd class="mt-1 text-lg font-semibold tabular-nums">{formatCount(data.orphanNars)}</dd>
-				</div>
-				<div class="bg-subtle px-4 py-3">
-					<dt class="text-xs text-muted-foreground">Orphan chunks</dt>
-					<dd class="mt-1 text-lg font-semibold tabular-nums">{formatCount(data.orphanChunks)}</dd>
-				</div>
-			</dl>
-
-			{#if form?.gcError}
-				<p role="alert" class="mt-4 text-sm text-destructive">{form.gcError}</p>
-			{:else if form?.gcStats && form?.dryRun}
-				<p class="mt-4 rounded-lg border bg-subtle px-3 py-2.5 text-sm text-muted-foreground">
-					Preview: {formatCount(
-						(form.gcStats.expired_objects_reaped ?? 0) +
-							(form.gcStats.size_evicted_objects ?? 0) +
-							(form.gcStats.global_evicted_objects ?? 0)
-					)} paths would be removed by retention ({formatCount(
-						form.gcStats.expired_objects_reaped ?? 0
-					)} expired, {formatCount(form.gcStats.size_evicted_objects ?? 0)} over cache limits, {formatCount(
-						form.gcStats.global_evicted_objects ?? 0
-					)} over the global limit). Nothing was deleted.
-				</p>
-			{:else if form?.gcStats}
-				<p class="mt-4 inline-flex items-center gap-1.5 text-sm text-muted-foreground">
-					<Check class="size-4 text-success" />
-					Reclaimed {formatCount(gcReclaimed)} items ({formatCount(
-						form.gcStats.orphan_chunks_reaped ?? 0
-					)} chunks freed from storage).
-				</p>
-			{:else if reclaimable === 0}
-				<p class="mt-4 text-sm text-muted-foreground">Nothing to reclaim.</p>
 			{/if}
 
 			<ClosureMaintenance
 				caches={data.closureCaches}
-				preview={form?.closurePreview ?? null}
-				result={form?.closurePurge ?? null}
-				error={form?.maintenanceError ?? null}
+				check={form?.closureCheck ?? data.closureCheck}
+				allowAll
+				{preview}
+				{result}
+				previewExpired={!!data.maintenance?.expired &&
+					preview?.token === data.maintenance.preview.token}
+				error={form?.maintenanceError ??
+					(preview?.token === data.maintenance?.preview.token ? data.maintenance?.message : null) ??
+					null}
 			/>
 
 			{#if lastRun}
 				<div class="mt-5 space-y-3 border-t pt-4 text-sm">
 					<p class="text-muted-foreground">
-						Last ran <span class="text-foreground" title={lastRun.at}
+						Last completed across all caches <span class="text-foreground" title={lastRun.at}
 							>{formatRelativeTime(lastRun.at)}</span
 						>: removed {formatCount(lastRunReclaimed)} paths ({formatCount(
 							lastRun.stats.expired_objects_reaped ?? 0
@@ -198,6 +257,17 @@
 							)} groups were deferred by maintenance limits and {formatCount(
 								lastRun.stats.automatic_purge_errors ?? 0
 							)} errors occurred.
+						</p>
+					{/if}
+					{#if lastRun.stats.advisory_phases_deferred > 0}
+						<p class="mt-2 text-warning">
+							Some advisory closure maintenance was deferred after repeated D1 resource failures.
+							Later maintenance completed; deferred work will retry on the next GC run.
+						</p>
+					{/if}
+					{#if lastRun.integrity?.deferred}
+						<p class="mt-2 text-warning">
+							The closure warning below is retained from the previous successful integrity check.
 						</p>
 					{/if}
 					{#if lastRun.integrity && lastRun.integrity.incompleteObjects > 0}
