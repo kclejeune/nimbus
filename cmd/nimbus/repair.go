@@ -187,7 +187,12 @@ func scanReferences(
 	after := ""
 	pages, examined, scanned := 0, 0, 0
 	for {
-		p.update("Scanning reference page %d (%d reference hashes scanned; %d dependencies examined)", pages+1, scanned, examined)
+		p.update(
+			"Scanning reference page %d (%d reference hashes scanned; %d dependencies examined)",
+			pages+1,
+			scanned,
+			examined,
+		)
 		page, err := client.UncoveredReferences(ctx, cache, after)
 		if err != nil {
 			return nil, nil, fmt.Errorf(

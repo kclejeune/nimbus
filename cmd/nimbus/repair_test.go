@@ -218,7 +218,8 @@ func TestRepairFollowsEmptyScanWindows(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/check") {
 			checks++
-			_ = json.NewEncoder(w).Encode(api.ReferenceStatus{Missing: []string{strings.Repeat("2", 32)}})
+			_ = json.NewEncoder(w).
+				Encode(api.ReferenceStatus{Missing: []string{strings.Repeat("2", 32)}})
 			return
 		}
 		pages++
@@ -228,12 +229,18 @@ func TestRepairFollowsEmptyScanWindows(t *testing.T) {
 			if r.URL.Query().Get("after") != cursor {
 				t.Error("scan cursor lost")
 			}
-			_ = json.NewEncoder(w).Encode(api.IntegrityPage{ScannedHashes: 1, References: []api.UncoveredReference{{Hash: strings.Repeat("2", 32), StorePath: path}}})
+			_ = json.NewEncoder(w).
+				Encode(api.IntegrityPage{ScannedHashes: 1, References: []api.UncoveredReference{{Hash: strings.Repeat("2", 32), StorePath: path}}})
 		}
 	}))
 	defer server.Close()
 	var out bytes.Buffer
-	repair := closureRepair{client: api.New(server.URL, "secret"), cache: "test", out: &out, local: func(_ context.Context, paths []string) ([]string, []string, error) { return paths, nil, nil }}
+	repair := closureRepair{
+		client: api.New(server.URL, "secret"),
+		cache:  "test",
+		out:    &out,
+		local:  func(_ context.Context, paths []string) ([]string, []string, error) { return paths, nil, nil },
+	}
 	if err := repair.run(t.Context(), true); err != nil {
 		t.Fatal(err)
 	}
