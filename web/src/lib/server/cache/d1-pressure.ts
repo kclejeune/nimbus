@@ -4,7 +4,7 @@ const OVERLOAD_COOLDOWN_MS = 2_000;
 let overloadedUntil = 0;
 
 export function isD1Overload(error: unknown): boolean {
-	return /\boverloaded\b|queued for too long/i.test(
+	return /\boverloaded\b|queued for too long|your account is generating too much load on D1 DBs/i.test(
 		error instanceof Error ? error.message : String(error)
 	);
 }

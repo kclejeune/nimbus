@@ -191,7 +191,14 @@ tokens; drizzle-generated in `web/drizzle/`, tracked in `admin_migrations`).
 Keep both cron entries from the Wrangler configuration: `0 3 * * *` starts
 nightly maintenance and `* * * * *` resumes unfinished work and retries pending
 purges. An idle GC continuation reads one small D1 checkpoint. It does not
-start another sweep. No new Durable Object binding or D1 migration is needed
+start another sweep. Checkpoint reads and lock acquisition are inside the
+continuation's recovery guard. An initial transient checkpoint read gets at
+most one retry: resource/account throttling waits 10–15 seconds, other transient
+failures wait 250–500 ms. Continued failure leaves the existing checkpoint
+untouched for a later cron and emits `nimbus.gc.deferred` with
+`stage=bootstrap`; there are no cleanup writes without a lock. A recovered
+nightly read retains the request to start maintenance.
+No new Durable Object binding or D1 migration is needed
 for continuations; the GC traversal indexes have their own
 `2026-11-06-gc-traversal-indexes.sql` migration.
 

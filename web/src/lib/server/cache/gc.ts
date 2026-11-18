@@ -7,9 +7,18 @@
 // Every sweep is idempotent; passes are ordered so each exposes work for the
 // next (retention deletes objects -> orphans NARs -> orphans chunks -> R2).
 
-import { claimOrphanChunks, chunkKey, dbRun, PARAM_BATCH, pruneRevokedTokens, dbBatch } from './db';
+import {
+	claimOrphanChunks,
+	chunkKey,
+	dbRun,
+	dbFirst,
+	isTransientD1Error,
+	PARAM_BATCH,
+	pruneRevokedTokens,
+	dbBatch
+} from './db';
+import { sleep, type ExecutionContext } from './platform';
 import { allLiveUpstreams, filterUpstreamPaths, VERDICT_ABSENT } from './missing-paths';
-import { type ExecutionContext } from './platform';
 import { AsyncMemo } from './async-memo';
 import { PURGE_TAG_LIMIT } from './purge';
 import { instanceStats, type InstanceStats } from './stats';
@@ -337,16 +346,27 @@ export async function continueScheduledGc(
 	start = false
 ): Promise<void> {
 	const db = env.ATTIC_DB;
-	const load = async (): Promise<GcProgress | null> => {
-		const row = await db
-			.prepare(`SELECT value FROM server_config WHERE key='${GC_JOB_KEY}'`)
-			.first<{ value: string }>();
+	const read = () =>
+		dbFirst<{ value: string }>(
+			db.prepare(`SELECT value FROM server_config WHERE key='${GC_JOB_KEY}'`),
+			{ attempts: 1 }
+		);
+	const load = async (retry = false): Promise<GcProgress | null> => {
+		let row;
+		try {
+			row = await read();
+		} catch (error) {
+			if (!retry || !isTransientD1Error(error, true)) throw error;
+			const delayMs = isGcResourceError(error)
+				? GC_WINDOW_MS + Math.random() * 5_000
+				: 250 + Math.random() * 250;
+			console.warn(JSON.stringify({ event: 'nimbus.gc.bootstrap_retry', delayMs, start }));
+			await sleep(delayMs);
+			row = await read();
+		}
 		return row ? (JSON.parse(row.value) as GcProgress) : null;
 	};
-	const pending = await load();
-	if ((!pending && !start) || (pending && pending.nextAt > Date.now())) return;
-	const lock = await acquireGcLock(db);
-	if (!lock) return;
+	let lock: string | null = null;
 	const pacer = new GcPacer(true, Date.now() + GC_SLICE_MS);
 	let job: GcProgress | null = null;
 	const save = () =>
@@ -360,6 +380,10 @@ export async function continueScheduledGc(
 			{ attempts: 1 }
 		);
 	try {
+		const pending = await load(true);
+		if ((!pending && !start) || (pending && pending.nextAt > Date.now())) return;
+		lock = await acquireGcLock(db);
+		if (!lock) return;
 		job = await load();
 		if (!job && !start) return;
 		if (job && job.nextAt > Date.now()) return;
@@ -451,18 +475,24 @@ export async function continueScheduledGc(
 				: isGcResourceError(error)
 					? new GcDeferred(Date.now() + GC_WINDOW_MS + Math.random() * 5_000, 'resources')
 					: undefined;
-		if (job) job.nextAt = deferred?.until ?? Date.now() + 60_000;
+		const resumeAt = deferred?.until ?? Date.now() + 60_000;
+		if (job) job.nextAt = resumeAt;
 		const log = deferred?.reason === 'budget' ? console.log : console.warn;
 		log(
 			JSON.stringify({
 				event: 'nimbus.gc.deferred',
+				stage: job ? 'phase' : 'bootstrap',
+				start,
 				phase: job?.phase,
-				resumeAt: job?.nextAt,
+				resumeAt,
 				reason: deferred?.reason ?? 'error',
 				error: String(error),
 				...pacer.totals
 			})
 		);
+		// No checkpoint was acquired or changed. A later cron retries from
+		// durable state; do not add cleanup writes while D1 is unavailable.
+		if (!lock) return;
 		// Let the resource window clear before checkpoint/lock cleanup writes.
 		// If canceled here, the last checkpoint and deletion receipts replay safely.
 		if (deferred?.reason === 'resources')
@@ -512,7 +542,7 @@ export async function continueScheduledGc(
 		}
 		if (job) await save().catch((e) => console.warn('gc: checkpoint pending', e));
 	} finally {
-		await releaseGcLock(db, lock);
+		if (lock) await releaseGcLock(db, lock);
 	}
 }
 

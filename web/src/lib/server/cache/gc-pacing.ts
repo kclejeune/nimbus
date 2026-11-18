@@ -1,5 +1,6 @@
 import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types';
 import { sleep } from './platform';
+import { isD1Overload, noteD1Overload } from './d1-pressure';
 
 /** Maintenance policy, not a D1 quota: leave headroom for foreground work. */
 export const GC_WINDOW_MS = 10_000;
@@ -8,7 +9,7 @@ const RESOURCE_WINDOW_ERROR = /too many resources consumed within a 10 second wi
 const pacers = new WeakMap<D1Database, GcPacer>();
 
 export const isGcResourceError = (error: unknown): boolean =>
-	RESOURCE_WINDOW_ERROR.test(String(error));
+	RESOURCE_WINDOW_ERROR.test(String(error)) || isD1Overload(error);
 
 export class GcDeferred extends Error {
 	constructor(
@@ -102,6 +103,7 @@ export class GcPacer {
 				}
 				return value;
 			} catch (error) {
+				noteD1Overload(error);
 				if (isGcResourceError(error)) {
 					const delay = GC_WINDOW_MS + Math.random() * 5_000;
 					if (this.background) {

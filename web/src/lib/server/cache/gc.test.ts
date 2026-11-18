@@ -678,8 +678,9 @@ it('defers a repeatedly resource-limited integrity phase and still reaches ANALY
 });
 
 it('keeps committed purge progress and stops retrying a later resource-limited plan', async () => {
+	// SQLite's one-hour confirmation guard uses its real clock. Start the
+	// fake JS clock at the same time, rather than a date that will expire.
 	vi.useFakeTimers();
-	vi.setSystemTime(new Date('2026-11-17T12:00:00Z'));
 	const f = fixture(4);
 	f.sqlite.exec('UPDATE cache SET retention_period=NULL,purge_broken_after_days=7');
 	for (let id = 1; id <= 4; id++)
@@ -772,5 +773,105 @@ it('a queued preview survives refresh and completes without deleting paths or re
 	expect(f.count('object')).toBe(1);
 	expect(
 		f.sqlite.prepare("SELECT value FROM server_config WHERE key='gc_last_run'").get()
+	).toBeUndefined();
+});
+
+it.each([false, true])(
+	'bounds bootstrap throttling without modifying durable state (queued=%s)',
+	async (queued) => {
+		vi.useFakeTimers();
+		vi.spyOn(Math, 'random').mockReturnValue(0);
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const f = fixture();
+		if (queued) await queueGc(f.env, true);
+		const prior = f.job(),
+			before = f.totalChanges(),
+			prepare = f.db.prepare.bind(f.db);
+		const reads = vi
+			.fn()
+			.mockRejectedValue(
+				new Error(
+					'D1_ERROR: Your account is generating too much load on D1 DBs. Please back off and try again later.'
+				)
+			);
+		const spy = vi.spyOn(f.db, 'prepare').mockImplementation((sql) => {
+			const stmt = prepare(sql);
+			if (sql.includes("WHERE key='gc_job'")) stmt.all = reads;
+			return stmt;
+		});
+		const pending = continueScheduledGc(f.env);
+		await vi.advanceTimersByTimeAsync(9999);
+		expect(reads).toHaveBeenCalledTimes(1);
+		expect(f.totalChanges()).toBe(before);
+		await vi.advanceTimersByTimeAsync(1);
+		await expect(pending).resolves.toBeUndefined();
+		expect(reads).toHaveBeenCalledTimes(2);
+		expect(f.totalChanges()).toBe(before);
+		expect(f.job()).toEqual(prior);
+		expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)))).toContainEqual(
+			expect.objectContaining({
+				event: 'nimbus.gc.deferred',
+				stage: 'bootstrap',
+				reason: 'resources'
+			})
+		);
+		spy.mockRestore();
+		await vi.advanceTimersByTimeAsync(60000);
+		await continueScheduledGc(f.env);
+		expect(f.job()).toBeNull();
+		expect(f.count('object')).toBe(1);
+	}
+);
+it('retries a throttled nightly checkpoint after the resource window and still starts maintenance', async () => {
+	vi.useFakeTimers();
+	vi.spyOn(Math, 'random').mockReturnValue(0);
+	const f = fixture();
+	const prepare = f.db.prepare.bind(f.db);
+	let reads = 0;
+	vi.spyOn(f.db, 'prepare').mockImplementation((sql) => {
+		const stmt = prepare(sql);
+		if (sql.includes("WHERE key='gc_job'") && ++reads === 1)
+			stmt.all = vi
+				.fn()
+				.mockRejectedValue(
+					new Error(
+						'D1_ERROR: Your account is generating too much load on D1 DBs. Please back off and try again later.'
+					)
+				);
+		return stmt;
+	});
+	const pending = continueScheduledGc(f.env, undefined, true);
+	await vi.advanceTimersByTimeAsync(10000);
+	await pending;
+	expect(f.job()).toBeNull();
+	expect(f.count('object')).toBe(0);
+	expect(await readGcOperation(f.db)).toMatchObject({ state: 'complete' });
+});
+it('preserves the existing checkpoint and releases its lock if reloading after acquisition is throttled', async () => {
+	vi.useFakeTimers();
+	vi.spyOn(Math, 'random').mockReturnValue(0);
+	const f = fixture();
+	await queueGc(f.env, true);
+	const prior = f.job(),
+		prepare = f.db.prepare.bind(f.db);
+	let reads = 0;
+	vi.spyOn(f.db, 'prepare').mockImplementation((sql) => {
+		const stmt = prepare(sql);
+		if (sql.includes("WHERE key='gc_job'") && ++reads === 2)
+			stmt.all = vi
+				.fn()
+				.mockRejectedValue(
+					new Error(
+						'D1_ERROR: Your account is generating too much load on D1 DBs. Please back off and try again later.'
+					)
+				);
+		return stmt;
+	});
+	const pending = continueScheduledGc(f.env);
+	await vi.advanceTimersByTimeAsync(15000);
+	await pending;
+	expect(f.job()).toEqual(prior);
+	expect(
+		f.sqlite.prepare("SELECT value FROM server_config WHERE key='gc_lock'").get()
 	).toBeUndefined();
 });

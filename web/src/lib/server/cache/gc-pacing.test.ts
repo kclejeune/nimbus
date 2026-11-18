@@ -44,11 +44,14 @@ it('does not let parallel callers spend the same remaining budget', async () => 
 	expect(calls).toEqual([0, 1, 2]);
 });
 
-it('defers background resource errors once without running more D1 work', async () => {
+it.each([
+	'D1 DB is overloaded. Too many resources consumed within a 10 second window',
+	'D1_ERROR: Your account is generating too much load on D1 DBs. Please back off and try again later.'
+])('defers background pressure once without running more D1 work: %s', async (message) => {
 	const p = new GcPacer(true);
 	await expect(
 		p.run(async () => {
-			throw new Error('D1 DB is overloaded. Too many resources consumed within a 10 second window');
+			throw new Error(message);
 		})
 	).rejects.toBeInstanceOf(GcDeferred);
 	expect(p.resumeAt).toBeGreaterThanOrEqual(Date.now() + 10_000);
