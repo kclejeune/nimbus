@@ -6,11 +6,17 @@ import { readAll, type ExecutionContext } from '../../src/lib/server/cache/platf
 import { ReadCoalescer } from '../../src/lib/server/cache/read-coalescer';
 import { serveTouch, touchViaStore } from '../../src/lib/server/cache/metadata';
 import { GcPacer, pacedGcDatabase } from '../../src/lib/server/cache/gc-pacing';
+import { hedgedReplicaRead } from '../../src/lib/server/cache/read-hedge';
+import type { D1Database } from '@cloudflare/workers-types';
 
 const coalesced = new ReadCoalescer<number>();
 let fills = 0;
 let touchProbes = 0;
 let touchWrites = 0;
+const hedgeStarts: number[] = [];
+let hedgeActive = 0,
+	maxHedgeActive = 0,
+	hedgeReplicasPending = 0;
 const touchEnv = {
 	CACHE_BASE_URL: 'https://cache.test',
 	ATTIC_DB: {
@@ -164,6 +170,43 @@ export default {
 			} catch {
 				return new Response('deferred', { status: 503 });
 			}
+		}
+		if (url.pathname === '/hedge-stats')
+			return Response.json({
+				starts: hedgeStarts,
+				maxActive: maxHedgeActive,
+				pendingReplicas: hedgeReplicasPending
+			});
+		if (url.pathname === '/hedged-read') {
+			const primary = {} as D1Database,
+				replica = {} as D1Database;
+			const source = {
+				withSession: (constraint: string) => (constraint === 'first-primary' ? primary : replica)
+			} as unknown as D1Database;
+			const value = await hedgedReplicaRead(
+				source,
+				ctx as unknown as ExecutionContext,
+				async (session) => {
+					if (session !== primary) {
+						hedgeReplicasPending++;
+						try {
+							await new Promise((resolve) => setTimeout(resolve, 3000));
+							return 'replica';
+						} finally {
+							hedgeReplicasPending--;
+						}
+					}
+					hedgeStarts.push(Date.now());
+					maxHedgeActive = Math.max(maxHedgeActive, ++hedgeActive);
+					try {
+						await Promise.resolve();
+						return 'primary';
+					} finally {
+						hedgeActive--;
+					}
+				}
+			);
+			return Response.json({ value });
 		}
 		if (url.pathname === '/abandon-fill') {
 			void coalesced.get('abandoned', () => new Promise<number>(() => {}));

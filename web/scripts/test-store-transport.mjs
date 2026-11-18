@@ -47,6 +47,23 @@ try {
 	});
 	// Distinct HTTP requests must await only their own I/O, even when sharing
 	// a completed metadata result. Node tests cannot enforce this Workers rule.
+	const hedgedUrl = new URL('/hedged-read', await mf.ready);
+	const hedged = await Promise.all(Array.from({ length: 6 }, () => fetch(hedgedUrl)));
+	assert.deepEqual(
+		await Promise.all(hedged.map((r) => r.json())),
+		Array(6).fill({ value: 'primary' })
+	);
+	let hedgeStats;
+	for (let i = 0; i < 50; i++) {
+		hedgeStats = await (await fetch(new URL('/hedge-stats', await mf.ready))).json();
+		if (hedgeStats.pendingReplicas === 0) break;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	assert.equal(hedgeStats.pendingReplicas, 0);
+	assert.equal(hedgeStats.maxActive, 1);
+	assert.equal(hedgeStats.starts.length, 6);
+	for (let i = 1; i < hedgeStats.starts.length; i++)
+		assert.ok(hedgeStats.starts[i] - hedgeStats.starts[i - 1] >= 250);
 	const coalescedUrl = new URL('/coalesced-read', await mf.ready);
 	const readers = await Promise.all(Array.from({ length: 6 }, () => fetch(coalescedUrl)));
 	assert.ok(readers.every((r) => r.status === 200));

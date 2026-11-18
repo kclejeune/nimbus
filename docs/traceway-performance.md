@@ -135,8 +135,11 @@ An explicit D1 overload pauses speculative and overload-driven primary attempts
 for two seconds after the last observed rejection in an isolate. Connection
 failures can still fail over promptly. A settled overload failure waits only
 within its five-second read retry window; occupied primary capacity still
-returns the replica's failure. The existing one-active-hedge and
-one-start-per-second limits remain.
+returns the replica's failure. One primary hedge may be active per isolate.
+Starts remain one second apart unless a primary wins within 100 ms, without
+retries or observed overload. That fast success admits the next start after
+250 ms; slow, failed, losing and overload-driven primary attempts retain the
+one-second spacing. The 500 ms initial replica allowance is unchanged.
 `nimbus.d1_hedge_wait` records `reason=overload`; compare overload warnings,
 primary hedge wins, gateway tails and failed requests together. Reducing primary
 load can increase latency for a read whose replica remains slow during cooldown.
@@ -145,6 +148,21 @@ other replica failures. An unconstrained read may itself have used the primary,
 so an overload result does not establish which database instance was unhealthy.
 Upload/write overloads also pause read hedges in the same isolate; this shared
 pressure signal is deliberate.
+Account-level messages saying the account is generating too much load on D1
+are pressure too, and share the same cooldown and retry classification.
+`nimbus.d1_hedge` now records `admissionMs`, `hedgeAfterMs` and `primaryMs`,
+separating time waiting for admission from the successful database call.
+
+A controlled timer fixture compared six concurrent 2.5-second replica reads
+with 31 ms primary reads. The old policy's median and last completion were
+2,500/2,500 ms; the adaptive policy's were 1,156/1,781 ms. Both kept one active
+primary. The candidate issued six primary queries instead of two (12 total
+queries instead of eight): the latency improvement trades extra read load for
+faster recovery. These are simulated results, not a production speedup.
+A native Worker test exercises six independent HTTP contexts and drains the
+losing reads. After deployment, compare actual gateway header percentiles,
+hedge admission time, primary wins, D1 overloads and failures together. The
+250/100 ms values are bounded starting policies, not measured production optima.
 
 Queue-overload retries back off by 250/500/1000 ms plus up to an equal amount
 of jitter. Other transient failures retain 40/80/160 ms plus jitter. Replica
@@ -259,7 +277,6 @@ Traceway's non-stream impact score includes successful requests that exceed
 its Apdex latency bound. Its volume-based explanation must describe these as
 slow or failing requests, rather than HTTP errors. Use request-list HTTP status
 statistics and gateway header timings to distinguish latency from availability.
-
 
 ## Large-NAR resumes and refusal diagnostics
 

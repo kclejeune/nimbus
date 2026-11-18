@@ -153,7 +153,7 @@ it('preserves the original transient error when neither source succeeds', async 
 	await Promise.all(tasks);
 });
 
-it('rescues a second stalled read after the cooldown without raising the primary start rate', async () => {
+it('rescues a second stalled read sooner after a fast primary win', async () => {
 	const { db, ctx, primary, tasks, withSession } = source();
 	const aReplica = deferred<string>();
 	const bReplica = deferred<string>();
@@ -168,12 +168,12 @@ it('rescues a second stalled read after the cooldown without raising the primary
 	await vi.advanceTimersByTimeAsync(500);
 	expect(await a).toBe('primary');
 	expect(starts).toHaveLength(1);
-	await vi.advanceTimersByTimeAsync(999);
+	await vi.advanceTimersByTimeAsync(249);
 	expect(starts).toHaveLength(1);
-	await vi.advanceTimersByTimeAsync(26);
+	await vi.advanceTimersByTimeAsync(51);
 	expect(await b).toBe('primary');
 	expect(starts).toHaveLength(2);
-	expect(starts[1] - starts[0]).toBeGreaterThanOrEqual(1000);
+	expect(starts[1] - starts[0]).toBeGreaterThanOrEqual(250);
 	expect(withSession.mock.calls.filter(([c]) => c === 'first-unconstrained')).toHaveLength(2);
 	aReplica.resolve('late A');
 	bReplica.resolve('late B');
@@ -215,7 +215,7 @@ it('does not delay or spin on a transient replica failure while the primary budg
 	await Promise.all([a, ...tasks]);
 });
 
-it('keeps the same primary rate cap when a burst of pending reads retries admission', async () => {
+it('bounds fast primary starts to four per second during a healthy burst', async () => {
 	const { db, ctx, primary, tasks } = source();
 	const replicas = Array.from({ length: 8 }, () => deferred<string>());
 	const starts: number[] = [];
@@ -227,9 +227,9 @@ it('keeps the same primary rate cap when a burst of pending reads retries admiss
 		})
 	);
 	await vi.advanceTimersByTimeAsync(3600);
-	expect(starts).toHaveLength(4);
+	expect(starts).toHaveLength(8);
 	for (let i = 1; i < starts.length; i++)
-		expect(starts[i] - starts[i - 1]).toBeGreaterThanOrEqual(1000);
+		expect(starts[i] - starts[i - 1]).toBeGreaterThanOrEqual(250);
 	for (const replica of replicas) replica.resolve('replica');
 	await Promise.all([...reads, ...tasks]);
 	expect(vi.getTimerCount()).toBe(0);
@@ -391,3 +391,165 @@ it.each(['synchronous', 'asynchronous'])(
 		expect(d1OverloadDelay()).toBe(2_000);
 	}
 );
+
+it('keeps one active primary and the one-second spacing when primaries are slow', async () => {
+	vi.spyOn(Math, 'random').mockReturnValue(0);
+	const { db, ctx, primary, tasks } = source();
+	const replicas = Array.from({ length: 6 }, () => deferred<string>());
+	let active = 0,
+		maxActive = 0;
+	const starts: number[] = [];
+	const results = replicas.map((replica) =>
+		hedge(db, ctx, async (session) => {
+			if (session !== primary) return replica.promise;
+			starts.push(Date.now());
+			maxActive = Math.max(maxActive, ++active);
+			await new Promise((r) => setTimeout(r, 200));
+			active--;
+			return 'primary';
+		})
+	);
+	await vi.advanceTimersByTimeAsync(3600);
+	expect(starts).toHaveLength(4);
+	expect(maxActive).toBe(1);
+	for (let i = 1; i < starts.length; i++)
+		expect(starts[i] - starts[i - 1]).toBeGreaterThanOrEqual(1000);
+	for (const replica of replicas) replica.resolve('replica');
+	await vi.advanceTimersByTimeAsync(200);
+	await Promise.all([...results, ...tasks]);
+	expect(vi.getTimerCount()).toBe(0);
+});
+it('does not accelerate after a fast primary that loses to its replica', async () => {
+	vi.spyOn(Math, 'random').mockReturnValue(0);
+	const { db, ctx, primary, tasks } = source();
+	const aReplica = deferred<string>(),
+		aPrimary = deferred<string>(),
+		bReplica = deferred<string>();
+	const starts: number[] = [];
+	const a = hedge(db, ctx, (s) =>
+		s === primary ? (starts.push(Date.now()), aPrimary.promise) : aReplica.promise
+	);
+	await vi.advanceTimersByTimeAsync(500);
+	await vi.advanceTimersByTimeAsync(10);
+	aReplica.resolve('replica');
+	await a;
+	await vi.advanceTimersByTimeAsync(21);
+	aPrimary.resolve('late primary');
+	await vi.advanceTimersByTimeAsync(0);
+	const b = hedge(db, ctx, async (s) => {
+		if (s !== primary) return bReplica.promise;
+		starts.push(Date.now());
+		return 'primary';
+	});
+	await vi.advanceTimersByTimeAsync(968);
+	expect(starts).toHaveLength(1);
+	await vi.advanceTimersByTimeAsync(1);
+	expect(await b).toBe('primary');
+	expect(starts[1] - starts[0]).toBe(1000);
+	bReplica.resolve('late');
+	await Promise.all(tasks);
+});
+it('does not accelerate an overload-driven recovery even when its primary succeeds quickly', async () => {
+	vi.spyOn(Math, 'random').mockReturnValue(0);
+	const { noteD1Overload } = await import('./d1-pressure');
+	const { db, ctx, primary, tasks } = source();
+	const starts: number[] = [];
+	const error = new Error(
+		'D1_ERROR: Your account is generating too much load on D1 DBs. Please back off and try again later.'
+	);
+	noteD1Overload(error);
+	const a = hedge(db, ctx, async (s) => {
+		if (s !== primary) throw error;
+		starts.push(Date.now());
+		return 'primary';
+	});
+	await vi.advanceTimersByTimeAsync(2000);
+	expect(await a).toBe('primary');
+	const replica = deferred<string>();
+	const b = hedge(db, ctx, async (s) => {
+		if (s !== primary) return replica.promise;
+		starts.push(Date.now());
+		return 'primary';
+	});
+	await vi.advanceTimersByTimeAsync(999);
+	expect(starts).toHaveLength(1);
+	await vi.advanceTimersByTimeAsync(1);
+	expect(await b).toBe('primary');
+	expect(starts[1] - starts[0]).toBe(1000);
+	replica.resolve('late');
+	await Promise.all(tasks);
+});
+it('shortens a six-read replica stall while retaining a single active primary', async () => {
+	vi.spyOn(Math, 'random').mockReturnValue(0);
+	const log = vi.spyOn(console, 'log');
+	const { db, ctx, primary, tasks } = source();
+	const began = Date.now();
+	let active = 0,
+		maxActive = 0;
+	const starts: number[] = [],
+		finished: number[] = [];
+	const results = Array.from({ length: 6 }, () =>
+		hedge(db, ctx, async (s) => {
+			if (s !== primary) {
+				await new Promise((r) => setTimeout(r, 2500));
+				return 'replica';
+			}
+			starts.push(Date.now() - began);
+			maxActive = Math.max(maxActive, ++active);
+			await new Promise((r) => setTimeout(r, 31));
+			active--;
+			return 'primary';
+		}).then((result) => {
+			finished.push(Date.now() - began);
+			return result;
+		})
+	);
+	await vi.advanceTimersByTimeAsync(2000);
+	expect(finished).toHaveLength(6);
+	expect(maxActive).toBe(1);
+	expect(starts).toEqual([500, 750, 1000, 1250, 1500, 1750]);
+	expect(Math.max(...finished)).toBe(1781);
+	await vi.advanceTimersByTimeAsync(500);
+	expect(await Promise.all(results)).toEqual(Array(6).fill('primary'));
+	await Promise.all(tasks);
+	expect(log.mock.calls.map(([entry]) => JSON.parse(String(entry)))).toContainEqual(
+		expect.objectContaining({
+			event: 'nimbus.d1_hedge',
+			winner: 'primary',
+			primaryMs: 31,
+			admissionMs: 1250,
+			hedgeAfterMs: 1750
+		})
+	);
+});
+
+it('new account pressure overrides the faster admission earned by an earlier primary win', async () => {
+	vi.spyOn(Math, 'random').mockReturnValue(0);
+	const { noteD1Overload } = await import('./d1-pressure');
+	const { db, ctx, primary, tasks } = source();
+	const aReplica = deferred<string>(),
+		bReplica = deferred<string>();
+	const starts: number[] = [];
+	const read = (replica: Promise<string>) => async (session: D1Database) => {
+		if (session !== primary) return replica;
+		starts.push(Date.now());
+		return 'primary';
+	};
+	const a = hedge(db, ctx, read(aReplica.promise));
+	await vi.advanceTimersByTimeAsync(500);
+	expect(await a).toBe('primary');
+	noteD1Overload(
+		new Error(
+			'D1_ERROR: Your account is generating too much load on D1 DBs. Please back off and try again later.'
+		)
+	);
+	const b = hedge(db, ctx, read(bReplica.promise));
+	await vi.advanceTimersByTimeAsync(1999);
+	expect(starts).toHaveLength(1);
+	await vi.advanceTimersByTimeAsync(1);
+	expect(await b).toBe('primary');
+	expect(starts[1] - starts[0]).toBe(2000);
+	aReplica.resolve('late A');
+	bReplica.resolve('late B');
+	await Promise.all(tasks);
+});

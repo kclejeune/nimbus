@@ -7,6 +7,8 @@ import { settled, valueOf } from './result';
 
 const HEDGE_AFTER_MS = 500;
 const HEDGE_INTERVAL_MS = 1_000;
+const FAST_HEDGE_INTERVAL_MS = 250;
+const FAST_PRIMARY_MS = 100;
 const HEDGE_LEASE_MS = 60_000;
 const HEDGE_POLL_MS = 250;
 let active: { deadline: number } | undefined;
@@ -18,7 +20,8 @@ function admissionWait(
 	replicaError?: unknown
 ): { reason: 'active' | 'rate' | 'overload'; delay: number } | null {
 	if (active && active.deadline > now) return { reason: 'active', delay: HEDGE_POLL_MS };
-	if (now < nextAllowed) return { reason: 'rate', delay: nextAllowed - now };
+	if (now < nextAllowed)
+		return { reason: 'rate', delay: Math.min(nextAllowed - now, HEDGE_POLL_MS) };
 	// Overload failures also back off; connection failures still fail over.
 	const overload =
 		replicaError !== undefined && !isD1Overload(replicaError) ? 0 : d1OverloadDelay();
@@ -29,8 +32,10 @@ function admissionWait(
 /** SELECT-only, replica-tolerant reads. Slow replicas get one separately
  * routed primary attempt; the first successful read wins (including empty
  * results). Primary-required confirmations never use this helper. At most
- * one hedge owns a live lease and one starts per second per isolate, so an
- * outage cannot multiply every cold read against the write primary. Leases
+ * one hedge owns a live lease. Starts are one second apart unless a primary
+ * wins within 100 ms without observed pressure: then the next start may be
+ * 250 ms later. Slow, failed or losing primaries retain the one-second gap.
+ * Start spacing and the overload cooldown bound extra primary work. Leases
  * expire if a request is abandoned without running its finally. No I/O
  * promise is shared across requests; the losing read stays in its own waitUntil.
  * A pending replica rechecks admission rather than forfeiting its hedge for
@@ -56,6 +61,7 @@ async function hedgedRead<T>(
 	const startedAt = Date.now();
 	const replica = settled(Promise.resolve().then(() => read(readSession(db))));
 	let first = await withinMs(replica, HEDGE_AFTER_MS);
+	const admissionStartedAt = Date.now();
 	// One log line per wait reason: admission can alternate during a burst.
 	const logged = new Set<string>();
 	while (true) {
@@ -82,14 +88,22 @@ async function hedgedRead<T>(
 		// promise. Rechecking and taking the lease below have no intervening await.
 		first = await withinMs(replica, wait.delay + Math.random() * 25);
 	}
-	const lease = { deadline: Date.now() + HEDGE_LEASE_MS };
+	const primaryStartedAt = Date.now();
+	const admissionMs = primaryStartedAt - admissionStartedAt;
+	const lease = { deadline: primaryStartedAt + HEDGE_LEASE_MS };
 	active = lease;
-	nextAllowed = Date.now() + HEDGE_INTERVAL_MS;
+	nextAllowed = primaryStartedAt + HEDGE_INTERVAL_MS;
 	const reason = first ? 'error' : 'slow';
 	const replicaOverloaded = !!first && !first.ok && isD1Overload(first.error);
-	const primary = settled(Promise.resolve().then(() => read(primarySession(db)))).finally(() => {
-		if (active === lease) active = undefined;
-	});
+	let primaryMs: number | undefined;
+	const primary = settled(Promise.resolve().then(() => read(primarySession(db))))
+		.then((result) => {
+			primaryMs = Date.now() - primaryStartedAt;
+			return result;
+		})
+		.finally(() => {
+			if (active === lease) active = undefined;
+		});
 	ctx.waitUntil(Promise.all([replica, primary]).then(() => {}));
 	let winner: 'replica' | 'primary' | 'none' = 'none';
 	try {
@@ -98,6 +112,16 @@ async function hedgedRead<T>(
 			primary.then((r) => ({ source: 'primary' as const, value: valueOf(r) }))
 		]);
 		winner = result.source;
+		if (
+			winner === 'primary' &&
+			!replicaOverloaded &&
+			budget.used === 0 &&
+			primaryMs !== undefined &&
+			primaryMs <= FAST_PRIMARY_MS &&
+			d1OverloadDelay() === 0 &&
+			nextAllowed === primaryStartedAt + HEDGE_INTERVAL_MS
+		)
+			nextAllowed = primaryStartedAt + FAST_HEDGE_INTERVAL_MS;
 		return result.value;
 	} catch {
 		// Preserve the replica's original error classification if both fail.
@@ -108,6 +132,9 @@ async function hedgedRead<T>(
 				event: 'nimbus.d1_hedge',
 				reason,
 				replicaOverloaded,
+				admissionMs,
+				hedgeAfterMs: primaryStartedAt - startedAt,
+				primaryMs,
 				readRetries: budget.used,
 				winner,
 				ms: Date.now() - startedAt
