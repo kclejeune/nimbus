@@ -8,6 +8,7 @@ export const GC_SQL_BUDGET_MS = 1_000;
 export const GC_WRITE_BUDGET_ROWS = 1_000;
 const RESOURCE_WINDOW_ERROR = /too many resources consumed within a 10 second window/i;
 const pacers = new WeakMap<D1Database, GcPacer>();
+export type GcBudget = 'sql' | 'writes' | 'deadline';
 
 export const isGcResourceError = (error: unknown): boolean =>
 	RESOURCE_WINDOW_ERROR.test(String(error)) || isD1Overload(error);
@@ -15,7 +16,8 @@ export const isGcResourceError = (error: unknown): boolean =>
 export class GcDeferred extends Error {
 	constructor(
 		readonly until: number,
-		readonly reason: 'resources' | 'budget'
+		readonly reason: 'resources' | 'budget',
+		readonly budgets: GcBudget[] = []
 	) {
 		super(`GC deferred: ${reason}`);
 	}
@@ -33,6 +35,19 @@ export class GcPacer {
 		private background = false,
 		private deadline = Infinity
 	) {}
+
+	/** Include every exhausted budget; deferred errors retain the trigger snapshot. */
+	get budgets(): GcBudget[] {
+		if (this.deferred) return this.deferred.budgets;
+		const now = Date.now();
+		const recent = this.recent.filter((s) => s.at + GC_WINDOW_MS > now);
+		const budgets: GcBudget[] = [];
+		if (recent.reduce((sum, s) => sum + s.ms, 0) >= GC_SQL_BUDGET_MS) budgets.push('sql');
+		if (recent.reduce((sum, s) => sum + s.written, 0) >= GC_WRITE_BUDGET_ROWS)
+			budgets.push('writes');
+		if (this.background && now >= this.deadline) budgets.push('deadline');
+		return budgets;
+	}
 
 	private delay(): number {
 		const now = Date.now();
@@ -69,7 +84,7 @@ export class GcPacer {
 	}
 
 	yield(until = this.resumeAt): never {
-		this.deferred = new GcDeferred(Math.max(Date.now(), until), 'budget');
+		this.deferred = new GcDeferred(Math.max(Date.now(), until), 'budget', this.budgets);
 		throw this.deferred;
 	}
 

@@ -224,7 +224,12 @@ query or reachability/deletion unit can exceed them. Background GC yields to
 cron when its budget or 20-second slice is exhausted; it does not accumulate
 pacing sleeps inside a phase. Root refreshes checkpoint each completed
 read/update pair, and orphan cleanup checkpoints preparation and bounded chunk
-batches. Integrity monitoring checkpoints its probe separately, then counts
+batches. Upstream-verdict pruning scans 256 rows at a time using the existing
+`(upstream_id, store_path_hash)` primary key and deletes at most 48 expired keys
+per statement. It saves a fixed cutoff time, upper key and continuation cursor
+in the GC job. Each deletion rechecks expiry and the current upstream TTL,
+so concurrent verdict refreshes survive; completed chunks can resume without
+restarting the table scan. Integrity monitoring checkpoints its probe separately, then counts
 and collects examples in pages of 256 objects. Automatic broken-closure
 discovery scans 512 reference hashes at a time and saves covered-window cursors
 before yielding; the same cache resumes on the next cron. Interactive Settings
@@ -239,7 +244,12 @@ afresh on resume. The admin Settings page queues manual collection and preview
 through the same resumable cron job; direct API/CLI GC retains inline pacing.
 The `nimbus.gc.phase` and
 `nimbus.gc.deferred` events report cumulative SQL time, rows read/written,
-statement counts and pacing waits for that invocation.
+statement counts and pacing waits for that invocation. Budget yields include
+`budgets`, an array containing `sql`, `writes`, and/or `deadline`; multiple
+exhausted budgets are reported together. Deferred logs retain `reason=budget`
+and capture the limits at the time of the yield. Phase-completion logs include
+`yielded` and the same budget details when the next phase is deferred, even
+when no exception was thrown. Resource failures remain `reason=resources`.
 
 The existing purge Durable Object remains optional and recommended for global
 tag batching and prompt repair recovery. Without it, purges use the existing

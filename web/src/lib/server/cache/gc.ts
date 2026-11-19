@@ -237,6 +237,7 @@ interface GcProgress {
 	rootAfter?: number;
 	orphanPrepared?: boolean;
 	chunkAfter?: number;
+	upstreamPrune?: UpstreamPruneProgress;
 	brokenCacheId?: number;
 	brokenWork?: BrokenGcProgress;
 	integrityWork?: {
@@ -445,17 +446,20 @@ export async function continueScheduledGc(
 			}
 			job.nextAt = Math.max(Date.now(), pacer.resumeAt);
 			await save();
+			const budgets = pacer.budgets;
+			const yielded = complete === false || job.nextAt > Date.now() || budgets.includes('deadline');
 			console.log(
 				JSON.stringify({
 					event: 'nimbus.gc.phase',
 					phase: name,
 					complete: complete !== false,
 					startedAt: job.startedAt,
+					yielded,
+					budgets: yielded ? budgets : undefined,
 					...pacer.totals
 				})
 			);
-			if (complete === false || job.nextAt > Date.now() || Date.now() - started >= GC_SLICE_MS)
-				return;
+			if (yielded) return;
 		}
 		await dbRun(
 			db
@@ -490,6 +494,7 @@ export async function continueScheduledGc(
 				phase: job?.phase,
 				resumeAt,
 				reason: deferred?.reason ?? 'error',
+				budgets: deferred?.reason === 'budget' ? deferred.budgets : undefined,
 				error: String(error),
 				...pacer.totals
 			})
@@ -617,7 +622,12 @@ function gcPhases(
 				console.warn('gc: revoked_token cleanup failed', e)
 			);
 		}),
-		write('upstream-prune', () => pruneUpstreamChecks(db)),
+		[
+			'upstream-prune',
+			async () => {
+				if (!dry) await pruneUpstreamChecks(db, progress, checkpoint);
+			}
+		],
 		[
 			'root-stats',
 			async () => {
@@ -1938,27 +1948,103 @@ async function reapOrphans(
 	}
 }
 
-/** Bound the upstream_check cache: recheck absents daily, presents eventually.
- * Rows whose registry entry was deleted go immediately.
- *
- * A full scan by design — the alternative index bills more in writes than the
- * nightly scan costs in reads (schema/migrations/2026-07-27-index-cleanup.sql).
- * The two cutoffs stay in one statement because splitting them buys nothing
- * without that index. */
-export async function pruneUpstreamChecks(db: D1): Promise<void> {
-	const absentCutoff = new Date(Date.now() - UPSTREAM_ABSENT_TTL_SECS * 1000).toISOString();
-	const presentCutoff = new Date(Date.now() - UPSTREAM_PRESENT_TTL_SECS * 1000).toISOString();
-	await db
-		.batch([
-			db
+interface UpstreamCheckKey {
+	upstream_id: number;
+	store_path_hash: string;
+}
+interface UpstreamPruneProgress {
+	at: string;
+	through?: UpstreamCheckKey;
+	after?: UpstreamCheckKey;
+}
+const UPSTREAM_PRUNE_SCAN_ROWS = 256;
+// Two key bindings per row, plus the three cutoff bindings, below D1's limit.
+const UPSTREAM_PRUNE_DELETE_ROWS = Math.floor((PARAM_BATCH - 3) / 2);
+const upstreamCheckExpired =
+	`(present = ${VERDICT_ABSENT} AND checked_at < ?1) ` +
+	`OR (present <> ${VERDICT_ABSENT} AND checked_at < ?2 ` +
+	'AND julianday(checked_at) < julianday(?3) - ' +
+	'(SELECT ttl FROM upstream WHERE id = upstream_id) / 86400.0) ' +
+	'OR NOT EXISTS (SELECT 1 FROM upstream WHERE id = upstream_id)';
+
+/** Scan the verdict table once in bounded primary-key windows. No expiry
+ * index: its hot-write cost exceeds the nightly scan saving. Fixed cutoffs
+ * and an upper key keep this run finite under concurrent pushes. Every
+ * DELETE rechecks expiry, so a verdict refreshed after selection survives.
+ * A lost deletion response may replay a window; deleting expired keys is
+ * idempotent, and the cursor advances only after a confirmed batch.
+ */
+export async function pruneUpstreamChecks(
+	db: D1,
+	progress: { upstreamPrune?: UpstreamPruneProgress } = {},
+	checkpoint: () => Promise<void> = async () => {}
+): Promise<void> {
+	const work = (progress.upstreamPrune ??= { at: new Date().toISOString() });
+	if (!work.through) {
+		const last = await db
+			.prepare(
+				'SELECT upstream_id, store_path_hash FROM upstream_check ' +
+					'ORDER BY upstream_id DESC, store_path_hash DESC LIMIT 1'
+			)
+			.first<UpstreamCheckKey>();
+		if (!last) {
+			delete progress.upstreamPrune;
+			return;
+		}
+		work.through = last;
+		await checkpoint();
+	}
+	const at = new Date(work.at).getTime();
+	const cutoffs = [
+		new Date(at - UPSTREAM_ABSENT_TTL_SECS * 1000).toISOString(),
+		new Date(at - UPSTREAM_PRESENT_TTL_SECS * 1000).toISOString(),
+		work.at
+	];
+	while (true) {
+		const complete = await gcWorkUnit(db, async () => {
+			const after = work.after;
+			const { results: rows } = await db
 				.prepare(
-					`DELETE FROM upstream_check WHERE (present = ${VERDICT_ABSENT} AND checked_at < ?1) ` +
-						`OR (present <> ${VERDICT_ABSENT} AND checked_at < ?2 ` +
-						'AND julianday(checked_at) < julianday(?3) - ' +
-						'(SELECT ttl FROM upstream WHERE id = upstream_id) / 86400.0)'
+					`SELECT upstream_id, store_path_hash, (${upstreamCheckExpired}) AS expired ` +
+						'FROM upstream_check WHERE (upstream_id, store_path_hash) <= (?4, ?5) ' +
+						(after ? 'AND (upstream_id, store_path_hash) > (?6, ?7) ' : '') +
+						`ORDER BY upstream_id, store_path_hash LIMIT ${UPSTREAM_PRUNE_SCAN_ROWS}`
 				)
-				.bind(absentCutoff, presentCutoff, new Date().toISOString()),
-			db.prepare('DELETE FROM upstream_check WHERE upstream_id NOT IN (SELECT id FROM upstream)')
-		])
-		.catch((e) => console.warn(`gc: upstream_check prune failed: ${e}`));
+				.bind(
+					...cutoffs,
+					work.through!.upstream_id,
+					work.through!.store_path_hash,
+					...(after ? [after.upstream_id, after.store_path_hash] : [])
+				)
+				.all<UpstreamCheckKey & { expired: number }>();
+			if (!rows.length) return true;
+			let pending: UpstreamCheckKey[] = [];
+			for (let i = 0; i < rows.length; i++) {
+				const row = rows[i];
+				if (row.expired) pending.push(row);
+				if (pending.length < UPSTREAM_PRUNE_DELETE_ROWS && i < rows.length - 1) continue;
+				if (pending.length) {
+					const keys = pending.map((_, j) => `(?${4 + j * 2}, ?${5 + j * 2})`).join(',');
+					await db
+						.prepare(
+							`DELETE FROM upstream_check WHERE (${upstreamCheckExpired}) ` +
+								`AND (upstream_id, store_path_hash) IN (${keys})`
+						)
+						.bind(...cutoffs, ...pending.flatMap((r) => [r.upstream_id, r.store_path_hash]))
+						.run();
+					pending = [];
+				}
+				work.after = { upstream_id: row.upstream_id, store_path_hash: row.store_path_hash };
+				// Selection is not permission to delete later: the SQL above checks
+				// current expiry. Each committed chunk is a safe checkpoint even
+				// inside this page's work unit, before any more writes begin.
+				await checkpoint();
+			}
+			return rows.length < UPSTREAM_PRUNE_SCAN_ROWS;
+		});
+		if (complete) {
+			delete progress.upstreamPrune;
+			return;
+		}
+	}
 }

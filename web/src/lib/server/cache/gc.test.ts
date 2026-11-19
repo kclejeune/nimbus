@@ -86,6 +86,7 @@ it.each([0, 4])(
 	'checkpoints a fast reference write burst in phase %i before any graph deletion, then resumes safely',
 	async (phase) => {
 		vi.useFakeTimers();
+		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 		const f = fixture(20);
 		const refs = JSON.stringify(
 			Array.from({ length: 100 }, (_, i) => `${String(i + 100).padStart(32, '0')}-dependency`)
@@ -118,6 +119,12 @@ it.each([0, 4])(
 		expect(watermark).toBeGreaterThan(0);
 		expect(watermark).toBeLessThan(20);
 		expect(f.count('object_ref')).toBe(watermark * 100);
+		expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toContainEqual(
+			expect.objectContaining({
+				event: phase === 0 ? 'nimbus.gc.phase' : 'nimbus.gc.deferred',
+				budgets: ['writes']
+			})
+		);
 		for (let i = 0; f.job() && i < 10; i++) {
 			vi.advanceTimersByTime(60_000);
 			await continueScheduledGc(f.env);
@@ -126,6 +133,79 @@ it.each([0, 4])(
 		expect(f.count('object')).toBe(0);
 	}
 );
+
+it.each(['sql', 'writes', 'deadline'] as const)(
+	'logs a %s yield between completed phases',
+	async (budget) => {
+		vi.useFakeTimers();
+		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+		const f = fixture();
+		await queueGc(f.env);
+		f.sqlite.exec("UPDATE server_config SET value=json_set(value,'$.phase',9) WHERE key='gc_job'");
+		const prepare = f.db.prepare.bind(f.db);
+		vi.spyOn(f.db, 'prepare').mockImplementation((sql) => {
+			const stmt = prepare(sql);
+			if (sql.startsWith('DELETE FROM device_auth')) {
+				const run = stmt.run.bind(stmt);
+				stmt.run = async <T>() => {
+					const result = await run<T>();
+					result.meta.duration = budget === 'sql' ? 1_000 : 0;
+					result.meta.rows_written = budget === 'writes' ? 1_000 : 0;
+					if (budget === 'deadline') vi.advanceTimersByTime(21_000);
+					return result;
+				};
+			}
+			return stmt;
+		});
+		await continueScheduledGc(f.env);
+		expect(f.job().phase).toBe(10);
+		expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toContainEqual(
+			expect.objectContaining({
+				event: 'nimbus.gc.phase',
+				phase: 'tokens',
+				complete: true,
+				yielded: true,
+				budgets: [budget]
+			})
+		);
+	}
+);
+
+it('persists upstream-prune progress on write pressure and resumes later phases', async () => {
+	vi.useFakeTimers();
+	vi.spyOn(console, 'log').mockImplementation(() => {});
+	const f = fixture();
+	f.sqlite.exec(
+		"INSERT INTO upstream(id,url,public_key,ttl,created_at) VALUES(1,'https://upstream.test','key',86400,'2026-01-01')"
+	);
+	const insert = f.sqlite.prepare('INSERT INTO upstream_check VALUES(1,?,0,?)');
+	for (let i = 0; i < 600; i++)
+		insert.run(String(i).padStart(32, '0'), new Date(Date.now() - 3 * 86400_000).toISOString());
+	await queueGc(f.env);
+	f.sqlite.exec("UPDATE server_config SET value=json_set(value,'$.phase',10) WHERE key='gc_job'");
+	const prepare = f.db.prepare.bind(f.db);
+	vi.spyOn(f.db, 'prepare').mockImplementation((sql) => {
+		const stmt = prepare(sql);
+		if (sql.startsWith('DELETE FROM upstream_check')) {
+			const run = stmt.run.bind(stmt);
+			stmt.run = async <T>() => {
+				const result = await run<T>();
+				result.meta.rows_written = result.meta.changes * 3;
+				return result;
+			};
+		}
+		return stmt;
+	});
+	await continueScheduledGc(f.env);
+	expect(f.job()).toMatchObject({ phase: 10, upstreamPrune: { after: { upstream_id: 1 } } });
+	expect(f.count('upstream_check')).toBeGreaterThan(0);
+	expect(f.count('upstream_check')).toBeLessThan(600);
+	vi.advanceTimersByTime(60_000);
+	await continueScheduledGc(f.env);
+	expect(f.job()).toBeNull();
+	expect(f.count('upstream_check')).toBe(0);
+	expect(await readGcOperation(f.db)).toMatchObject({ state: 'complete' });
+});
 
 it('retains committed deletion receipts when a later phase fails and resumes that phase', async () => {
 	const f = fixture();

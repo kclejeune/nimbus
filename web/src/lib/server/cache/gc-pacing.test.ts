@@ -60,6 +60,22 @@ it('defers fast write bursts even when they consume little SQL time', async () =
 	expect(vi.getTimerCount()).toBe(0);
 });
 
+it.each([
+	{ ms: 1_000, written: 0, budgets: ['sql'] },
+	{ ms: 0, written: 1_000, budgets: ['writes'] },
+	{ ms: 1_000, written: 1_000, budgets: ['sql', 'writes'] }
+])(
+	'reports the exhausted budgets and retains the trigger snapshot: $budgets',
+	async ({ ms, written, budgets }) => {
+		const p = new GcPacer(true);
+		await p.run(async () => ({ meta: { duration: ms, rows_written: written } }));
+		expect(p.budgets).toEqual(budgets);
+		await expect(p.run(async () => result(0))).rejects.toMatchObject({ reason: 'budget', budgets });
+		vi.advanceTimersByTime(20_000);
+		expect(p.budgets).toEqual(budgets);
+	}
+);
+
 it('waits for both SQL and write pressure to age out of the rolling window', async () => {
 	const p = new GcPacer();
 	await p.workUnit(async () => {
@@ -175,7 +191,7 @@ it('stops new background queries at the slice deadline without a timer', async (
 	await p.run(async () => result(0));
 	vi.advanceTimersByTime(20_000);
 	const next = vi.fn(async () => result(0));
-	await expect(p.run(next)).rejects.toBeInstanceOf(GcDeferred);
+	await expect(p.run(next)).rejects.toMatchObject({ reason: 'budget', budgets: ['deadline'] });
 	expect(next).not.toHaveBeenCalled();
 	expect(vi.getTimerCount()).toBe(0);
 });
