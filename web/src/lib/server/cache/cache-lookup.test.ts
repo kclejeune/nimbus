@@ -55,7 +55,36 @@ describe('findCacheCached', () => {
 	});
 	afterEach(() => {
 		vi.useRealTimers();
+		vi.restoreAllMocks();
 		invalidateCacheRow();
+	});
+
+	it('reports slow fresh lookups without serving an expired visibility row', async () => {
+		vi.useFakeTimers();
+		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+		const all = vi
+			.fn()
+			.mockResolvedValueOnce({ results: [ROW] })
+			.mockImplementationOnce(async () => {
+				await new Promise((resolve) => setTimeout(resolve, 700));
+				return { results: [] };
+			});
+		const db = { prepare: () => ({ bind: () => ({ all }) }) } as unknown as D1Database;
+		expect(await findCacheCached(db, 'visibility')).toEqual(ROW);
+		vi.advanceTimersByTime(30_001);
+		const pending = findCacheCached(db, 'visibility');
+		await vi.advanceTimersByTimeAsync(700);
+		expect(await pending).toBeNull();
+		expect(all).toHaveBeenCalledTimes(2);
+		expect(log).toHaveBeenCalledWith(
+			JSON.stringify({
+				event: 'nimbus.cache_lookup',
+				cache: 'visibility',
+				loaded: true,
+				outcome: 'missing',
+				ms: 700
+			})
+		);
 	});
 
 	it('reads once, then serves the memo within the TTL', async () => {

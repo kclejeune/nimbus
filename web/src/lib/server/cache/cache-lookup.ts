@@ -76,12 +76,26 @@ export async function findCacheCached(
 	ctx?: ExecutionContext,
 	admit?: () => Promise<void>
 ): Promise<CacheRow | null> {
-	return cacheRowMemo.get(
-		name,
-		async () => {
-			if (admit) await admit();
-			return hedgedReplicaRead(db, ctx, (session) => findCache(session, name));
-		},
-		(row) => (row ? CACHE_ROW_TTL_MS : CACHE_ROW_MISS_TTL_MS)
-	);
+	const started = Date.now();
+	let loaded = false;
+	let outcome = 'error';
+	try {
+		const row = await cacheRowMemo.get(
+			name,
+			async () => {
+				loaded = true;
+				if (admit) await admit();
+				return hedgedReplicaRead(db, ctx, (session) => findCache(session, name));
+			},
+			(row) => (row ? CACHE_ROW_TTL_MS : CACHE_ROW_MISS_TTL_MS)
+		);
+		outcome = row ? 'found' : 'missing';
+		return row;
+	} finally {
+		const ms = Date.now() - started;
+		if (ms >= 500)
+			console.log(
+				JSON.stringify({ event: 'nimbus.cache_lookup', cache: name, loaded, outcome, ms })
+			);
+	}
 }

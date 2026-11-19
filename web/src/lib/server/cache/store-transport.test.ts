@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { AdmissionError } from './admission';
+import { noteD1Overload } from './d1-pressure';
 import type { ExecutionContext } from './platform';
 import {
 	readViaStore,
@@ -8,6 +9,8 @@ import {
 	withStoreRecovery,
 	STORE_BODY_IDLE_TIMEOUT_MS,
 	STORE_HEADER_TIMEOUT_MS,
+	STORE_METADATA_HEADER_TIMEOUT_MS,
+	STORE_NARINFO_HEADER_TIMEOUT_MS,
 	STORE_BEST_EFFORT_TIMEOUT_MS
 } from './store-transport';
 
@@ -180,6 +183,92 @@ it('abandons stalled cache headers and cleans up a late response without delayin
 	expect(cancel).toHaveBeenCalledOnce();
 	expect(direct).toHaveBeenCalledOnce();
 	expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each(['/_meta/path/hash', '/_upstream_config/1', '/_manifest/cache/hash'])(
+	'recovers pure metadata headers promptly for %s, with one independent attempt',
+	async (path) => {
+		vi.useFakeTimers();
+		const direct = vi.fn(async () => new Response('recovered'));
+		const fetch = vi.fn(() => new Promise<Response>(() => {}));
+		const pending = readViaStore(context(fetch), new Request('https://cache.test' + path), direct);
+		await vi.advanceTimersByTimeAsync(STORE_METADATA_HEADER_TIMEOUT_MS - 1);
+		expect(direct).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(await (await pending).text()).toBe('recovered');
+		expect(direct).toHaveBeenCalledOnce();
+		expect(fetch).toHaveBeenCalledOnce();
+	}
+);
+
+it('allows a five-second upstream probe in a combined narinfo envelope, then bounds stalled headers', async () => {
+	vi.useFakeTimers();
+	const direct = vi.fn(async () => new Response('recovered'));
+	const req = new Request('https://cache.test/_anonymous_narinfo_v2/hash');
+	const fetch = vi.fn(async () => {
+		await new Promise((r) => setTimeout(r, 5_500));
+		return new Response('upstream');
+	});
+	const pending = readViaStore(context(fetch), req, direct);
+	await vi.advanceTimersByTimeAsync(5_500);
+	expect(await (await pending).text()).toBe('upstream');
+	expect(direct).not.toHaveBeenCalled();
+	const stalled = readViaStore(
+		context(() => new Promise<Response>(() => {})),
+		req,
+		direct
+	);
+	await vi.advanceTimersByTimeAsync(STORE_NARINFO_HEADER_TIMEOUT_MS);
+	expect(await (await stalled).text()).toBe('recovered');
+	expect(direct).toHaveBeenCalledOnce();
+});
+
+it.each(['before', 'during'] as const)(
+	'retains the old deadline when D1 overload is observed %s a metadata wait',
+	async (when) => {
+		vi.useFakeTimers();
+		// Past times keep this file's isolate-local pressure from leaking into real-clock tests.
+		vi.setSystemTime(when === 'before' ? 100_000 : 200_000);
+		const overload = new Error('D1 DB is overloaded. Requests queued for too long.');
+		if (when === 'before') noteD1Overload(overload);
+		let resolve!: (response: Response) => void;
+		const direct = vi.fn(async () => new Response('direct'));
+		const pending = readViaStore(
+			context(
+				() =>
+					new Promise<Response>((r) => {
+						resolve = r;
+					})
+			),
+			new Request('https://cache.test/_meta/path/hash'),
+			direct
+		);
+		await vi.advanceTimersByTimeAsync(STORE_METADATA_HEADER_TIMEOUT_MS - 100);
+		if (when === 'during') noteD1Overload(overload);
+		await vi.advanceTimersByTimeAsync(101);
+		expect(direct).not.toHaveBeenCalled();
+		resolve(new Response('original read'));
+		expect(await (await pending).text()).toBe('original read');
+		expect(direct).not.toHaveBeenCalled();
+	}
+);
+
+it('keeps overload grace bounded to ten seconds and makes just one recovery attempt', async () => {
+	vi.useFakeTimers();
+	vi.setSystemTime(300_000);
+	const direct = vi.fn(async () => new Response('recovered'));
+	const pending = readViaStore(
+		context(() => new Promise<Response>(() => {})),
+		new Request('https://cache.test/_meta/path/hash'),
+		direct
+	);
+	await vi.advanceTimersByTimeAsync(STORE_METADATA_HEADER_TIMEOUT_MS - 100);
+	noteD1Overload(new Error('D1 DB is overloaded'));
+	await vi.advanceTimersByTimeAsync(
+		STORE_HEADER_TIMEOUT_MS - STORE_METADATA_HEADER_TIMEOUT_MS + 100
+	);
+	expect(await (await pending).text()).toBe('recovered');
+	expect(direct).toHaveBeenCalledOnce();
 });
 
 it.each([502, 520])(

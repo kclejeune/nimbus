@@ -3,11 +3,16 @@ import { countLoopbackFallback } from './latency';
 import { BODY_READ_BYTES, withinMs, type BatchReader, type ExecutionContext } from './platform';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { withSpan } from './tracing';
+import { d1OverloadDelay } from './d1-pressure';
 
 // Leave room for upstream probes' five-second timeout and normal backend
 // work, but bound the 60–70 s caching-pipeline stalls seen in production.
 // Only one uncached attempt follows, with normal backend admission intact.
 export const STORE_HEADER_TIMEOUT_MS = 10_000;
+// Nov 18 metadata p99 was ~1.3 s; a failed loopback still cost 10 s before
+// recovery. Keep a larger allowance where an upstream probe can take 5 s.
+export const STORE_METADATA_HEADER_TIMEOUT_MS = 3_000;
+export const STORE_NARINFO_HEADER_TIMEOUT_MS = 8_000;
 export const STORE_BEST_EFFORT_TIMEOUT_MS = 1_000;
 export const STORE_BODY_IDLE_TIMEOUT_MS = 15_000;
 const BODY_READ_BUFFER_BYTES = 128 * 1024;
@@ -282,15 +287,35 @@ async function readStore(
 	internal.headers.set(STORE_REQUEST_ID_HEADER, requestId);
 	const started = performance.now();
 	const pending = store.fetch(internal);
+	const path = new URL(request.url).pathname;
+	let timeoutMs = bestEffort
+		? STORE_BEST_EFFORT_TIMEOUT_MS
+		: d1OverloadDelay() > 0
+			? STORE_HEADER_TIMEOUT_MS
+			: path.startsWith('/_anonymous_narinfo_v2/')
+				? STORE_NARINFO_HEADER_TIMEOUT_MS
+				: /^\/_(?:meta|upstream_config|manifest)\//.test(path)
+					? STORE_METADATA_HEADER_TIMEOUT_MS
+					: STORE_HEADER_TIMEOUT_MS;
 	// Transport exceptions retain the caller's existing recovery policy (the
 	// combined narinfo route retries through separate cached metadata/body reads).
 	const response = await withSpan(ctx, 'store loopback headers', async (span) => {
 		span?.setAttribute('nimbus.store_request_id', requestId);
 		try {
-			const result = await withinMs(
-				pending,
-				bestEffort ? STORE_BEST_EFFORT_TIMEOUT_MS : STORE_HEADER_TIMEOUT_MS
-			);
+			let result = await withinMs(pending, timeoutMs);
+			// Pressure observed while this call waited should not turn an early
+			// transport recovery into another D1 attempt during the same burst.
+			// Keep waiting on this call's original I/O, up to the old deadline.
+			if (
+				!result &&
+				!bestEffort &&
+				timeoutMs < STORE_HEADER_TIMEOUT_MS &&
+				!request.signal.aborted &&
+				d1OverloadDelay() > 0
+			) {
+				timeoutMs = STORE_HEADER_TIMEOUT_MS;
+				result = await withinMs(pending, Math.max(0, timeoutMs - (performance.now() - started)));
+			}
 			span?.setAttribute('http.response.status_code', result?.status ?? 0);
 			return result;
 		} catch (error) {
@@ -313,6 +338,7 @@ async function readStore(
 					requestId,
 					status: response.status,
 					headerMs,
+					timeoutMs,
 					edge: response.headers.get('CF-Cache-Status'),
 					age: response.headers.get('Age')
 				})
@@ -325,6 +351,7 @@ async function readStore(
 		reason,
 		requestId,
 		headerMs,
+		timeoutMs,
 		...(bestEffort ? { recovery: 'skipped' } : {})
 	});
 	// Abort is best-effort: a transport that ignores the signal may still

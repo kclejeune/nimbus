@@ -153,6 +153,14 @@ are pressure too, and share the same cooldown and retry classification.
 `nimbus.d1_hedge` now records `admissionMs`, `hedgeAfterMs` and `primaryMs`,
 separating time waiting for admission from the successful database call.
 
+Slow cache-row lookups also emit `nimbus.cache_lookup` after 500 ms, with the
+cache name, elapsed time, result (`found`, `missing`, `error`) and whether this
+caller ran the loader (`loaded`) or waited for a shared result. Correlate these
+with D1 spans and hedge events: a Nov 18 lookup spent 7.1 seconds in D1 despite
+0.39 ms of SQL, and both attempts were served by the primary. The 30-second
+visibility memo and its invalidation rules remain unchanged; these diagnostics
+do not justify serving expired authorization data or issuing a third read.
+
 A controlled timer fixture compared six concurrent 2.5-second replica reads
 with 31 ms primary reads. The old policy's median and last completion were
 2,500/2,500 ms; the adaptive policy's were 1,156/1,781 ms. Both kept one active
@@ -180,8 +188,20 @@ must not add a retry burst when reads are already under pressure.
 Retention loopbacks have a separate one-second header deadline and never
 recover a failed loopback with another origin read. A failed touch backs off
 all touch keys in that isolate for five seconds; explicit D1 overload also
-defers touch work in both the gateway and origin. Required reads keep their
-ten-second transport deadline and recovery policy. The internal touch request
+defers touch work in both the gateway and origin. Pure metadata loopbacks
+(`/_meta`, `/_upstream_config`, `/_manifest`) have a three-second header
+deadline; combined anonymous narinfo envelopes have eight seconds, allowing
+a five-second upstream probe plus metadata work. Other required reads retain
+ten seconds. Each timeout still makes at most one independent origin recovery
+with normal admission, and only that request's recovery path bypasses caching.
+Known isolate-local D1 overload retains the ten-second bound. If pressure
+appears during a shorter wait, the call waits on its original I/O until that
+same ten-second bound rather than starting another read during the burst.
+These are tunable starting bounds: Nov 18's matched metadata p99 was about
+1.3 seconds, while one stalled combined loopback consumed ten seconds before
+useful recovery began. Compare `nimbus.store_transport.timeoutMs`, recovery
+counts, D1 pressure and foreground header tails after changing them. Body
+guards and range recovery are unchanged. The internal touch request
 stamps a deadline that is checked before the probe and again before UPDATE,
 together with cancellation and overload: a delayed/abandoned probe must not
 start a late primary write, even if the RPC ignores abort. Already-issued D1

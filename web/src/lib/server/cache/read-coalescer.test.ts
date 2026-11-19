@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { ReadCoalescer } from './read-coalescer';
-import { readViaStore, STORE_HEADER_TIMEOUT_MS } from './store-transport';
+import { readViaStore, STORE_METADATA_HEADER_TIMEOUT_MS } from './store-transport';
 import type { ExecutionContext } from './platform';
 
 afterEach(() => vi.useRealTimers());
@@ -143,7 +143,7 @@ it('starts a fresh read at loopback timeout even when a leader never settles', a
 		new Request('https://cache.test/_meta/path/a'),
 		async () => new Response(await reads.get('path:a', fresh))
 	).then(async (response) => received(await response.text()));
-	await vi.advanceTimersByTimeAsync(STORE_HEADER_TIMEOUT_MS - 1);
+	await vi.advanceTimersByTimeAsync(STORE_METADATA_HEADER_TIMEOUT_MS - 1);
 	expect(fresh).not.toHaveBeenCalled();
 	await vi.advanceTimersByTimeAsync(1);
 	expect(fresh).toHaveBeenCalledOnce();
