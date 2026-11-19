@@ -50,6 +50,59 @@ async function pushAndSync(seed: number) {
 }
 
 describe('syncObjectRefs', () => {
+	it.each([100, 300])(
+		'bounds a reference window with %i refs per object and resumes atomically',
+		async (refs) => {
+			const { sqlite, db } = testDatabase();
+			try {
+				sqlite.exec(
+					"INSERT INTO cache(id,name,keypair,created_at) VALUES(1,'cache','key','2026-01-01'); INSERT INTO nar(id,nar_hash,nar_size,created_at) VALUES(1,'nar',1,'2026-01-01')"
+				);
+				const insert = sqlite.prepare(
+					'INSERT INTO object(id,cache_id,nar_id,store_path_hash,store_path,refs,created_at) VALUES(?,1,1,?,?,?,?)'
+				);
+				for (let i = 1; i <= 6; i++)
+					insert.run(
+						i,
+						hashOf(i),
+						`/nix/store/${hashOf(i)}-parent`,
+						JSON.stringify(Array.from({ length: refs }, (_, j) => `${hashOf(100 + j)}-child`)),
+						'2026-01-01'
+					);
+				expect(await syncObjectRefs(db, undefined, () => true)).toBe(false);
+				const end = refs === 100 ? 2 : 1;
+				expect(
+					sqlite.prepare("SELECT value FROM server_config WHERE key='ref_sync_watermark'").get()!
+						.value
+				).toBe(String(end));
+				expect(sqlite.prepare('SELECT COUNT(*) AS n FROM object_ref').get()!.n).toBe(end * refs);
+				expect(await syncObjectRefs(db)).toBe(true);
+				expect(sqlite.prepare('SELECT COUNT(*) AS n FROM object_ref').get()!.n).toBe(6 * refs);
+				expect(
+					sqlite.prepare("SELECT value FROM server_config WHERE key='ref_sync_watermark'").get()!
+						.value
+				).toBe('6');
+			} finally {
+				sqlite.close();
+			}
+		}
+	);
+	it('advances over sparse ID ranges even when the bounded window contains no objects', async () => {
+		const { sqlite, db } = testDatabase();
+		try {
+			sqlite.exec(
+				"INSERT INTO cache(id,name,keypair,created_at) VALUES(1,'cache','key','2026-01-01'); INSERT INTO nar(id,nar_hash,nar_size,created_at) VALUES(1,'nar',1,'2026-01-01'); INSERT INTO object(id,cache_id,nar_id,store_path_hash,store_path,refs,created_at) VALUES(120,1,1,'parent','parent','[]','2026-01-01')"
+			);
+			expect(await syncObjectRefs(db)).toBe(true);
+			expect(
+				sqlite.prepare("SELECT value FROM server_config WHERE key='ref_sync_watermark'").get()!
+					.value
+			).toBe('120');
+		} finally {
+			sqlite.close();
+		}
+	});
+
 	it('links every edge to its child in the same cache, whatever the push order', async () => {
 		for (let seed = 1; seed <= 25; seed++) {
 			const sqlite = await pushAndSync(seed);

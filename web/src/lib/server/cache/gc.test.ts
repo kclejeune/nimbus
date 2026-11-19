@@ -82,6 +82,51 @@ it('persists reference windows and resumes without replaying completed sync', as
 	).toBe('120');
 });
 
+it.each([0, 4])(
+	'checkpoints a fast reference write burst in phase %i before any graph deletion, then resumes safely',
+	async (phase) => {
+		vi.useFakeTimers();
+		const f = fixture(20);
+		const refs = JSON.stringify(
+			Array.from({ length: 100 }, (_, i) => `${String(i + 100).padStart(32, '0')}-dependency`)
+		);
+		f.sqlite.prepare('UPDATE object SET refs=?').run(refs);
+		const batch = f.db.batch.bind(f.db);
+		vi.spyOn(f.db, 'batch').mockImplementation(async (statements) => {
+			const rows = await batch(statements);
+			// Fast SQL still needs a write limit; retain the actual row counts.
+			for (const row of rows) {
+				row.meta.duration = 0.01;
+				row.meta.timings = { sql_duration_ms: 0.01 };
+				row.meta.rows_written = row.meta.changes;
+			}
+			return rows;
+		});
+		if (phase > 0) {
+			await queueGc(f.env);
+			f.sqlite
+				.prepare("UPDATE server_config SET value=json_set(value,'$.phase',?) WHERE key='gc_job'")
+				.run(phase);
+		}
+		await continueScheduledGc(f.env, undefined, true);
+		expect(f.job().phase).toBe(phase);
+		expect(f.count('object')).toBe(20);
+		const watermark = Number(
+			f.sqlite.prepare("SELECT value FROM server_config WHERE key='ref_sync_watermark'").get()!
+				.value
+		);
+		expect(watermark).toBeGreaterThan(0);
+		expect(watermark).toBeLessThan(20);
+		expect(f.count('object_ref')).toBe(watermark * 100);
+		for (let i = 0; f.job() && i < 10; i++) {
+			vi.advanceTimersByTime(60_000);
+			await continueScheduledGc(f.env);
+		}
+		expect(f.job()).toBeNull();
+		expect(f.count('object')).toBe(0);
+	}
+);
+
 it('retains committed deletion receipts when a later phase fails and resumes that phase', async () => {
 	const f = fixture();
 	const prepare = f.db.prepare.bind(f.db);

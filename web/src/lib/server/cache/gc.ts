@@ -52,6 +52,10 @@ const ABANDONED_CACHE_GRACE_SECS = 7 * 24 * 60 * 60;
 const UPSTREAM_ABSENT_TTL_SECS = 24 * 60 * 60;
 const UPSTREAM_PRESENT_TTL_SECS = 90 * 24 * 60 * 60;
 const REF_SYNC_BATCH = 50;
+// Bound ordinary fanout before committing a batch, rather than discovering
+// thousands of edge writes only after the SQL-time pacer has allowed them.
+// One large object's edges stay atomic with its watermark and may exceed this.
+const REF_SYNC_MAX_REFS = 250;
 const R2_DELETE_BATCH = 1000;
 /**
  * Doomed objects fetched per evaluation of the reachability CTE in the
@@ -800,7 +804,24 @@ export async function syncObjectRefs(
 
 	let batchSize = REF_SYNC_BATCH;
 	for (let start = bounds.watermark; start < bounds.max_id;) {
-		const end = Math.min(start + batchSize, bounds.max_id);
+		let end = Math.min(start + batchSize, bounds.max_id);
+		const { results: window } = await db
+			.prepare(
+				'SELECT id, json_array_length(refs) AS refs FROM object ' +
+					'WHERE id > ?1 AND id <= ?2 ORDER BY id'
+			)
+			.bind(start, end)
+			.all<{ id: number; refs: number }>();
+		let refs = 0;
+		let last = start;
+		for (const object of window) {
+			if (last > start && refs + object.refs > REF_SYNC_MAX_REFS) {
+				end = last;
+				break;
+			}
+			refs += object.refs;
+			last = object.id;
+		}
 		const results = await db.batch([
 			db
 				.prepare(
@@ -1105,7 +1126,9 @@ async function retentionPass(
 function gcGraphWork<T>(db: D1, work: () => Promise<T>): Promise<T> {
 	return gcWorkUnit(db, async () => {
 		await syncObjectRefs(db, undefined, () => {
-			gcCheckDeadline(db);
+			// Each window has committed its watermark; yielding here is safe
+			// because no deletion victims have been selected yet.
+			gcCheckpoint(db);
 			return false;
 		});
 		gcCheckDeadline(db);

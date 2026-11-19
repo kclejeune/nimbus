@@ -213,10 +213,14 @@ current phase, and counters may undercount work committed before cancellation.
 Deletion receipts in `path_purge` survive independently and are committed in
 the same transaction as metadata removal.
 
-The initial pacing policy allows about one second of reported SQL execution
-per ten-second window. Reference windows start at 50 objects and adapt to
-fanout. This is a soft application budget, not a Cloudflare quota: a single
-query or reachability/deletion unit can exceed it. Background GC yields to
+The pacing policy allows about one second of reported SQL execution and
+1,000 reported row writes per ten-second window. Fast bulk writes can otherwise
+consume substantial primary capacity without exhausting the SQL-time budget.
+Reference windows inspect at most 50 object IDs and target at most 250 source
+references before adapting to SQL cost. An individual object's edges and
+watermark stay atomic, so one unusually large object can exceed that target.
+These are soft application budgets, not Cloudflare quotas: a single
+query or reachability/deletion unit can exceed them. Background GC yields to
 cron when its budget or 20-second slice is exhausted; it does not accumulate
 pacing sleeps inside a phase. Root refreshes checkpoint each completed
 read/update pair, and orphan cleanup checkpoints preparation and bounded chunk

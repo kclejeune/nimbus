@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { GcDeferred, GcPacer, gcWorkUnit, pacedGcDatabase } from './gc-pacing';
+import {
+	GcDeferred,
+	GcPacer,
+	GC_WRITE_BUDGET_ROWS,
+	gcWorkUnit,
+	pacedGcDatabase
+} from './gc-pacing';
 import { testDatabase } from './test-db';
 
 beforeEach(() => {
@@ -42,6 +48,32 @@ it('does not let parallel callers spend the same remaining budget', async () => 
 	await vi.advanceTimersByTimeAsync(10_000);
 	await Promise.all(work);
 	expect(calls).toEqual([0, 1, 2]);
+});
+
+it('defers fast write bursts even when they consume little SQL time', async () => {
+	const p = new GcPacer(true);
+	await p.run(async () => ({ meta: { duration: 1, rows_written: GC_WRITE_BUDGET_ROWS } }));
+	const next = vi.fn(async () => result(1));
+	await expect(p.run(next)).rejects.toBeInstanceOf(GcDeferred);
+	expect(next).not.toHaveBeenCalled();
+	expect(p.resumeAt).toBe(Date.now() + 10_000);
+	expect(vi.getTimerCount()).toBe(0);
+});
+
+it('waits for both SQL and write pressure to age out of the rolling window', async () => {
+	const p = new GcPacer();
+	await p.workUnit(async () => {
+		await p.run(async () => result(1_000));
+		vi.advanceTimersByTime(5_000);
+		await p.run(async () => ({ meta: { duration: 0, rows_written: GC_WRITE_BUDGET_ROWS } }));
+	});
+	const next = vi.fn(async () => result(1));
+	const pending = p.run(next);
+	await vi.advanceTimersByTimeAsync(5_000);
+	expect(next).not.toHaveBeenCalled();
+	await vi.advanceTimersByTimeAsync(5_000);
+	await pending;
+	expect(next).toHaveBeenCalledOnce();
 });
 
 it.each([

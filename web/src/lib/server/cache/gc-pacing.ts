@@ -5,6 +5,7 @@ import { isD1Overload, noteD1Overload } from './d1-pressure';
 /** Maintenance policy, not a D1 quota: leave headroom for foreground work. */
 export const GC_WINDOW_MS = 10_000;
 export const GC_SQL_BUDGET_MS = 1_000;
+export const GC_WRITE_BUDGET_ROWS = 1_000;
 const RESOURCE_WINDOW_ERROR = /too many resources consumed within a 10 second window/i;
 const pacers = new WeakMap<D1Database, GcPacer>();
 
@@ -22,7 +23,7 @@ export class GcDeferred extends Error {
 
 /** One invocation's accounting. No promises escape to another I/O context. */
 export class GcPacer {
-	private recent: { at: number; ms: number }[] = [];
+	private recent: { at: number; ms: number; written: number }[] = [];
 	private deferred: GcDeferred | undefined;
 	private tail: Promise<unknown> = Promise.resolve();
 	private workDepth = 0;
@@ -37,10 +38,13 @@ export class GcPacer {
 		const now = Date.now();
 		this.recent = this.recent.filter((s) => s.at + GC_WINDOW_MS > now);
 		let spent = this.recent.reduce((sum, s) => sum + s.ms, 0);
-		if (spent < GC_SQL_BUDGET_MS) return 0;
+		let written = this.recent.reduce((sum, s) => sum + s.written, 0);
+		if (spent < GC_SQL_BUDGET_MS && written < GC_WRITE_BUDGET_ROWS) return 0;
 		for (const sample of this.recent) {
 			spent -= sample.ms;
-			if (spent < GC_SQL_BUDGET_MS) return sample.at + GC_WINDOW_MS - now;
+			written -= sample.written;
+			if (spent < GC_SQL_BUDGET_MS && written < GC_WRITE_BUDGET_ROWS)
+				return sample.at + GC_WINDOW_MS - now;
 		}
 		return 0;
 	}
@@ -96,7 +100,8 @@ export class GcPacer {
 				for (const item of Array.isArray(value) ? value : [value]) {
 					const meta = item?.meta ?? item;
 					const ms = Number(meta?.timings?.sql_duration_ms ?? meta?.duration ?? 0);
-					if (ms > 0) this.recent.push({ at: Date.now(), ms });
+					const written = Number(meta?.rows_written ?? 0);
+					if (ms > 0 || written > 0) this.recent.push({ at: Date.now(), ms, written });
 					this.totals.sqlMs += ms;
 					this.totals.rowsRead += Number(meta?.rows_read ?? 0);
 					this.totals.rowsWritten += Number(meta?.rows_written ?? 0);
