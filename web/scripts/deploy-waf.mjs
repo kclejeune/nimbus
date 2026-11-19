@@ -288,14 +288,14 @@ if (BLOCKED_COUNTRIES.length > 0) {
 // because that is where volume and spend actually are.
 //
 // /api/auth/* uses AUTH_LIMITER in the Worker before session/auth work. It
-// cannot share this threshold: 5000/10s is meaningless for a login flow,
+// cannot share this threshold: 25000/10s is meaningless for a login flow,
 // while an auth-sized threshold would sever nix pulls.
 const ratelimitRules = [
 	{
-		// 5000/10s clears a single honest client's mass-substitution burst:
-		// nix runs up to 25 parallel connections against ~30-60ms edge hits
-		// (400-800 req/s peak), and edge cache hits still count against this
-		// phase. The rule's job is runaway loops and scrapers, not shaping.
+		// Faster cache hits and parallel CI work can exhaust the old 5000/10s
+		// allowance. Leave more room for substitution bursts; edge hits count
+		// here too. Backend admission separately bounds origin work, while
+		// this rule remains a coarse flood backstop.
 		description: 'cache: per-IP read flood backstop (narinfo + NAR paths)',
 		expression:
 			'(ends_with(http.request.uri.path, ".narinfo") or http.request.uri.path contains "/nar/")',
@@ -304,7 +304,7 @@ const ratelimitRules = [
 		ratelimit: {
 			characteristics: ['ip.src', 'cf.colo.id'],
 			period: 10,
-			requests_per_period: 5000,
+			requests_per_period: 25000,
 			mitigation_timeout: 10
 		}
 	}

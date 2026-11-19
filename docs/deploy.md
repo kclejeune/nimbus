@@ -338,7 +338,9 @@ custom-rule and rate-limit phases from your configured hostnames:
 - App host: block scanner paths and malformed requests.
 - Both hosts: block requests from the countries in `BLOCKED_COUNTRIES`
   (`CN`, `RU`; edit the list, or empty it, for your deployment).
-- Rate limit: 5000 `.narinfo`/`/nar/` requests per 10 s per IP and colo.
+- Rate limit: 25,000 `.narinfo`/`/nar/` requests per 10 s per IP and colo,
+  with a 10-second mitigation window. Backend-work admission remains separate;
+  this edge limit leaves headroom for fast cache hits and parallel CI pulls.
 
 The script **owns both phases for the whole zone**: every run replaces all
 custom and rate-limit WAF rules on it, including ones added in the dashboard
