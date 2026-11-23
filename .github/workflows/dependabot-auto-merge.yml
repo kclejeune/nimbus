@@ -4,27 +4,32 @@ name: Dependabot auto-merge
 #
 # gomod is safe to auto-merge because build validation is `goreleaser build
 # --clean --snapshot` (ci.yml), which never reads the flake, and the vendorHash
-# a Go bump invalidates is repaired on main by the vendor-hash.yml schedule.
-# Merges performed with GITHUB_TOKEN do not trigger push workflows.
+# a Go bump invalidates is repaired by vendor-hash.yml after the merge.
+# Use RELEASE_TOKEN for the merge so GitHub starts push workflows.
 #
-# This only queues the merge: the branch ruleset's required checks job still
-# has to pass before GitHub lands anything. Workflows on Dependabot PRs get
-# a read-only token by default; the permissions block below is what makes
-# `gh pr merge` possible. Release age is handled by dependabot.yml's cooldown.
+# Run from main so the job can read the Actions secret. This workflow only
+# reads PR metadata and checks and never checks out the PR or runs its code.
+# Release age is handled by dependabot.yml's cooldown.
 
-on: pull_request
+on:
+  pull_request_target:
+    branches: [main]
 
 jobs:
   auto-merge:
     name: auto-merge
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    # Job-scoped so a later job in this file starts read-only. This job never
-    # pushes — it only queues the merge — but contents:write is what lets
-    # GitHub perform that merge on its behalf.
+    timeout-minutes: 40
+    concurrency:
+      group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
-      contents: write
-      pull-requests: write
+      checks: read
+      contents: read
+      pull-requests: read
     steps:
       - name: Fetch Dependabot metadata
         id: meta
@@ -32,17 +37,42 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Queue auto-merge
+      - name: Wait for required checks
+        id: checks
         # For a grouped PR, update-type is the largest bump in the group, so a
         # major sneaking into a group still fails this test.
         # Metadata uses go_modules, while dependabot.yml calls it gomod.
         if: >-
           contains(fromJSON('["npm_and_yarn", "go_modules"]'), steps.meta.outputs.package-ecosystem) &&
           contains(fromJSON('["version-update:semver-patch", "version-update:semver-minor"]'), steps.meta.outputs.update-type)
-        run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # pull_request_target may start before CI registers its check runs.
+          for attempt in {1..12}; do
+            if gh pr checks "$PR_URL" --required --json name >/dev/null 2>&1; then
+              break
+            fi
+            sleep 5
+          done
+          gh pr checks "$PR_URL" --required --watch --fail-fast
+
+      - name: Squash-merge after CI
+        if: steps.checks.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo '::error::Set the Actions secret RELEASE_TOKEN to a Nimbus PAT with Contents: write.'
+            exit 1
+          fi
+          # The REST merge endpoint only needs Contents: write. The head
+          # guard ties the merge to the revision whose metadata was checked.
+          gh api --method PUT "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/merge" \
+            -f merge_method=squash -f sha="$HEAD_SHA"
 
       - name: Report the auto-merge decision
         env:
@@ -51,7 +81,7 @@ jobs:
           ELIGIBLE: ${{ contains(fromJSON('["npm_and_yarn", "go_modules"]'), steps.meta.outputs.package-ecosystem) && contains(fromJSON('["version-update:semver-patch", "version-update:semver-minor"]'), steps.meta.outputs.update-type) }}
         run: |
           if [[ "$ELIGIBLE" == true ]]; then
-            decision="Auto-merge enabled; required CI checks must pass."
+            decision="Auto-merged after required CI checks passed."
           else
             decision="Manual merge required: this ecosystem or update type is outside the auto-merge policy."
           fi
