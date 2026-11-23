@@ -1,15 +1,8 @@
-name: Dependabot auto-merge
+name: Dependency updates
 
-# npm and gomod, patch/minor only.
-#
-# gomod is safe to auto-merge because build validation is `goreleaser build
-# --clean --snapshot` (ci.yml), which never reads the flake, and the vendorHash
-# a Go bump invalidates is repaired by vendor-hash.yml after the merge.
-# Use RELEASE_TOKEN for the merge so GitHub starts push workflows.
-#
-# Run from main so the job can read the Actions secret. This workflow only
-# reads PR metadata and checks and never checks out the PR or runs its code.
-# Release age is handled by dependabot.yml's cooldown.
+# Refresh vendorHash on Go-module-only PRs from Dependabot or the owner.
+# Dependabot patch/minor updates to Go and npm still merge after required CI.
+# Run from main so only the base workflow and flake drive the update.
 
 on:
   pull_request_target:
@@ -19,23 +12,98 @@ jobs:
   auto-merge:
     name: auto-merge
     if: >-
-      github.event.pull_request.user.login == 'dependabot[bot]' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.user.login == 'dependabot[bot]' ||
+       github.event.pull_request.user.login == github.repository_owner) &&
+      (github.event.action != 'synchronize' ||
+       github.event.sender.login == github.event.pull_request.user.login)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     concurrency:
       group: dependabot-auto-merge-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
+      cancel-in-progress: false
     permissions:
       checks: read
       contents: read
       pull-requests: read
     steps:
       - name: Fetch Dependabot metadata
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
         id: meta
         uses: dependabot/fetch-metadata@v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Identify a Go-module-only update
+        if: github.event.pull_request.user.login == github.repository_owner || steps.meta.outputs.package-ecosystem == 'go_modules'
+        id: go-update
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$HEAD_SHA")
+          if jq -e '[.files[].filename] | length > 0 and all(. == "go.mod" or . == "go.sum")' <<< "$comparison" >/dev/null; then
+            echo "base-sha=$(jq -er .merge_base_commit.sha <<< "$comparison")" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.go-update.outputs.base-sha != ''
+        with:
+          ref: ${{ steps.go-update.outputs.base-sha }}
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@v31
+        if: steps.go-update.outputs.base-sha != ''
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Compute vendorHash using the base flake
+        if: steps.go-update.outputs.base-sha != ''
+        id: refresh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Read the manifest files as data. The flake and sources being built
+          # are from the merge base, which is an ancestor of main.
+          for file in go.mod go.sum; do
+            gh api -H 'Accept: application/vnd.github.raw+json' \
+              "repos/$GITHUB_REPOSITORY/contents/$file?ref=$HEAD_SHA" > "$file"
+          done
+          nix flake archive --no-update-lock-file --json > /dev/null
+          nix run --inputs-from . nixpkgs#nix-update -- --flake --version=skip nimbus
+          git diff -- pkgs/nimbus/default.nix > "$RUNNER_TEMP/vendor-hash.patch"
+          if [[ -s "$RUNNER_TEMP/vendor-hash.patch" ]]; then
+            echo 'stale=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit vendorHash to the PR
+        if: steps.refresh.outputs.stale == 'true'
+        id: update
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo '::error::Set the Actions secret RELEASE_TOKEN to a Nimbus PAT with Contents: write.'
+            exit 1
+          fi
+          git fetch --depth=1 origin "$HEAD_SHA"
+          git switch --discard-changes --detach "$HEAD_SHA"
+          git apply "$RUNNER_TEMP/vendor-hash.patch"
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m 'build(nix): refresh vendorHash for the dependency bump' -- pkgs/nimbus/default.nix
+          # The new commit extends the inspected revision. The lease rejects
+          # pushes to a branch that moved or was deleted in the meantime.
+          branch="refs/heads/$HEAD_REF"
+          git -c credential.helper= \
+            -c 'credential.https://github.com.helper=!gh auth git-credential' \
+            push --force-with-lease="$branch:$HEAD_SHA" origin "HEAD:$branch"
+          echo "head-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Wait for required checks
         id: checks
@@ -48,22 +116,27 @@ jobs:
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ steps.update.outputs.head-sha || github.event.pull_request.head.sha }}
         run: |
-          # pull_request_target may start before CI registers its check runs.
+          # Wait for GitHub to see the new head and register its check runs.
           for attempt in {1..12}; do
-            if gh pr checks "$PR_URL" --required --json name >/dev/null 2>&1; then
-              break
+            current_head=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+            if [[ "$current_head" == "$HEAD_SHA" ]] && gh pr checks "$PR_URL" --required --json name >/dev/null 2>&1; then
+              gh pr checks "$PR_URL" --required --watch --fail-fast
+              exit
             fi
             sleep 5
           done
-          gh pr checks "$PR_URL" --required --watch --fail-fast
+          echo '::error::Required checks were not registered for the expected PR head.'
+          exit 1
 
       - name: Squash-merge after CI
         if: steps.checks.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ steps.update.outputs.head-sha || github.event.pull_request.head.sha }}
         run: |
           if [[ -z "$GH_TOKEN" ]]; then
             echo '::error::Set the Actions secret RELEASE_TOKEN to a Nimbus PAT with Contents: write.'
@@ -75,6 +148,7 @@ jobs:
             -f merge_method=squash -f sha="$HEAD_SHA"
 
       - name: Report the auto-merge decision
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
           ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
           UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}

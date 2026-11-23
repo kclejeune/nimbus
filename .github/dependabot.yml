@@ -13,9 +13,9 @@
 version: 2
 updates:
   # A gomod bump invalidates pkgs/nimbus's vendorHash, which Dependabot cannot
-  # compute. Rather than block the PR on it, vendor-hash.yml repairs main right
-  # after the merge — so these can auto-merge like any other bump. Grouped to
-  # keep that repair to one commit per batch rather than one per module.
+  # compute. dependabot-auto-merge.yml refreshes it on the PR branch and waits
+  # for CI to build the updated Nix package before merging. Grouped updates
+  # need one refresh per batch.
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
