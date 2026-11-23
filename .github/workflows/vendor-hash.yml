@@ -1,14 +1,14 @@
 name: Vendor hash
 
 # A go.mod/go.sum change changes the vendored module set, which invalidates
-# pkgs/nimbus's vendorHash. Dependabot cannot produce the new hash, so rather
-# than block its PRs this job repairs main after the fact: it runs on the merge
-# commit and pushes the refreshed hash straight to main.
+# pkgs/nimbus's vendorHash. This job checks the current main and pushes the
+# refreshed hash when needed. Dependabot auto-merges use RELEASE_TOKEN so
+# they start this push workflow.
 #
 # That ordering is deliberate. PR-time build validation is `goreleaser build
 # --clean --snapshot` in ci.yml, which does not read the flake at all, so a
-# gomod PR can auto-merge on its own merits; main is briefly stale for the
-# minute or two this job takes, and then it is not.
+# gomod PR can auto-merge on its own merits. Use workflow_dispatch to repair
+# main immediately if a downstream consumer needs the new revision sooner.
 #
 # RELEASE_TOKEN is REQUIRED for the push, not an optimization. The main ruleset
 # requires a pull request, and its only bypass actor is the repo-admin role —
@@ -18,6 +18,7 @@ name: Vendor hash
 # existing bypass covers, and has the side benefit of retriggering CI.
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -26,13 +27,19 @@ on:
       - "go.mod"
       - "go.sum"
       - "flake.nix"
+      - "flake.lock"
       - "pkgs/nimbus/**"
+
+concurrency:
+  group: vendor-hash-main
+  cancel-in-progress: false
 
 # Declared on the job, not the workflow, so a job added here later starts
 # read-only rather than inheriting the push capability.
 jobs:
   vendor-hash:
     name: vendor-hash
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
