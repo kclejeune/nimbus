@@ -1,14 +1,7 @@
-name: Vendor hash
+name: Repair vendor hash on main
 
-# A go.mod/go.sum change changes the vendored module set, which invalidates
-# pkgs/nimbus's vendorHash. This job checks the current main and pushes the
-# refreshed hash when needed. Dependabot auto-merges use RELEASE_TOKEN so
-# they start this push workflow.
-#
-# That ordering is deliberate. PR-time build validation is `goreleaser build
-# --clean --snapshot` in ci.yml, which does not read the flake at all, so a
-# gomod PR can auto-merge on its own merits. Use workflow_dispatch to repair
-# main immediately if a downstream consumer needs the new revision sooner.
+# Dependency updates refresh vendorHash on the PR branch before CI builds
+# the package. Use this workflow manually if main ever needs a repair.
 #
 # RELEASE_TOKEN is REQUIRED for the push, not an optimization. The main ruleset
 # requires a pull request, and its only bypass actor is the repo-admin role —
@@ -19,16 +12,6 @@ name: Vendor hash
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/vendor-hash.yml"
-      - "go.mod"
-      - "go.sum"
-      - "flake.nix"
-      - "flake.lock"
-      - "pkgs/nimbus/**"
 
 concurrency:
   group: vendor-hash-main
@@ -77,7 +60,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'build(nix): refresh vendorHash for the dependency bump' -- pkgs/nimbus
-          # This push re-triggers the workflow (pkgs/nimbus is a trigger path);
-          # the rerun finds nothing stale and pushes nothing.
           git push origin HEAD:main
           echo "::notice::vendorHash was stale; refreshed it on main."

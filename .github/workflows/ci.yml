@@ -38,6 +38,13 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      - name: Detect Nix package changes
+        if: github.event_name == 'pull_request'
+        id: nix-package
+        run: |
+          if ! git diff --quiet HEAD^1 HEAD -- go.mod go.sum flake.nix flake.lock pkgs/nimbus; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -68,6 +75,14 @@ jobs:
           - name: Web formatting, types, tests, build, and preview
             run: npm run check
             working-directory: web
+      - uses: cachix/install-nix-action@v31
+        if: steps.nix-package.outputs.changed == 'true'
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build the Nix package
+        if: steps.nix-package.outputs.changed == 'true'
+        run: nix build --no-link --no-update-lock-file .#nimbus
       # Snapshot builds report ./VERSION rather than a version derived from the
       # last tag. GoReleaser cross-compiles the Linux and macOS release targets
       # with CGO_ENABLED=0; native macOS builds are unnecessary.
