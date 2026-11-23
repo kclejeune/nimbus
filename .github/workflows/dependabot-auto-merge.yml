@@ -4,8 +4,8 @@ name: Dependabot auto-merge
 #
 # gomod is safe to auto-merge because build validation is `goreleaser build
 # --clean --snapshot` (ci.yml), which never reads the flake, and the vendorHash
-# a Go bump invalidates is repaired on main by vendor-hash.yml straight after
-# the merge.
+# a Go bump invalidates is repaired on main by the vendor-hash.yml schedule.
+# Merges performed with GITHUB_TOKEN do not trigger push workflows.
 #
 # This only queues the merge: the branch ruleset's required checks job still
 # has to pass before GitHub lands anything. Workflows on Dependabot PRs get
